@@ -1015,110 +1015,54 @@ func TestReadExportAutoOnMissingFileReturnsAbsent(t *testing.T) {
 	}
 }
 
-func TestReadDoltConfig(t *testing.T) {
-	tests := []struct {
-		name      string
-		yaml      string
-		wantValue bool
-		wantOK    bool
-	}{
-		{
-			name:      "nested explicit false",
-			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: false\n",
-			wantValue: false,
-			wantOK:    true,
-		},
-		{
-			name:      "nested explicit true",
-			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: true\n",
-			wantValue: true,
-			wantOK:    true,
-		},
-		{
-			name:      "flat compatibility false",
-			yaml:      "issue_prefix: zz\ndolt.disable-event-flush: false\n",
-			wantValue: false,
-			wantOK:    true,
-		},
-		{
-			name:      "absent",
-			yaml:      "issue_prefix: zz\n",
-			wantValue: true,
-			wantOK:    false,
-		},
-		{
-			name:      "garbage value returns absent",
-			yaml:      "issue_prefix: zz\ndolt:\n  disable-event-flush: maybe\n",
-			wantValue: true,
-			wantOK:    false,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			fs := fsys.OSFS{}
-			dir := t.TempDir()
-			path := filepath.Join(dir, "config.yaml")
-			if err := fs.WriteFile(path, []byte(tt.yaml), 0o644); err != nil {
-				t.Fatal(err)
-			}
-
-			got, _, err := ReadDoltConfig(fs, path)
-			if err != nil {
-				t.Fatalf("ReadDoltConfig() error = %v", err)
-			}
-			gotOK := got.DisableEventFlush != nil
-			if gotOK != tt.wantOK {
-				t.Errorf("ReadDoltConfig().DisableEventFlush present = %v, want %v", gotOK, tt.wantOK)
-			}
-			if got.DisableEventFlushEnabled() != tt.wantValue {
-				t.Errorf("ReadDoltConfig().DisableEventFlushEnabled() = %v, want %v", got.DisableEventFlushEnabled(), tt.wantValue)
-			}
-		})
-	}
-}
-
-func TestReadDoltConfigFallsBackToNestedDisableEventFlushOnMalformedYAML(t *testing.T) {
+func TestReadSharedServerEnabled(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.yaml")
-	input := strings.Join([]string{
-		"issue_prefix: zz",
-		"dolt:",
-		"  disable-event-flush: false",
-		": not yaml",
-		"",
-	}, "\n")
-	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+	if err := fs.WriteFile(path, []byte("dolt.shared-server: true\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	got, ok, err := ReadDoltConfig(fs, path)
+	enabled, err := ReadSharedServerEnabled(fs, path)
 	if err != nil {
-		t.Fatalf("ReadDoltConfig() error = %v", err)
+		t.Fatalf("ReadSharedServerEnabled() error = %v", err)
 	}
-	if !ok {
-		t.Fatal("ReadDoltConfig() ok = false, want true")
-	}
-	if got.DisableEventFlush == nil || *got.DisableEventFlush {
-		t.Fatalf("ReadDoltConfig().DisableEventFlush = %v, want explicit false", got.DisableEventFlush)
+	if !enabled {
+		t.Fatal("ReadSharedServerEnabled() = false, want true")
 	}
 }
 
-func TestReadDoltConfigDefaultsDisableEventFlushOnMissingFile(t *testing.T) {
+func TestReadSharedServerEnabledFalseWhenNotSet(t *testing.T) {
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
-	path := filepath.Join(dir, "missing.yaml")
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte("dolt.auto-start: false\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
-	got, ok, err := ReadDoltConfig(fs, path)
+	enabled, err := ReadSharedServerEnabled(fs, path)
 	if err != nil {
-		t.Fatalf("ReadDoltConfig() error = %v, want nil for missing file", err)
+		t.Fatalf("ReadSharedServerEnabled() error = %v", err)
 	}
-	if ok {
-		t.Errorf("ReadDoltConfig() ok = true, want false for missing file")
+	if enabled {
+		t.Fatal("ReadSharedServerEnabled() = true, want false")
 	}
-	if !got.DisableEventFlushEnabled() {
-		t.Errorf("ReadDoltConfig().DisableEventFlushEnabled() = false, want default true")
+}
+
+func TestReadSharedServerEnabledFallsBackToLineScanOnMalformedYAML(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := fs.WriteFile(path, []byte("dolt.shared-server: true\n: not yaml\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	enabled, err := ReadSharedServerEnabled(fs, path)
+	if err != nil {
+		t.Fatalf("ReadSharedServerEnabled() error = %v", err)
+	}
+	if !enabled {
+		t.Fatal("ReadSharedServerEnabled() = false, want true")
 	}
 }
 

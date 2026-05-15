@@ -225,22 +225,24 @@ func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
 	return false, false, nil
 }
 
-// ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.
-func ReadDoltConfig(fs fsys.FS, path string) (DoltConfig, bool, error) {
+// ReadSharedServerEnabled reports whether dolt.shared-server is true in config.
+// When true, the city relies on an externally-managed shared Dolt server
+// rather than a gc-managed per-city instance.
+func ReadSharedServerEnabled(fs fsys.FS, path string) (bool, error) {
 	doc, err := readConfigDoc(fs, path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return DoltConfig{}, false, nil
+			return false, nil
 		}
-		if data, readErr := fs.ReadFile(path); readErr == nil {
-			if cfg, ok := readDoltConfigFromData(data); ok {
-				return cfg, true, nil
-			}
+		if value, ok := scanConfigLineValue(fs, path, "dolt.shared-server:"); ok {
+			return value == "true", nil
 		}
-		return DoltConfig{}, false, err
+		return false, err
 	}
-	cfg := readDoltConfigFromRoot(mappingRoot(doc))
-	return cfg, cfg.hasValues(), nil
+	if value, ok := configStringValue(mappingRoot(doc), "dolt.shared-server"); ok {
+		return value == "true", nil
+	}
+	return false, nil
 }
 
 // ReadEndpointStatus reads gc.endpoint_status when present.
