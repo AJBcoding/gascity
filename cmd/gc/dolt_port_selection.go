@@ -15,6 +15,20 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 	cityPath = normalizePathForCompare(cityPath)
 	envPort := strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
 
+	// If the city uses a shared dolt server, return the shared server port
+	// without attempting managed dolt state resolution.
+	if cityUsesSharedDoltServer(cityPath) {
+		port := resolveSharedDoltServerPort()
+		if port != "" {
+			return port, nil
+		}
+	}
+
+	// Also check if a shared server port is resolvable — rigs inherit the
+	// city's shared-server config but their own path won't have the flag.
+	// Fall back to shared server if available before hashing a new port.
+	sharedPort := resolveSharedDoltServerPort()
+
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
 		return "", err
@@ -71,8 +85,10 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 			return strconv.Itoa(repaired.Port), nil
 		}
 	}
-	if envPort != "" {
-		return envPort, nil
+	// No managed state found. Prefer the shared server port if available,
+	// otherwise hash city path into a deterministic port.
+	if sharedPort != "" {
+		return sharedPort, nil
 	}
 	seed := deterministicManagedDoltPortSeed(cityPath)
 	return strconv.Itoa(nextAvailableManagedDoltPort(seed)), nil
