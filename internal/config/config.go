@@ -1659,48 +1659,24 @@ type DoltConfig struct {
 	// 1 enables archive compaction (higher CPU on startup).
 	// nil (omitted) defaults to 0.
 	ArchiveLevel *int `toml:"archive_level,omitempty" jsonschema:"default=0"`
-	// MaxConnections overrides the managed Dolt listener max_connections.
-	// 0 means use the managed default.
-	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
-	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
-	// 0 means use the managed default.
-	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=30000"`
-	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
-	// 0 means use the managed default.
-	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
-}
-
-// EffectiveArchiveLevel returns the configured Dolt archive level, defaulting
-// omitted values to 0.
-func (d DoltConfig) EffectiveArchiveLevel() int {
-	if d.ArchiveLevel != nil {
-		return *d.ArchiveLevel
-	}
-	return 0
-}
-
-// EffectiveMaxConnections returns the managed Dolt listener max_connections.
-func (d DoltConfig) EffectiveMaxConnections() int {
-	if d.MaxConnections > 0 {
-		return d.MaxConnections
-	}
-	return DefaultDoltMaxConnections
-}
-
-// EffectiveReadTimeoutMillis returns the managed Dolt listener read timeout.
-func (d DoltConfig) EffectiveReadTimeoutMillis() int {
-	if d.ReadTimeoutMillis > 0 {
-		return d.ReadTimeoutMillis
-	}
-	return DefaultDoltReadTimeoutMillis
-}
-
-// EffectiveWriteTimeoutMillis returns the managed Dolt listener write timeout.
-func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
-	if d.WriteTimeoutMillis > 0 {
-		return d.WriteTimeoutMillis
-	}
-	return DefaultDoltWriteTimeoutMillis
+	// AutoGc controls whether Dolt's auto_gc behavior is enabled in the
+	// managed dolt-config.yaml. Accepted values:
+	//   "true" / "on" / "enabled"   → auto_gc_behavior.enable=true,
+	//                                  dolt_auto_gc_enabled="ON"
+	//   "false" / "off" / "disabled" → auto_gc_behavior.enable=false,
+	//                                   dolt_auto_gc_enabled="OFF"
+	// Empty (default) → "true". Override globally with env GC_DOLT_AUTO_GC.
+	// Note: dolt#10944's load-avg gate means upstream auto_gc may not fire
+	// in practice on busy machines; pair with `gc dolt compact` for
+	// guaranteed cleanup.
+	AutoGc string `toml:"auto_gc,omitempty" jsonschema:"default=true"`
+	// Autocommit controls Dolt's session-level autocommit behavior in the
+	// managed dolt-config.yaml. Accepted values:
+	//   "batch" / "off"   → behavior.autocommit=false (group writes, fewer
+	//                       commits — recommended for managed gas-city use)
+	//   "on" / "true"     → behavior.autocommit=true  (commit per statement)
+	// Empty (default) → "batch". Override globally with env GC_DOLT_AUTOCOMMIT.
+	Autocommit string `toml:"autocommit,omitempty" jsonschema:"default=batch"`
 }
 
 // FormulasConfig holds legacy formula directory settings.

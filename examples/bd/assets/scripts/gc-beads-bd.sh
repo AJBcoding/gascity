@@ -1188,9 +1188,7 @@ write_config_yaml() {
             --data-dir "$DATA_DIR" \
             --log-level "$DOLT_LOGLEVEL" \
             --archive-level "$archive_level" \
-            --max-connections "$max_connections" \
-            --read-timeout-millis "$read_timeout_millis" \
-            --write-timeout-millis "$write_timeout_millis" || die "failed to write managed dolt config via gc helper $gc_bin"
+            --city "$GC_CITY_PATH" || die "failed to write managed dolt config via gc helper $gc_bin"
         return 0
     fi
     wait_timeout_line='  wait_timeout: "30"'
