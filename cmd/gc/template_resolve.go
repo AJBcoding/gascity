@@ -312,35 +312,30 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		p.appendFragments,
 	)
 	providerKey, providerDisplayName := providerInfoForAgent(cfgAgent, p.workspace, p.providers)
-	packDirs := p.packDirs
-	if p.city != nil {
-		packDirs = p.city.PackDirsForRig(rigName)
-	}
-	beadsCfg := config.BeadsConfig{}
-	if p.city != nil {
-		beadsCfg = p.city.Beads
+	// Resolve workspace directories for prompt context.
+	var promptDirs map[string]string
+	if dirs := agentWorkspaceDirectories(cfgAgent, p.city); len(dirs) > 0 {
+		promptDirs = config.WorkspaceDirectoryMap(dirs)
 	}
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
-		CityRoot:                p.cityPath,
-		AgentName:               qualifiedName,
-		TemplateName:            cfgAgent.Name,
-		BindingName:             cfgAgent.BindingName,
-		BindingPrefix:           cfgAgent.BindingPrefix(),
-		RigName:                 rigName,
-		RigRoot:                 rigRoot,
-		WorkDir:                 workDir,
-		IssuePrefix:             findRigPrefix(rigName, p.rigs),
-		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
-		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryForBeads(beadsCfg), p.stderr),
-		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryForBeads(beadsCfg), p.stderr),
-		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryForBeads(beadsCfg), p.stderr),
-		WorkQuery:               expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQueryForBeads(beadsCfg), p.stderr),
-		SlingQuery:              expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
-		ProviderKey:             providerKey,
-		ProviderDisplayName:     providerDisplayName,
-		InstructionsFile:        instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
-		Env:                     cfgAgent.Env,
-	}, p.sessionTemplate, p.stderr, packDirs, fragments, p.beadStore)
+		CityRoot:            p.cityPath,
+		AgentName:           qualifiedName,
+		TemplateName:        cfgAgent.Name,
+		BindingName:         cfgAgent.BindingName,
+		BindingPrefix:       cfgAgent.BindingPrefix(),
+		RigName:             rigName,
+		RigRoot:             rigRoot,
+		WorkDir:             workDir,
+		IssuePrefix:         findRigPrefix(rigName, p.rigs),
+		DefaultBranch:       defaultBranchForRig(rigName, p.rigs, workDir),
+		WorkQuery:           expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "work_query", cfgAgent.EffectiveWorkQuery(), p.stderr),
+		SlingQuery:          expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "sling_query", cfgAgent.EffectiveSlingQuery(), p.stderr),
+		ProviderKey:         providerKey,
+		ProviderDisplayName: providerDisplayName,
+		InstructionsFile:    instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
+		Env:                 cfgAgent.Env,
+		Dirs:                promptDirs,
+	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
