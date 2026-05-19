@@ -523,19 +523,20 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 // init the directory, then install event hooks. The ordering matters
 // because init (bd init) may recreate .beads/ and wipe existing hooks.
 func initAndHookDir(cityPath, dir, prefix string) error {
-	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
-		return err
-	} else if usesPostgres {
+	// Check MySQL first: scopeUsesPostgresBackendForInit calls
+	// contract.LoadMetadataState, which rejects unknown backends including
+	// "mysql" with an error. The mysql check is a cheap direct read that
+	// tolerates any backend value.
+	if scopeUsesMySQLBackendForInit(dir) {
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
 		return nil
 	}
-	// MySQL-backed scopes: bd talks directly to MySQL using metadata.json
-	// connection params. Only install hooks; skip dolt-database verification
-	// and managed-port sync entirely.
-	if scopeUsesMySQLBackendForInit(dir) {
-		if err := installBeadHooks(dir); err != nil {
+	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
+		return err
+	} else if usesPostgres {
+		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
 		return nil
@@ -1527,6 +1528,10 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 			}
 		} else if ok && existing.Backend == "postgres" {
 			return nil
+		} else if ok && existing.Backend == "mysql" {
+			// MySQL-backed scopes manage their own metadata via bd. Do not
+			// rewrite to dolt-shaped canonical form.
+			return nil
 		}
 		if existing, ok, err := contract.ReadDoltDatabase(fs, path); err != nil {
 			return err
@@ -1621,13 +1626,8 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
 		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath); err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
-		} else if !usesPostgres {
-			doltDatabase := defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))
-			if cityUsesDoltliteBeadsBackend(cityPath) {
-				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
-					return fmt.Errorf("canonicalizing city doltlite metadata: %w", err)
-				}
-			} else if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
+		} else if !usesPostgres && !scopeUsesMySQLBackendForInit(cityPath) {
+			if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))); err != nil {
 				return fmt.Errorf("canonicalizing city metadata: %w", err)
 			}
 		}
@@ -1638,13 +1638,8 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		}
 		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cfg.Rigs[i].Path); err != nil {
 			return fmt.Errorf("classifying rig %q backend: %w", cfg.Rigs[i].Name, err)
-		} else if !usesPostgres {
-			doltDatabase := defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())
-			if cityUsesDoltliteBeadsBackend(cityPath) {
-				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, doltDatabase); err != nil {
-					return fmt.Errorf("canonicalizing rig %q doltlite metadata: %w", cfg.Rigs[i].Name, err)
-				}
-			} else if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, doltDatabase); err != nil {
+		} else if !usesPostgres && !scopeUsesMySQLBackendForInit(cfg.Rigs[i].Path) {
+			if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())); err != nil {
 				return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
 			}
 		}
@@ -1667,12 +1662,14 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	resolveRigPaths(cityPath, rigs)
 	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
 	cityUsesPostgres := false
+	cityUsesMySQL := false
 	if cityUsesBd {
 		usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
 		if err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
 		}
 		cityUsesPostgres = usesPostgres
+		cityUsesMySQL = scopeUsesMySQLBackendForInit(cityPath)
 	}
 	anyRigUsesBd := false
 	for _, rig := range rigs {
@@ -1699,10 +1696,12 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		managedPort = currentDoltPort(cityPath)
 	}
 	if cityUsesBd {
-		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
-			return err
+		if !cityUsesMySQL {
+			if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
+				return err
+			}
 		}
-		if !cityUsesPostgres {
+		if !cityUsesPostgres && !cityUsesMySQL {
 			if managedPort != "" {
 				writeDoltPortFile(cityPath, managedPort, "city", warn)
 			} else {
@@ -1719,6 +1718,11 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 			continue
 		}
 		if !rigUsesManagedBdStoreContract(cityPath, rig) {
+			removeDoltPortFile(rig.Path)
+			continue
+		}
+		// Skip dolt config/port management for mysql-backed rigs.
+		if scopeUsesMySQLBackendForInit(rig.Path) {
 			removeDoltPortFile(rig.Path)
 			continue
 		}

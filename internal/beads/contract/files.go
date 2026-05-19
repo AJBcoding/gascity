@@ -363,12 +363,12 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	}
 
 	switch state.Backend {
-	case "", "dolt", "doltlite", "postgres":
+	case "", "dolt", "postgres", "mysql":
 		// allowed
 	default:
 		return MetadataState{}, false, &MetadataParseError{
 			Path:   abs,
-			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, doltlite, postgres)", state.Backend),
+			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, postgres, mysql)", state.Backend),
 		}
 	}
 
