@@ -267,7 +267,17 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 // skipped init — the caller should tell the user it's deferred to gc start.
 func initDirIfReady(cityPath, dir, prefix string) (deferred bool, err error) {
 	provider := beadsProvider(cityPath)
-	if cityUsesManagedDoltBeadsLifecycle(cityPath) {
+	// MySQL-backed cities cascade to new rigs by running bd init --backend=mysql
+	// against the rig dir, then writing canonical metadata pointing at the
+	// city's database. The dolt-managed paths below are skipped entirely —
+	// mysql cities have no managed runtime to coordinate with.
+	if cityUsesMySQLBackend(cityPath) {
+		if err := initDirIfReadyManagedMysql(cityPath, dir, prefix); err != nil {
+			return false, err
+		}
+		return false, nil
+	}
+	if cityUsesBdStoreContract(cityPath) {
 		if gcDoltSkip() {
 			// Defer to controller/startup without forcing a new dolt_database:
 			// preserve existing metadata identity when present.
