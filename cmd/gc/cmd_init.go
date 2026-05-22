@@ -80,7 +80,7 @@ type wizardConfig struct {
 	provider         string // compatibility mirror for older internal callers
 	startCommand     string // custom start command (workspace-level)
 	bootstrapProfile string // hosted bootstrap profile, or "" for local defaults
-	err              error
+	mysql            initMysqlOptions
 }
 
 // defaultWizardConfig returns a non-interactive wizardConfig that produces
@@ -201,66 +201,64 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 	}
 
 	return wizardConfig{
-		interactive:     true,
-		configName:      configName,
-		defaultProvider: defaultProvider,
-		providers:       providers,
-		provider:        defaultProvider,
+		interactive:  true,
+		configName:   configName,
+		provider:     provider,
+		startCommand: startCommand,
+		mysql:        promptWizardBackend(br, stdout),
 	}
 }
 
-type wizardProviderChoice struct {
-	Name        string
-	DisplayName string
-}
+// promptWizardBackend asks the user whether the new city should use the
+// default managed-dolt backend or a MySQL backend. When mysql is selected,
+// also prompts for host/port/user/database (password is left for the env
+// var since we don't echo it). Returns an empty initMysqlOptions when dolt
+// is chosen — the regular gc init pipeline handles dolt natively.
+func promptWizardBackend(br *bufio.Reader, stdout io.Writer) initMysqlOptions {
+	fmt.Fprintln(stdout, "")                                               //nolint:errcheck
+	fmt.Fprintln(stdout, "Choose beads backend:")                          //nolint:errcheck
+	fmt.Fprintln(stdout, "  1. managed dolt — local, git-versioned (default)")  //nolint:errcheck
+	fmt.Fprintln(stdout, "  2. mysql        — external server, shared across rigs") //nolint:errcheck
+	fmt.Fprintf(stdout, "Backend [1]: ")                                   //nolint:errcheck
 
-func configuredWizardProviderChoices(ctx context.Context) ([]wizardProviderChoice, error) {
-	names := api.ProviderReadinessNames()
-	items, err := initProbeProvidersReadiness(ctx, names, true)
-	if err != nil {
-		return nil, fmt.Errorf("checking provider readiness: %w", err)
+	choice := readLine(br)
+	switch choice {
+	case "", "1", "dolt", "managed", "managed-dolt":
+		return initMysqlOptions{}
+	case "2", "mysql":
+		// fall through to prompts
+	default:
+		fmt.Fprintf(stdout, "Unknown backend %q, using managed dolt.\n", choice) //nolint:errcheck
+		return initMysqlOptions{}
 	}
-	choices := make([]wizardProviderChoice, 0, len(names))
-	builtins := config.BuiltinProviders()
-	for _, name := range names {
-		item, ok := items[name]
-		if !ok || item.Status != api.ProbeStatusConfigured {
-			continue
-		}
-		displayName := strings.TrimSpace(item.DisplayName)
-		if displayName == "" {
-			displayName = builtins[name].DisplayName
-		}
-		if displayName == "" {
-			displayName = name
-		}
-		choices = append(choices, wizardProviderChoice{Name: name, DisplayName: displayName})
-	}
-	return choices, nil
-}
 
-func providerChoiceKeys(choices []wizardProviderChoice) []string {
-	out := make([]string, 0, len(choices))
-	for _, choice := range choices {
-		out = append(out, choice.Name)
+	opts := initMysqlOptions{Backend: "mysql"}
+	fmt.Fprintf(stdout, "MySQL host [127.0.0.1]: ") //nolint:errcheck
+	if v := readLine(br); v != "" {
+		opts.Host = v
+	} else {
+		opts.Host = "127.0.0.1"
 	}
-	return out
-}
-
-func resolveDefaultProviderChoice(input string, choices []wizardProviderChoice) string {
-	input = strings.TrimSpace(input)
-	if input == "" {
-		return ""
+	fmt.Fprintf(stdout, "MySQL port [3306]: ") //nolint:errcheck
+	if v := readLine(br); v != "" {
+		opts.Port = v
+	} else {
+		opts.Port = "3306"
 	}
-	if n, err := strconv.Atoi(input); err == nil && n >= 1 && n <= len(choices) {
-		return choices[n-1].Name
+	fmt.Fprintf(stdout, "MySQL user [root]: ") //nolint:errcheck
+	if v := readLine(br); v != "" {
+		opts.User = v
+	} else {
+		opts.User = "root"
 	}
-	for _, choice := range choices {
-		if input == choice.Name {
-			return choice.Name
-		}
+	fmt.Fprintf(stdout, "MySQL database (required): ") //nolint:errcheck
+	opts.Database = readLine(br)
+	if opts.Database == "" {
+		fmt.Fprintln(stdout, "  (no database name; falling back to managed dolt)") //nolint:errcheck
+		return initMysqlOptions{}
 	}
-	return ""
+	fmt.Fprintln(stdout, "  Password is read from $GC_MYSQL_PASSWORD; export it before continuing if your server requires one.") //nolint:errcheck
+	return opts
 }
 
 // resolveAgentChoice maps user input to a provider name. Input can be a
@@ -543,6 +541,11 @@ func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFla
 			return 1
 		}
 		maybePrintWizardProviderGuidance(wiz, stdout)
+		// Honor the wizard's backend choice when the user didn't pass --backend
+		// on the command line. Explicit flags always win over wizard answers.
+		if strings.TrimSpace(mysql.Backend) == "" && strings.TrimSpace(wiz.mysql.Backend) != "" {
+			mysql = wiz.mysql
+		}
 	default:
 		wiz = defaultWizardConfig()
 	}
