@@ -2241,6 +2241,26 @@ type DaemonConfig struct {
 	// accumulate without bound across pool recycles. Set to false to
 	// retain worktrees for post-session diagnostics.
 	AutoPruneWorkerDir *bool `toml:"auto_prune_worker_dir,omitempty" jsonschema:"default=true"`
+	// AdaptivePatrol enables opt-in patrol-interval back-off. When the
+	// reconciler has observed AdaptivePatrolIdleThreshold consecutive
+	// no-op patrol ticks (no state-change channel activity), the patrol
+	// interval doubles up to base * AdaptivePatrolMaxMultiplier. Any
+	// state-change signal (poke, control-dispatcher, nudge,
+	// convergence) snaps the interval back to base. Default false:
+	// existing fixed-interval behavior.
+	AdaptivePatrol bool `toml:"adaptive_patrol,omitempty" jsonschema:"default=false"`
+	// AdaptivePatrolIdleThreshold is the number of consecutive no-op
+	// patrol ticks required before the back-off doubles the current
+	// interval. Nil (unset) defaults to 5. Values <= 0 disable
+	// adaptation even when AdaptivePatrol is true. Only consulted when
+	// AdaptivePatrol is true.
+	AdaptivePatrolIdleThreshold *int `toml:"adaptive_patrol_idle_threshold,omitempty" jsonschema:"default=5"`
+	// AdaptivePatrolMaxMultiplier caps the patrol-interval back-off
+	// ceiling at base * AdaptivePatrolMaxMultiplier. Nil (unset)
+	// defaults to 8 (e.g. 30s base → 4m ceiling). Values <= 1 keep the
+	// interval pinned at base even when AdaptivePatrol is true. Only
+	// consulted when AdaptivePatrol is true.
+	AdaptivePatrolMaxMultiplier *int `toml:"adaptive_patrol_max_multiplier,omitempty" jsonschema:"default=8"`
 }
 
 // AutoRestartOnDriftEnabled reports whether the supervisor should be
@@ -2289,6 +2309,34 @@ func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 		return 30 * time.Second
 	}
 	return dur
+}
+
+// AdaptivePatrolEnabled reports whether opt-in patrol-interval back-off
+// is configured. Defaults to false.
+func (d *DaemonConfig) AdaptivePatrolEnabled() bool {
+	return d.AdaptivePatrol
+}
+
+// AdaptivePatrolIdleThresholdOrDefault returns the configured idle
+// threshold for back-off doubling. Nil (unset) defaults to 5. Returned
+// value may be <= 0, in which case the back-off controller treats it as
+// disabled (current pinned to base).
+func (d *DaemonConfig) AdaptivePatrolIdleThresholdOrDefault() int {
+	if d.AdaptivePatrolIdleThreshold == nil {
+		return 5
+	}
+	return *d.AdaptivePatrolIdleThreshold
+}
+
+// AdaptivePatrolMaxMultiplierOrDefault returns the configured ceiling
+// multiplier (ceiling = base * multiplier). Nil (unset) defaults to 8.
+// Returned value may be <= 1, in which case the back-off controller
+// treats it as disabled (current pinned to base).
+func (d *DaemonConfig) AdaptivePatrolMaxMultiplierOrDefault() int {
+	if d.AdaptivePatrolMaxMultiplier == nil {
+		return 8
+	}
+	return *d.AdaptivePatrolMaxMultiplier
 }
 
 // TickDebounceDuration returns the tick-debounce window as a

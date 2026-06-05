@@ -3505,6 +3505,54 @@ func TestDaemonMaxRestartsZero(t *testing.T) {
 	}
 }
 
+func TestDaemonAdaptivePatrolDefaults(t *testing.T) {
+	d := DaemonConfig{}
+	if d.AdaptivePatrolEnabled() {
+		t.Errorf("AdaptivePatrolEnabled() = true, want false (default)")
+	}
+	if got := d.AdaptivePatrolIdleThresholdOrDefault(); got != 5 {
+		t.Errorf("AdaptivePatrolIdleThresholdOrDefault() = %d, want 5", got)
+	}
+	if got := d.AdaptivePatrolMaxMultiplierOrDefault(); got != 8 {
+		t.Errorf("AdaptivePatrolMaxMultiplierOrDefault() = %d, want 8", got)
+	}
+}
+
+func TestDaemonAdaptivePatrolExplicit(t *testing.T) {
+	threshold := 3
+	multiplier := 4
+	d := DaemonConfig{
+		AdaptivePatrol:              true,
+		AdaptivePatrolIdleThreshold: &threshold,
+		AdaptivePatrolMaxMultiplier: &multiplier,
+	}
+	if !d.AdaptivePatrolEnabled() {
+		t.Errorf("AdaptivePatrolEnabled() = false, want true")
+	}
+	if got := d.AdaptivePatrolIdleThresholdOrDefault(); got != 3 {
+		t.Errorf("AdaptivePatrolIdleThresholdOrDefault() = %d, want 3", got)
+	}
+	if got := d.AdaptivePatrolMaxMultiplierOrDefault(); got != 4 {
+		t.Errorf("AdaptivePatrolMaxMultiplierOrDefault() = %d, want 4", got)
+	}
+}
+
+func TestDaemonAdaptivePatrolZeroValuesPassThrough(t *testing.T) {
+	zero := 0
+	one := 1
+	d := DaemonConfig{
+		AdaptivePatrol:              true,
+		AdaptivePatrolIdleThreshold: &zero,
+		AdaptivePatrolMaxMultiplier: &one,
+	}
+	if got := d.AdaptivePatrolIdleThresholdOrDefault(); got != 0 {
+		t.Errorf("AdaptivePatrolIdleThresholdOrDefault() = %d, want 0 (disabled)", got)
+	}
+	if got := d.AdaptivePatrolMaxMultiplierOrDefault(); got != 1 {
+		t.Errorf("AdaptivePatrolMaxMultiplierOrDefault() = %d, want 1 (disabled)", got)
+	}
+}
+
 func TestDaemonAutoRestartOnDriftDefault(t *testing.T) {
 	d := DaemonConfig{}
 	if !d.AutoRestartOnDriftEnabled() {

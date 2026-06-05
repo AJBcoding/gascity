@@ -1303,6 +1303,21 @@
           "type": "boolean",
           "description": "AutoPruneWorkerDir controls whether the reconciler removes a\npool-managed session's worker_dir (agent worktree) after the session\nbead is closed. Removal is gated on: path lives under the city's\n.gc/worktrees/ tree, clean working tree, no unpushed commits, no\nstashed work. Nil (unset) defaults to true so pool worktrees do not\naccumulate without bound across pool recycles. Set to false to\nretain worktrees for post-session diagnostics.",
           "default": true
+        },
+        "adaptive_patrol": {
+          "type": "boolean",
+          "description": "AdaptivePatrol enables opt-in patrol-interval back-off. When the\nreconciler has observed AdaptivePatrolIdleThreshold consecutive\nno-op patrol ticks (no state-change channel activity), the patrol\ninterval doubles up to base * AdaptivePatrolMaxMultiplier. Any\nstate-change signal (poke, control-dispatcher, nudge,\nconvergence) snaps the interval back to base. Default false:\nexisting fixed-interval behavior.",
+          "default": false
+        },
+        "adaptive_patrol_idle_threshold": {
+          "type": "integer",
+          "description": "AdaptivePatrolIdleThreshold is the number of consecutive no-op\npatrol ticks required before the back-off doubles the current\ninterval. Nil (unset) defaults to 5. Values \u003c= 0 disable\nadaptation even when AdaptivePatrol is true. Only consulted when\nAdaptivePatrol is true.",
+          "default": 5
+        },
+        "adaptive_patrol_max_multiplier": {
+          "type": "integer",
+          "description": "AdaptivePatrolMaxMultiplier caps the patrol-interval back-off\nceiling at base * AdaptivePatrolMaxMultiplier. Nil (unset)\ndefaults to 8 (e.g. 30s base → 4m ceiling). Values \u003c= 1 keep the\ninterval pinned at base even when AdaptivePatrol is true. Only\nconsulted when AdaptivePatrol is true.",
+          "default": 8
         }
       },
       "additionalProperties": false,
@@ -1364,6 +1379,21 @@
           "type": "string",
           "description": "Autocommit controls Dolt's session-level autocommit behavior in the\nmanaged dolt-config.yaml. Accepted values:\n  \"batch\" / \"off\"   → behavior.autocommit=false (group writes, fewer\n                      commits — recommended for managed gas-city use)\n  \"on\" / \"true\"     → behavior.autocommit=true  (commit per statement)\nEmpty (default) → \"batch\". Override globally with env GC_DOLT_AUTOCOMMIT.",
           "default": "batch"
+        },
+        "max_connections": {
+          "type": "integer",
+          "description": "MaxConnections overrides the managed Dolt listener max_connections.\n0 means use the managed default.",
+          "default": 256
+        },
+        "read_timeout_millis": {
+          "type": "integer",
+          "description": "ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.\n0 means use the managed default.",
+          "default": 30000
+        },
+        "write_timeout_millis": {
+          "type": "integer",
+          "description": "WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.\n0 means use the managed default.",
+          "default": 300000
         }
       },
       "additionalProperties": false,

@@ -643,6 +643,22 @@ func (cr *CityRuntime) run(ctx context.Context) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	// Adaptive patrol back-off (opt-in via daemon.adaptive_patrol).
+	// When enabled, consecutive no-op patrol ticks double the interval
+	// up to base * max_multiplier; any state-change channel snaps it
+	// back to base. Disabled-mode constructs the controller anyway so
+	// the run-loop branches are uniform: degenerate config values make
+	// OnPatrolTick / OnEvent always return changed=false.
+	adaptive := newAdaptivePatrolFromDaemon(cr.cfg.Daemon, interval)
+	resetTickerIfChanged := func(newInterval time.Duration, changed bool, oldInterval time.Duration) time.Duration {
+		if !changed {
+			return oldInterval
+		}
+		ticker.Reset(newInterval)
+		fmt.Fprintf(cr.stderr, "%s: patrol_interval adapted: %s → %s\n", cr.logPrefix, oldInterval, newInterval) //nolint:errcheck // best-effort stderr
+		return newInterval
+	}
+
 	// Start the supervisor nudge dispatcher when configured. The wake-socket
 	// listener feeds nudgeWakeCh on every producer enqueue, giving sub-second
 	// dispatch latency. Patrol-tick fallback inside cr.tick() guarantees
@@ -701,19 +717,35 @@ func (cr *CityRuntime) run(ctx context.Context) {
 			pokeDB.cancelPending()
 			ctrlDB.cancelPending()
 			runTick("patrol")
+			if adaptive != nil {
+				newInterval, changed := adaptive.OnPatrolTick()
+				interval = resetTickerIfChanged(newInterval, changed, interval)
+			}
 		case <-cr.pokeCh:
 			// Event-driven wake path: sling or API assigned work to a sleeping
 			// session. Arm the debouncer; the deferred fire runs runTick("poke")
 			// once the burst settles.
 			pokeDB.arm(debounce)
+			if adaptive != nil {
+				newInterval, changed := adaptive.OnEvent()
+				interval = resetTickerIfChanged(newInterval, changed, interval)
+			}
 		case <-pokeDB.fired():
 			runTick("poke")
 		case <-cr.nudgeWakeCh:
 			cr.safeTick(func() {
 				cr.nudgeDispatchTick(ctx)
 			}, "nudge-wake")
+			if adaptive != nil {
+				newInterval, changed := adaptive.OnEvent()
+				interval = resetTickerIfChanged(newInterval, changed, interval)
+			}
 		case <-cr.controlDispatcherCh:
 			ctrlDB.arm(debounce)
+			if adaptive != nil {
+				newInterval, changed := adaptive.OnEvent()
+				interval = resetTickerIfChanged(newInterval, changed, interval)
+			}
 		case <-ctrlDB.fired():
 			cr.safeTick(func() {
 				cr.controlDispatcherTick(ctx)
@@ -729,6 +761,10 @@ func (cr *CityRuntime) run(ctx context.Context) {
 				reply := cr.safeHandleConvergenceRequest(ctx, req)
 				req.replyCh <- reply
 			}, "convergence-request")
+			if adaptive != nil {
+				newInterval, changed := adaptive.OnEvent()
+				interval = resetTickerIfChanged(newInterval, changed, interval)
+			}
 		case <-ctx.Done():
 			return
 		}

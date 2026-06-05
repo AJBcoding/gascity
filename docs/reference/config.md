@@ -318,6 +318,9 @@ DaemonConfig holds controller daemon settings.
 | `start_ready_timeout` | string |  | `5m` | StartReadyTimeout is how long `gc start` and `gc register` wait for the supervisor to report the city as Running. Cities with many registered or adopted sessions take longer to start because the per-tick wake budget (max_wakes_per_tick) throttles startup: wall time to wake N sessions is roughly ceil(N / max_wakes_per_tick) * patrol_interval. At the defaults (5 wakes / 30s), ~40 sessions need ~4 minutes. Duration string (e.g., "5m", "10m"). Defaults to DefaultStartReadyTimeout (5m). When set, this value replaces the default start/register budget; [session].startup_timeout may still extend the effective wait for a slow single session. |
 | `tick_debounce` | string |  |  | TickDebounce coalesces bursty event-driven ticks (pokeCh, controlDispatcherCh) within this window. A first event in a quiet period arms a timer; subsequent events arriving before the timer fires are dropped (the single delayed tick re-reads authoritative state covering all collapsed events). Zero (the default) disables debouncing — each event fires its own tick, matching pre-existing behavior. Duration string (e.g., "250ms", "500ms"). Trade-off: adds tick latency up to this value when set. |
 | `auto_prune_worker_dir` | boolean |  | `true` | AutoPruneWorkerDir controls whether the reconciler removes a pool-managed session's worker_dir (agent worktree) after the session bead is closed. Removal is gated on: path lives under the city's .gc/worktrees/ tree, clean working tree, no unpushed commits, no stashed work. Nil (unset) defaults to true so pool worktrees do not accumulate without bound across pool recycles. Set to false to retain worktrees for post-session diagnostics. |
+| `adaptive_patrol` | boolean |  | `false` | AdaptivePatrol enables opt-in patrol-interval back-off. When the reconciler has observed AdaptivePatrolIdleThreshold consecutive no-op patrol ticks (no state-change channel activity), the patrol interval doubles up to base * AdaptivePatrolMaxMultiplier. Any state-change signal (poke, control-dispatcher, nudge, convergence) snaps the interval back to base. Default false: existing fixed-interval behavior. |
+| `adaptive_patrol_idle_threshold` | integer |  | `5` | AdaptivePatrolIdleThreshold is the number of consecutive no-op patrol ticks required before the back-off doubles the current interval. Nil (unset) defaults to 5. Values &lt;= 0 disable adaptation even when AdaptivePatrol is true. Only consulted when AdaptivePatrol is true. |
+| `adaptive_patrol_max_multiplier` | integer |  | `8` | AdaptivePatrolMaxMultiplier caps the patrol-interval back-off ceiling at base * AdaptivePatrolMaxMultiplier. Nil (unset) defaults to 8 (e.g. 30s base → 4m ceiling). Values &lt;= 1 keep the interval pinned at base even when AdaptivePatrol is true. Only consulted when AdaptivePatrol is true. |
 
 ## DoctorConfig
 
@@ -341,6 +344,20 @@ DoltConfig holds optional dolt server overrides.
 | `archive_level` | integer |  | `0` | ArchiveLevel controls Dolt's auto_gc archive aggressiveness. 0 disables archive compaction (lower CPU on startup). 1 enables archive compaction (higher CPU on startup). nil (omitted) defaults to 0. |
 | `auto_gc` | string |  | `true` | AutoGc controls whether Dolt's auto_gc behavior is enabled in the managed dolt-config.yaml. Accepted values:   "true" / "on" / "enabled"   → auto_gc_behavior.enable=true,                                  dolt_auto_gc_enabled="ON"   "false" / "off" / "disabled" → auto_gc_behavior.enable=false,                                   dolt_auto_gc_enabled="OFF" Empty (default) → "true". Override globally with env GC_DOLT_AUTO_GC. Note: dolt#10944's load-avg gate means upstream auto_gc may not fire in practice on busy machines; pair with `gc dolt compact` for guaranteed cleanup. |
 | `autocommit` | string |  | `batch` | Autocommit controls Dolt's session-level autocommit behavior in the managed dolt-config.yaml. Accepted values:   "batch" / "off"   → behavior.autocommit=false (group writes, fewer                       commits — recommended for managed gas-city use)   "on" / "true"     → behavior.autocommit=true  (commit per statement) Empty (default) → "batch". Override globally with env GC_DOLT_AUTOCOMMIT. |
+| `max_connections` | integer |  | `256` | MaxConnections overrides the managed Dolt listener max_connections. 0 means use the managed default. |
+| `read_timeout_millis` | integer |  | `30000` | ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis. 0 means use the managed default. |
+| `write_timeout_millis` | integer |  | `300000` | WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis. 0 means use the managed default. |
+
+## DoltMaintenance
+
+DoltMaintenance configures the periodic Dolt store maintenance loop.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `enabled` | boolean |  |  | Enabled toggles the maintenance loop. Defaults to false (opt-in). |
+| `interval` | string |  | `168h` | Interval is the cadence between maintenance runs as a duration string (e.g., "168h"). Defaults to 168h (weekly). |
+| `alert_to` | string |  |  | AlertTo is the agent identity to mail on failure (e.g., "gascity/mayor"). Empty disables alert mail. |
+| `gc_timeout` | string |  | `10m` | GCTimeout is the ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. |
 
 ## EventsConfig
 
