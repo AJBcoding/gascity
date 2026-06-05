@@ -226,12 +226,23 @@ func promptTemplateSourcePath(cityPath, templatePath string) string {
 func promptSourcePackRoot(cityPath, sourcePath string) string {
 	cleanCityPath := filepath.Clean(cityPath)
 	cleanSourcePath := filepath.Clean(sourcePath)
-	agentDir := filepath.Dir(cleanSourcePath)
-	agentsDir := filepath.Dir(agentDir)
-	if filepath.Base(agentsDir) != "agents" {
-		return ""
+
+	// Canonical layout: <pack>/agents/<name>/prompt.template.md
+	// Patched layout:   <pack>/patches/<file>.template.md
+	// Both reach the same fragments under <pack>/template-fragments/, so the
+	// per-source-pack fallback must fire for either shape.
+	parentDir := filepath.Dir(cleanSourcePath)
+	var packRoot string
+	switch filepath.Base(parentDir) {
+	case "patches":
+		packRoot = filepath.Clean(filepath.Dir(parentDir))
+	default:
+		grandParent := filepath.Dir(parentDir)
+		if filepath.Base(grandParent) != "agents" {
+			return ""
+		}
+		packRoot = filepath.Clean(filepath.Dir(grandParent))
 	}
-	packRoot := filepath.Clean(filepath.Dir(agentsDir))
 	if packRoot == cleanCityPath {
 		return ""
 	}

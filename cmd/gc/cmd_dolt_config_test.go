@@ -7,7 +7,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"gopkg.in/yaml.v3"
 )
@@ -86,12 +85,18 @@ func TestDoltConfigWriterIncludesDoctorExpectedCoreValues(t *testing.T) {
 }
 
 func TestWriteManagedDoltConfigFile_UsesCityDoltListenerOverrides(t *testing.T) {
+	cityPath := t.TempDir()
+	cityToml := `
+[dolt]
+read_timeout_millis = 300000
+write_timeout_millis = 600000
+max_connections = 1024
+`
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
 	configPath := filepath.Join(t.TempDir(), "packs", "dolt", "dolt-config.yaml")
-	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", config.DoltConfig{
-		ReadTimeoutMillis:  300000,
-		WriteTimeoutMillis: 600000,
-		MaxConnections:     1024,
-	}); err != nil {
+	if err := writeManagedDoltConfigFile(configPath, "127.0.0.1", "3311", "/tmp/dolt-data", "warning", 0, cityPath); err != nil {
 		t.Fatalf("writeManagedDoltConfigFile: %v", err)
 	}
 	data, err := os.ReadFile(configPath)

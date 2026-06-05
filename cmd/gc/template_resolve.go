@@ -343,7 +343,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		InstructionsFile:    instructionsFileForAgent(cfgAgent, p.workspace, p.providers),
 		Env:                 cfgAgent.Env,
 		Dirs:                promptDirs,
-	}, p.sessionTemplate, p.stderr, p.packDirs, fragments, p.beadStore)
+	}, p.sessionTemplate, p.stderr, packDirsForAgentRender(p.city, p.packDirs, rigName), fragments, p.beadStore)
 	hasHooks := config.AgentHasHooks(cfgAgent, p.workspace, resolved.Name, p.providers)
 	beacon := runtime.FormatBeaconAt(p.cityName, qualifiedName, !hasHooks, p.beaconTime)
 	suppressStartupPrompt := suppressStartupPromptForAgent(cfgAgent)
@@ -607,6 +607,23 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	params.SessionOverride = cfgAgent.Session
 	params.EffectiveSessionProvider = effectiveSessionProvider(cfgAgent.Session, p.sessionProvider)
 	return params, nil
+}
+
+// packDirsForAgentRender returns the pack directories used to load template
+// fragments when rendering one agent's prompt. Rig-scoped agents see the
+// city-level pack dirs plus the dirs imported by their rig — fragments
+// imported only via that rig (e.g. zp-core's template-fragments/ in
+// scs-aws-preprod-deploy) would otherwise be invisible to the renderer
+// even though the importing rig's pack.toml references them. Mirrors the
+// rig-aware path already used by `gc prime` (see cmd_prime.go).
+//
+// fallback is the bare cfg.PackDirs; it's used when city is nil (e.g. tests)
+// or when rigName is empty (city-scoped agent), preserving prior behavior.
+func packDirsForAgentRender(city *config.City, fallback []string, rigName string) []string {
+	if city == nil || rigName == "" {
+		return fallback
+	}
+	return city.PackDirsForRig(rigName)
 }
 
 func suppressStartupPromptForAgent(cfgAgent *config.Agent) bool {

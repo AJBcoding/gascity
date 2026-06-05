@@ -206,6 +206,42 @@ func TestRenderPromptPatchedPlainMarkdownStaysInert(t *testing.T) {
 	}
 }
 
+// TestRenderPromptImportedPackPatchesPromptResolvesFragment guards the
+// gs-oz0 regression: when an imported pack ships a patched prompt under
+// <pack>/patches/<file>.template.md and references fragments under
+// <pack>/template-fragments/, the per-source-pack fragment fallback must
+// fire even though the prompt does not live under <pack>/agents/<name>/.
+// Without the fallback, fragments imported only via a rig (so the bare
+// city-level packDirs misses the pack root) silently fail with the
+// "inject_fragment %q: template not found" warning.
+func TestRenderPromptImportedPackPatchesPromptResolvesFragment(t *testing.T) {
+	f := fsys.NewFake()
+	const packRoot = "/packs/zp-core"
+	f.Files[packRoot+"/template-fragments/propulsion.template.md"] = []byte(
+		`{{ define "propulsion" }}propulsion-body{{ end }}`)
+	f.Files[packRoot+"/patches/boot-prompt.template.md"] = []byte("body for {{ .AgentName }}")
+
+	t.Run("packDirs contains pack root", func(t *testing.T) {
+		got := renderPrompt(f, "/city", "", packRoot+"/patches/boot-prompt.template.md",
+			PromptContext{AgentName: "boot"}, "", io.Discard,
+			[]string{packRoot}, []string{"propulsion"}, nil)
+		want := "body for boot\n\npropulsion-body"
+		if got != want {
+			t.Errorf("renderPrompt(packDirs has root) = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("packDirs empty, source-pack fallback fires", func(t *testing.T) {
+		got := renderPrompt(f, "/city", "", packRoot+"/patches/boot-prompt.template.md",
+			PromptContext{AgentName: "boot"}, "", io.Discard,
+			nil, []string{"propulsion"}, nil)
+		want := "body for boot\n\npropulsion-body"
+		if got != want {
+			t.Errorf("renderPrompt(empty packDirs, patches fallback) = %q, want %q", got, want)
+		}
+	})
+}
+
 func TestRenderPromptTemplateName(t *testing.T) {
 	f := fsys.NewFake()
 	f.Files["/city/prompts/test.md.tmpl"] = []byte("Template: {{ .TemplateName }}")
