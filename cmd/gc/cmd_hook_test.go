@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -9,7 +11,149 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/events"
 )
+
+func TestNewHookCmdUsesRoutedWorkHelp(t *testing.T) {
+	var stdout, stderr bytes.Buffer
+	cmd := newHookCmd(&stdout, &stderr)
+
+	if got, want := cmd.Short, "Find routed work for an agent"; got != want {
+		t.Fatalf("Short = %q, want %q", got, want)
+	}
+	if !strings.Contains(cmd.Long, "Finds routed work using the agent's work_query config.") {
+		t.Fatalf("Long = %q, want routed-work description", cmd.Long)
+	}
+}
+
+// TestShellWorkQueryTimeoutClassifiesTransient guards the contract the
+// control-dispatcher --follow loop depends on: a work-query timeout must be
+// classifiable as a transient store error (wrapping context.DeadlineExceeded)
+// so the loop retries instead of dying when the bead store is briefly loaded.
+func TestShellWorkQueryTimeoutClassifiesTransient(t *testing.T) {
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+	prev := hookWorkQueryTimeout
+	hookWorkQueryTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { hookWorkQueryTimeout = prev })
+
+	_, err := shellWorkQueryWithEnv("sleep 5", "", nil)
+	if err == nil {
+		t.Fatal("shellWorkQueryWithEnv err = nil, want timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out after") {
+		t.Fatalf("err = %v, want human-facing timed-out message preserved", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want errors.Is(err, context.DeadlineExceeded)", err)
+	}
+	if !dispatch.IsTransientControllerError(err) {
+		t.Fatalf("dispatch.IsTransientControllerError(%v) = false, want true", err)
+	}
+}
+
+func TestCmdHookQueryKillEmitsCurrentSessionTemplate(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "kill -9 $$"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ID", "sess-hook-123")
+	t.Setenv("GC_SESSION_NAME", "worker-1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat(nil, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat() = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	}
+	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
+	if err != nil {
+		t.Fatalf("read work-query failure events: %v", err)
+	}
+	if len(evts) != 1 {
+		t.Fatalf("work-query failure events = %d, want 1: %+v", len(evts), evts)
+	}
+	if evts[0].Subject != "worker" {
+		t.Fatalf("event subject = %q, want current session template", evts[0].Subject)
+	}
+	if strings.Contains(evts[0].Message, "kill -9") {
+		t.Fatalf("event message leaked raw work query command: %q", evts[0].Message)
+	}
+	payload := decodeSessionLifecyclePayload(t, evts[0])
+	if payload.SessionID != "sess-hook-123" {
+		t.Fatalf("payload SessionID = %q, want sess-hook-123", payload.SessionID)
+	}
+	if payload.Template != "worker" {
+		t.Fatalf("payload Template = %q, want current session template", payload.Template)
+	}
+	if payload.Reason != "work query killed (signal: killed)" {
+		t.Fatalf("payload Reason = %q, want work query killed (signal: killed)", payload.Reason)
+	}
+}
+
+func TestCmdHookExplicitDifferentTargetSuppressesSessionFailureEvent(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	if _, err := exec.LookPath("sh"); err != nil {
+		t.Skip("sh not available")
+	}
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+work_query = "printf '[]'"
+
+[[agent]]
+name = "other"
+work_query = "kill -9 $$"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_TEMPLATE", "worker")
+	t.Setenv("GC_SESSION_ID", "sess-hook-456")
+	t.Setenv("GC_SESSION_NAME", "worker-1")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHookWithFormat([]string{"other"}, false, "", &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("cmdHookWithFormat(explicit other) = %d, want 1 for killed work query; stderr=%s", code, stderr.String())
+	}
+	evts, err := events.ReadFiltered(filepath.Join(cityDir, ".gc", "events.jsonl"), events.Filter{Type: events.SessionWorkQueryFailed})
+	if err != nil {
+		t.Fatalf("read work-query failure events: %v", err)
+	}
+	if len(evts) != 0 {
+		t.Fatalf("work-query failure events = %d, want 0 for explicit different target: %+v", len(evts), evts)
+	}
+}
 
 func TestHookNoWork(t *testing.T) {
 	runner := func(string, string) (string, error) { return "", nil }
@@ -314,6 +458,129 @@ name = "worker"
 	}
 }
 
+func TestCmdHookExplicitTargetDoesNotInheritCallerSessionOrigin(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd.log")
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	fakeBD := filepath.Join(fakeBin, "bd")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'origin=%%s alias=%%s session_id=%%s template=%%s args=%%s\n' "${GC_SESSION_ORIGIN:-}" "${GC_ALIAS:-}" "${GC_SESSION_ID:-}" "${GC_TEMPLATE:-}" "$*" >> %q
+case "$*" in
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"hw-1","title":"routed work"}]' ;;
+  *) printf '[]' ;;
+esac
+`, logPath)
+	if err := os.WriteFile(fakeBD, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_ALIAS", "gastown.mayor")
+	t.Setenv("GC_AGENT", "gastown.mayor")
+	t.Setenv("GC_SESSION_ID", "mayor-session-id")
+	t.Setenv("GC_SESSION_NAME", "mayor-session")
+	t.Setenv("GC_SESSION_ORIGIN", "attached")
+	t.Setenv("GC_TEMPLATE", "gastown.mayor")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook(explicit target) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"hw-1"`) {
+		t.Fatalf("stdout = %q, want routed work", stdout.String())
+	}
+	logData, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", logPath, err)
+	}
+	logText := string(logData)
+	var workQueryLog strings.Builder
+	for _, line := range strings.Split(logText, "\n") {
+		if strings.Contains(line, "args=list --status") || strings.Contains(line, "args=ready ") {
+			workQueryLog.WriteString(line)
+			workQueryLog.WriteByte('\n')
+		}
+	}
+	workQueryText := workQueryLog.String()
+	if !strings.Contains(workQueryText, "--metadata-field gc.routed_to=worker") {
+		t.Fatalf("explicit hook target did not reach routed queue tier; bd log:\n%s", workQueryText)
+	}
+	for _, leaked := range []string{
+		"origin=attached",
+		"alias=gastown.mayor",
+		"session_id=mayor-session-id",
+		"template=gastown.mayor",
+	} {
+		if strings.Contains(workQueryText, leaked) {
+			t.Fatalf("caller session env leaked into explicit hook target (%s):\n%s", leaked, workQueryText)
+		}
+	}
+}
+
+// TestCmdHookClaimsRoutedToRoot is the #2763 end-to-end regression (writer-side
+// fix; ga-eld2x): a graph.v2 workflow root routed to a pool stamps gc.routed_to
+// — the sole persisted routing key — and `gc hook <pool>` must surface it via
+// the worker claim query. Before the writer fix the root stamped only
+// gc.run_target, which the claim query does not read, so the routed root was
+// never claimed and the spawned worker idle-reaped with the work orphaned.
+func TestCmdHookClaimsRoutedToRoot(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	cityDir := t.TempDir()
+	fakeBin := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cityToml := `[workspace]
+name = "test-city"
+
+[[agent]]
+name = "worker"
+`
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Fake bd returns the routed root only for the gc.routed_to predicate.
+	script := `#!/bin/sh
+case "$*" in
+  *"--metadata-field gc.routed_to=worker"*) printf '[{"id":"graph-root","title":"routed work"}]' ;;
+  *) printf '[]' ;;
+esac
+`
+	if err := os.WriteFile(filepath.Join(fakeBin, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("PATH", fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_SESSION_ORIGIN", "ephemeral")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdHook([]string{"worker"}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdHook(worker) = %d, want 0; stdout=%q stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stdout.String(), `"graph-root"`) {
+		t.Fatalf("gc hook did not surface the routed_to graph root: stdout=%q", stdout.String())
+	}
+}
+
 func TestHookInjectAlwaysExitsZero(t *testing.T) {
 	// Even on command failure, inject mode exits 0.
 	runner := func(string, string) (string, error) { return "", fmt.Errorf("command failed") }
@@ -460,7 +727,7 @@ max = 5
 		t.Fatalf("stdout = %q, want GC_RIG_ROOT=%q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool work_query args", out)
 	}
 }
@@ -775,7 +1042,7 @@ max = 5
 		t.Fatalf("stdout = %q, want command to run from rig root %q", out, rigDir)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1") {
+	if !strings.Contains(out, "args=list --status in_progress --assignee=host-session --json --limit=1") {
 		t.Fatalf("stdout = %q, want pool template work_query args", out)
 	}
 }
@@ -843,7 +1110,7 @@ name = "worker"
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=host-session", out)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1`) {
+	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }
@@ -904,7 +1171,7 @@ dir = "myrig"
 		t.Fatalf("stdout = %q, want GC_SESSION_NAME=%s", out, wantSession)
 	}
 	// Tiered query: first tier checks in_progress assigned to session name.
-	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --exclude-type=epic --json --limit=1`) {
+	if !strings.Contains(out, `args=list --status in_progress --assignee=host-session --json --limit=1`) {
 		t.Fatalf("stdout = %q, want metadata-routed work query", out)
 	}
 }

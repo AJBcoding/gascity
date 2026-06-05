@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/pgauth"
 )
 
 func TestExtractRigFlag(t *testing.T) {
@@ -139,6 +141,13 @@ func TestExtractBdScopeFlags(t *testing.T) {
 }
 
 func TestResolveBdScopeTarget(t *testing.T) {
+	// Isolate cwd from any ambient `.beads/redirect` in the working tree
+	// (e.g. when `make test` runs from a polecat/crew worktree, the worktree's
+	// redirect resolves to a path outside the synthetic rig config below and
+	// `rigFromRedirectedBeadsDir` rejects it). t.TempDir's ancestry is /tmp,
+	// which is guaranteed to be free of city redirects.
+	setCwd(t, t.TempDir())
+
 	origProbe := bdBeadExists
 	defer func() { bdBeadExists = origProbe }()
 	bdBeadExists = func(_ string, _ execStoreTarget, beadID string) bool {
@@ -318,12 +327,16 @@ dolt.auto-start: false
 		t.Fatal(err)
 	}
 	cfg := &config.City{Rigs: []config.Rig{{Name: "repo", Path: rigDir}}}
-	env := listToMap(bdCommandEnv(cityDir, cfg, execStoreTarget{
+	envList, err := bdCommandEnv(cityDir, cfg, execStoreTarget{
 		ScopeRoot: rigDir,
 		ScopeKind: "rig",
 		Prefix:    "repo",
 		RigName:   "repo",
-	}))
+	})
+	if err != nil {
+		t.Fatalf("bdCommandEnv: %v", err)
+	}
+	env := listToMap(envList)
 	if got := env["GC_DOLT_PORT"]; got != wantPort {
 		t.Fatalf("GC_DOLT_PORT = %q, want %q", got, wantPort)
 	}
@@ -347,6 +360,46 @@ dolt.auto-start: false
 	}
 	if _, present := env["BEADS_ACTOR"]; present {
 		t.Fatalf("BEADS_ACTOR = %q, want absent for direct gc bd env without explicit actor", env["BEADS_ACTOR"])
+	}
+}
+
+func TestBdCommandEnvSurfacesPostgresProjectionError(t *testing.T) {
+	clearAmbientPostgresEnv(t)
+	t.Setenv("GC_BEADS", "bd")
+
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigDir := filepath.Join(cityDir, "rigs", "pg")
+	writePGScopeFixture(t, rigDir, "")
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: pg
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Rigs: []config.Rig{{Name: "pg", Path: "rigs/pg", Prefix: "pg"}}}
+
+	_, err := bdCommandEnv(cityDir, cfg, execStoreTarget{
+		ScopeRoot: rigDir,
+		ScopeKind: "rig",
+		Prefix:    "pg",
+		RigName:   "pg",
+	})
+	if err == nil {
+		t.Fatal("bdCommandEnv err = nil, want postgres projection error")
+	}
+	if !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
+		t.Errorf("errors.Is(err, ErrNoPasswordResolvable) = false, want true; err=%v", err)
 	}
 }
 
@@ -522,6 +575,9 @@ func TestGcBdSuppressesBdAutoExportInChildEnv(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
 name = "demo"
 `), 0o644); err != nil {
@@ -571,6 +627,56 @@ esac
 	}
 }
 
+func TestGcBdReapsStaleBdExportJSONLBeforeDirectCommand(t *testing.T) {
+	disableManagedDoltRecoveryForTest(t)
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	defer func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	}()
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	beadsDir := filepath.Join(cityDir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(beadsDir, "config.yaml"), []byte("issue_prefix: gc\ngc.endpoint_origin: managed_city\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	jsonlPath := filepath.Join(beadsDir, "issues.jsonl")
+	if err := os.WriteFile(jsonlPath, []byte(`{"_type":"issue","id":"gc-1"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	script := filepath.Join(binDir, "bd")
+	if err := os.WriteFile(script, []byte(`#!/bin/sh
+set -eu
+printf '[{"id":"gc-1","title":"ok"}]\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"show", "gc-1", "--json"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd() = %d, want 0; stdout=%q stderr=%q", got, stdout.String(), stderr.String())
+	}
+	if _, err := os.Stat(jsonlPath); !os.IsNotExist(err) {
+		t.Fatalf("issues.jsonl present after direct gc bd command; stat err = %v, want IsNotExist", err)
+	}
+}
+
 func TestGcBdDoesNotAutoRouteHyphenatedFlagValue(t *testing.T) {
 	disableManagedDoltRecoveryForTest(t)
 
@@ -604,6 +710,9 @@ prefix = "repo"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 
 	binDir := t.TempDir()
 	capture := filepath.Join(t.TempDir(), "gc-bd-city-env.txt")
@@ -684,6 +793,9 @@ name = "demo"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_BEADS", "file")
 	// Clear any inherited scope pin so the GC_BEADS override applies to
@@ -720,6 +832,9 @@ provider = "file"
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	// See TestResolveBdScopeTarget for rationale: isolate cwd so any
+	// `.beads/redirect` in the ambient working tree doesn't surface here.
+	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
 
 	var stdout, stderr bytes.Buffer
@@ -1722,4 +1837,321 @@ set -eu
 	if !strings.Contains(stderr.String(), "GC_DOLT_PORT=9999 (canonical 3307)") {
 		t.Fatalf("stderr = %q, want canonical drift detail", stderr.String())
 	}
+}
+
+// silentFallbackFakeBdScript builds a fake `bd` shell script that emits the
+// silent-fallback marker pair on stderr ("auto-importing ... into empty
+// database") and exits 0 — the exact shape bd produces when it loses the
+// managed Dolt server and falls back to opening the on-disk store. doBd
+// should treat this as a hard failure regardless of bd's exit code.
+const silentFallbackFakeBdScript = `#!/bin/sh
+echo "auto-importing 220929 bytes from .beads/issues.jsonl into empty database... auto-imported 123 issues" >&2
+echo "$@"
+exit 0
+`
+
+// silentFallbackTestSetup writes a fake bd binary that emits the silent-
+// fallback marker, prepends it to PATH, and configures a minimal city as a
+// bd-backed scope (via GC_CITY_PATH) so doBd will dispatch through it.
+func silentFallbackTestSetup(t *testing.T, fakeBdScript string) {
+	t.Helper()
+
+	origCityFlag := cityFlag
+	origRigFlag := rigFlag
+	t.Cleanup(func() {
+		cityFlag = origCityFlag
+		rigFlag = origRigFlag
+	})
+	cityFlag = ""
+	rigFlag = ""
+
+	cityDir := t.TempDir()
+	port := strconv.Itoa(writeReachableManagedDoltState(t, cityDir))
+
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "demo"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := "issue_prefix: demo\n" +
+		"gc.endpoint_origin: city_canonical\n" +
+		"gc.endpoint_status: verified\n" +
+		"dolt.auto-start: false\n" +
+		"dolt.host: 127.0.0.1\n" +
+		"dolt.port: " + port + "\n"
+	// writeReachableManagedDoltState already creates .beads, but don't rely
+	// on that side-effect — make the directory explicit before writing.
+	if err := os.MkdirAll(filepath.Join(cityDir, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityDir, ".beads", "config.yaml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(fakeBdScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	origPath := os.Getenv("PATH")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+origPath)
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_DOLT_PORT", port)
+}
+
+// TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath pins the #2080 fix:
+// when bd's update path silently falls back to the on-disk store, gc bd must
+// convert that into a non-zero exit with an operator-facing message instead
+// of letting the silent write loss reach the operator as success.
+func TestGcBdSurfacesSilentFallbackAsLoudError_UpdatePath(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"update", "demo-abc", "--set-metadata", "k=v"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("doBd(update) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("stderr missing loud-fail message; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto-importing") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath pins the #2079 half of
+// the bd-write-persistence quad: bd close goes through the same doBd
+// handoff, so the silent-fallback detection must fire identically. Pre-fix,
+// gc bd close would have exited 0 even when the close never persisted to
+// JSONL (the behavior #2079 documents).
+func TestGcBdSurfacesSilentFallbackAsLoudError_ClosePath(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"close", "demo-abc", "-r", "duplicate"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("doBd(close) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("stderr missing loud-fail message; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "auto-importing") {
+		t.Fatalf("original bd stderr not passed through; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdHappyPathExitsZeroWithoutFallbackMarker is the inverse: a clean
+// bd run that produces no auto-import marker must NOT be converted into the
+// loud-fail. This guards against false positives where bd's stderr happens
+// to contain unrelated content.
+func TestGcBdHappyPathExitsZeroWithoutFallbackMarker(t *testing.T) {
+	// Fake bd that exits 0 with normal output and an unrelated stderr line.
+	const happyPathFakeBdScript = `#!/bin/sh
+echo "some normal bd output"
+echo "some unrelated stderr line" >&2
+exit 0
+`
+	silentFallbackTestSetup(t, happyPathFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := doBd([]string{"list"}, &stdout, &stderr)
+	if got != 0 {
+		t.Fatalf("doBd(list) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "managed Dolt unreachable") {
+		t.Fatalf("loud-fail message fired on a happy-path run; stderr=%q", stderr.String())
+	}
+}
+
+// TestGcBdProcessExitCodeMatchesSilentFallbackContract pins the process-
+// level exit code contract that the bdSilentFallbackExitCode = 4 doc
+// comment promises operators and CI. PR #2327 review found the previous
+// RunE used `return errExit` on any non-zero, which collapsed every code
+// to 1 in commandExitCode — defeating the operator/CI signal the loud-
+// fail was meant to provide. Plumbing doBd's numeric code through
+// exitForCode ensures the process exit code matches what doBd computed.
+func TestGcBdProcessExitCodeMatchesSilentFallbackContract(t *testing.T) {
+	silentFallbackTestSetup(t, silentFallbackFakeBdScript)
+
+	var stdout, stderr bytes.Buffer
+	got := run([]string{"bd", "update", "demo-abc", "--set-metadata", "k=v"}, &stdout, &stderr)
+	if got != bdSilentFallbackExitCode {
+		t.Fatalf("run(bd update) = %d, want %d (silent-fallback exit code); stderr=%q",
+			got, bdSilentFallbackExitCode, stderr.String())
+	}
+}
+
+// TestGcBdProcessExitCodePreservesBdNonZero is the inverse case: when bd
+// returns a non-zero code that isn't the silent-fallback case (e.g., bd
+// itself rejected the command), gc bd must preserve bd's exit code rather
+// than collapsing it to 1. exitForCode encodes ≥2 codes via
+// commandExitError so commandExitCode reads them back faithfully.
+func TestGcBdProcessExitCodePreservesBdNonZero(t *testing.T) {
+	const bdRejectsScript = `#!/bin/sh
+echo "bd: simulated usage error" >&2
+exit 3
+`
+	silentFallbackTestSetup(t, bdRejectsScript)
+
+	var stdout, stderr bytes.Buffer
+	got := run([]string{"bd", "list"}, &stdout, &stderr)
+	if got != 3 {
+		t.Fatalf("run(bd list) = %d, want 3 (preserved bd exit code); stderr=%q",
+			got, stderr.String())
+	}
+}
+
+// TestBdOutputIndicatesSilentFallback covers the marker-detection helper
+// directly with table-driven cases so the source-of-truth for what counts
+// as "silent fallback" is unit-pinned.
+func TestBdOutputIndicatesSilentFallback(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{"empty", "", false},
+		{"single marker only auto-importing", "auto-importing 100 bytes from foo", false},
+		{"single marker only into-empty-database", "into empty database", false},
+		{"both markers same line", "auto-importing 100 bytes into empty database", true},
+		{"both markers reversed order", "into empty database <- auto-importing 100 bytes", true},
+		{"both markers across newlines", "auto-importing 100 bytes\n  into empty database\n  done", true},
+		{"case insensitive uppercase", "AUTO-IMPORTING INTO EMPTY DATABASE", true},
+		{"case insensitive mixed", "Auto-Importing 200 bytes Into Empty Database", true},
+		{"unrelated transport error", "dial tcp 127.0.0.1:3306: connect: connection refused", false},
+		{"unrelated server-unreachable error", "server unreachable", false},
+		{"both markers buried in long output", "starting bd\n... \nauto-importing 220929 bytes from .beads/issues.jsonl into empty database... \n... \nauto-imported 123 issues\n", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := bdOutputIndicatesSilentFallback(tt.input); got != tt.want {
+				t.Errorf("bdOutputIndicatesSilentFallback(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestHeadLimitedWriter pins the bounded-prefix behavior used to scan bd's
+// stderr: writes past the limit are reported as fully consumed (so it is
+// safe behind io.MultiWriter) but only the first limit bytes are retained.
+func TestHeadLimitedWriter(t *testing.T) {
+	t.Run("retains only the first limit bytes of an oversized write", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 5}
+		n, err := w.Write([]byte("abcdefgh"))
+		if err != nil || n != 8 {
+			t.Fatalf("Write = (%d, %v), want (8, nil)", n, err)
+		}
+		if got := w.String(); got != "abcde" {
+			t.Fatalf("String() = %q, want %q", got, "abcde")
+		}
+	})
+	t.Run("accumulates across writes and stops at the limit", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 5}
+		for _, chunk := range []string{"ab", "cdef", "ghi"} {
+			if n, err := w.Write([]byte(chunk)); err != nil || n != len(chunk) {
+				t.Fatalf("Write(%q) = (%d, %v), want (%d, nil)", chunk, n, err, len(chunk))
+			}
+		}
+		if got := w.String(); got != "abcde" {
+			t.Fatalf("String() = %q, want %q", got, "abcde")
+		}
+	})
+	t.Run("zero limit retains nothing but still consumes the write", func(t *testing.T) {
+		w := &headLimitedWriter{limit: 0}
+		n, err := w.Write([]byte("xyz"))
+		if err != nil || n != 3 {
+			t.Fatalf("Write = (%d, %v), want (3, nil)", n, err)
+		}
+		if got := w.String(); got != "" {
+			t.Fatalf("String() = %q, want empty", got)
+		}
+	})
+}
+
+// TestGcBdHeartbeatRewritesToMetadataUpdate pins the gastownhall/gascity#1855
+// worker-heartbeat write half: `gc bd heartbeat <id>` must forward to bd as
+// `update <id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>`. The exact
+// key (with the _at suffix) is what the gas-city-dashboard will read
+// (dashboard #324) to tell a live worker from a dead one, and the stamp must
+// be valid RFC3339 in UTC even when the local clock is in another zone.
+func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
+	origNow := bdHeartbeatNow
+	t.Cleanup(func() { bdHeartbeatNow = origNow })
+	// Pin the clock to a non-UTC zone to prove the rewrite normalizes to UTC.
+	fixed := time.Date(2026, 5, 31, 12, 0, 0, 0, time.FixedZone("PST", -8*3600))
+	bdHeartbeatNow = func() time.Time { return fixed }
+
+	// The fake bd captures its forwarded args so the assertion can inspect them.
+	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
+	silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
+	t.Setenv("CAPTURE_PATH", capture)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+
+	data, err := os.ReadFile(capture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const prefix = "update demo-abc --set-metadata " + heartbeatMetadataKey + "="
+	gotArgs := string(data)
+	stamp, ok := strings.CutPrefix(gotArgs, prefix)
+	if !ok {
+		t.Fatalf("forwarded args = %q, want prefix %q", gotArgs, prefix)
+	}
+	parsed, err := time.Parse(time.RFC3339, stamp)
+	if err != nil {
+		t.Fatalf("heartbeat stamp %q is not valid RFC3339: %v", stamp, err)
+	}
+	if _, offset := parsed.Zone(); offset != 0 {
+		t.Fatalf("heartbeat stamp %q is not UTC (zone offset %d)", stamp, offset)
+	}
+	if want := fixed.UTC().Format(time.RFC3339); stamp != want {
+		t.Fatalf("heartbeat stamp = %q, want %q", stamp, want)
+	}
+}
+
+// TestRewriteBdHeartbeatArgs covers the arg-rewrite edge cases without the
+// full city/bd harness: exactly one issue id is required, and non-heartbeat
+// commands pass through untouched so the generic bd passthrough is intact.
+func TestRewriteBdHeartbeatArgs(t *testing.T) {
+	t.Run("rejects wrong arity, flag-as-id, or whitespace id", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"heartbeat"},
+			{"heartbeat", "demo-abc", "extra"},
+			{"heartbeat", "--flag"},
+			{"heartbeat", ""},
+			{"heartbeat", "  "},        // all-whitespace
+			{"heartbeat", " demo-abc"}, // leading space
+			{"heartbeat", "demo-abc "}, // trailing space
+			{"heartbeat", "demo abc"},  // internal space
+		} {
+			got, err := rewriteBdHeartbeatArgs(args)
+			if err == nil {
+				t.Fatalf("rewriteBdHeartbeatArgs(%q) = (%q, nil), want usage error", args, got)
+			}
+		}
+	})
+	t.Run("rewrites a clean id to a set-metadata update", func(t *testing.T) {
+		out, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
+		if err != nil {
+			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
+		}
+		if len(out) != 4 || out[0] != "update" || out[1] != "demo-abc" || out[2] != "--set-metadata" {
+			t.Fatalf("rewriteBdHeartbeatArgs = %q, want [update demo-abc --set-metadata ...]", out)
+		}
+	})
+	t.Run("passes non-heartbeat args through unchanged", func(t *testing.T) {
+		in := []string{"list", "-s", "open"}
+		out, err := rewriteBdHeartbeatArgs(in)
+		if err != nil {
+			t.Fatalf("rewriteBdHeartbeatArgs(%q) unexpected error: %v", in, err)
+		}
+		if len(out) != len(in) || out[0] != "list" || out[2] != "open" {
+			t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want passthrough", in, out)
+		}
+	})
 }

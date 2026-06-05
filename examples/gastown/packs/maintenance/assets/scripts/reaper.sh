@@ -8,6 +8,11 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
+# Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
+__SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_bd_trace.sh" "reaper"
+
 CITY="${GC_CITY_PATH:-${GC_CITY:-.}}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$SCRIPT_DIR/dolt-target.sh"
@@ -18,7 +23,10 @@ CITY_BEADS_DIR="$CITY_ABS/.beads"
 MAX_AGE="${GC_REAPER_MAX_AGE:-24h}"
 PURGE_AGE="${GC_REAPER_PURGE_AGE:-168h}"
 STALE_ISSUE_AGE="${GC_REAPER_STALE_ISSUE_AGE:-720h}"
+SESSION_PURGE_AGE="${GC_REAPER_SESSION_PURGE_AGE:-720h}"
+SESSION_STATE_PRUNE_AGE="${GC_REAPER_SESSION_STATE_PRUNE_AGE:-24h}"
 ALERT_THRESHOLD="${GC_REAPER_ALERT_THRESHOLD:-500}"
+MAIL_ALERT_THRESHOLD="${GC_REAPER_MAIL_ALERT_THRESHOLD:-0}"  # 0 = disabled
 DRY_RUN="${GC_REAPER_DRY_RUN:-}"
 
 # Convert Go durations to SQL INTERVAL hours for Dolt.
@@ -75,7 +83,7 @@ PY
 
 is_user_database() {
     case "$1" in
-        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|doctest_*|doctortest_*)
+        information_schema|mysql|dolt_cluster|performance_schema|sys|__gc_probe|benchdb|testdb_*|beads_pt*|beads_vr*|beads_test_bench_*|doctest_*|doctortest_*)
             return 1
             ;;
         beads_t*)
@@ -94,8 +102,8 @@ is_user_database() {
 # Discover databases from Dolt server. Exclude Dolt/MySQL system schemas,
 # Gas City's internal health-probe database, and test-fixture scratch
 # databases (benchdb, testdb_*, lowercase beads_t[0-9a-f]{8,}, beads_pt*,
-# beads_vr*, doctest_*, doctortest_* — matching the Go cleanup planner
-# contract); the remainder are bead stores.
+# beads_vr*, beads_test_bench_*, doctest_*, doctortest_* — matching the Go
+# cleanup planner contract); the remainder are bead stores.
 DATABASES=$(
     while IFS= read -r db; do
         if is_user_database "$db"; then
@@ -103,20 +111,26 @@ DATABASES=$(
         fi
     done < <(dolt_sql -r csv -q "SHOW DATABASES" 2>/dev/null | tail -n +2)
 )
+HAD_DATABASES=1
 if [ -z "$DATABASES" ]; then
-    # No databases accessible — nothing to do.
-    exit 0
+    # The Dolt-backed cleanup loop has no work, but the session-bead
+    # prune below still operates through bd's configured task store.
+    HAD_DATABASES=0
 fi
 
 TOTAL_STALE_WISPS=0
 TOTAL_CLOSED_WISPS=0
+TOTAL_WOULD_CLOSE_WISPS=0
 TOTAL_PURGED=0
+TOTAL_MAIL_WISPS=0
 TOTAL_ISSUES_CLOSED=0
 TOTAL_STALE_ISSUES_SKIPPED=0
+TOTAL_SESSIONS_PRUNED=0
+SESSION_PRUNE_ATTEMPTED=0
 ANOMALIES=""
 
 sanitize_output() {
-    printf '%s' "$1" | tr '\n' ' ' | cut -c1-500
+    printf '%s' "$1" | tr '\n' ' ' | cut -c1-4000
 }
 
 record_anomaly() {
@@ -203,7 +217,7 @@ get_sql_count() {
     if ! output=$(dolt_sql -r csv -q "$query" 2>"$stderr_file"); then
         stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
         rm -f "$stderr_file"
-        record_anomaly "$db" "$label count failed for $db: $(sanitize_output "$output $stderr_output")"
+        record_anomaly "$db" "$label count failed for $db: $(sanitize_output "$stderr_output $output")"
         return 0
     fi
     rm -f "$stderr_file"
@@ -234,12 +248,31 @@ get_sql_rows() {
     if ! output=$(dolt_sql -r csv -q "$query" 2>"$stderr_file"); then
         stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
         rm -f "$stderr_file"
-        record_anomaly "$db" "$label query failed for $db: $(sanitize_output "$output $stderr_output")"
+        record_anomaly "$db" "$label query failed for $db: $(sanitize_output "$stderr_output $output")"
         return 0
     fi
     rm -f "$stderr_file"
 
     SQL_ROWS_RESULT=$(printf '%s\n' "$output" | tail -n +2 | tr -d '\r')
+}
+
+has_dependency_target_column() {
+    local db="$1"
+    local table="$2"
+    local output
+    local fields
+
+    if ! output=$(dolt_sql -r csv -q "SHOW COLUMNS FROM \`$db\`.$table" 2>/dev/null); then
+        return 1
+    fi
+
+    fields=$(printf '%s\n' "$output" | tail -n +2 | cut -d, -f1 | tr -d '\r')
+    if [ -z "$fields" ]; then
+        return 0
+    fi
+
+    printf '%s\n' "$fields" | grep -qx 'issue_id' || return 1
+    printf '%s\n' "$fields" | grep -qx 'depends_on_id' || return 1
 }
 
 SQL_CHANGE_ROWS_RESULT=0
@@ -272,13 +305,19 @@ run_sql_change() {
         record_anomaly "$db" "$label failed for $db: could not create stderr capture file"
         return 1
     fi
+    # DML (DELETE/UPDATE) against a database-qualified table still needs an
+    # active database selected, or Dolt can reject it with "no database
+    # selected" (Error 1105) even though the target is fully qualified —
+    # reads (get_sql_count/get_sql_rows) do not. USE the target db first,
+    # mirroring the DOLT_COMMIT block below.
     if ! output=$(dolt_sql -r csv -q "
+USE \`$db\`;
 $query;
 SELECT ROW_COUNT();
     " 2>"$stderr_file"); then
         stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
         rm -f "$stderr_file"
-        record_anomaly "$db" "$label failed for $db: $(sanitize_output "$output $stderr_output")"
+        record_anomaly "$db" "$label failed for $db: $(sanitize_output "$stderr_output $output")"
         return 1
     fi
     stderr_output=$(cat "$stderr_file" 2>/dev/null || true)
@@ -286,7 +325,7 @@ SELECT ROW_COUNT();
 
     rows=$(printf '%s\n' "$output" | tail -1 | tr -d '\r')
     if [ -z "$rows" ] || ! [[ "$rows" =~ ^[0-9]+$ ]]; then
-        record_anomaly "$db" "$label returned non-numeric row count for $db: $(sanitize_output "$output $stderr_output")"
+        record_anomaly "$db" "$label returned non-numeric row count for $db: $(sanitize_output "$stderr_output $output")"
         return 1
     fi
 
@@ -304,6 +343,12 @@ while IFS= read -r DB; do
         # Not a bd-managed bead store. Skip silently; recording an
         # anomaly here would just turn every schemaless DB on the
         # server into noise. See gastownhall/gascity#1816.
+        continue
+    fi
+    if ! has_dependency_target_column "$DB" "dependencies" || ! has_dependency_target_column "$DB" "wisp_dependencies"; then
+        # Older or incompatible dependency schema. Skip silently like the
+        # has_wisps_table gate above; the only fix is a bead-store schema
+        # migration, which the reaper cannot perform.
         continue
     fi
 
@@ -329,7 +374,7 @@ while IFS= read -r DB; do
     while [ "$STALE_WISP_COUNT" -gt 0 ] && [ "$CLOSE_WISP_COUNT" -lt "$STALE_WISP_COUNT" ]; do
         get_sql_count "$DB" "schema-safe stale wisp" "
             SELECT COUNT(DISTINCT w.id) FROM \`$DB\`.wisps w
-            INNER JOIN \`$DB\`.dependencies d
+            INNER JOIN \`$DB\`.wisp_dependencies d
                 ON d.issue_id = w.id
                 AND d.type = 'parent-child'
             LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
@@ -342,7 +387,11 @@ while IFS= read -r DB; do
             )
         "
         CLOSE_WISP_BATCH=$SQL_COUNT_RESULT
-        if [ "$CLOSE_WISP_BATCH" -eq 0 ] || [ -n "$DRY_RUN" ]; then
+        if [ "$CLOSE_WISP_BATCH" -eq 0 ]; then
+            break
+        fi
+        if [ -n "$DRY_RUN" ]; then
+            TOTAL_WOULD_CLOSE_WISPS=$((TOTAL_WOULD_CLOSE_WISPS + CLOSE_WISP_BATCH))
             break
         fi
 
@@ -353,7 +402,7 @@ while IFS= read -r DB; do
             AND id IN (
                 SELECT id FROM (
                     SELECT w.id FROM \`$DB\`.wisps w
-                    INNER JOIN \`$DB\`.dependencies d
+                    INNER JOIN \`$DB\`.wisp_dependencies d
                         ON d.issue_id = w.id
                         AND d.type = 'parent-child'
                     LEFT JOIN \`$DB\`.wisps parent_wisp ON d.depends_on_id = parent_wisp.id
@@ -386,10 +435,9 @@ while IFS= read -r DB; do
         WHERE status = 'closed'
         AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
         AND id NOT IN (
-            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+            SELECT DISTINCT d.depends_on_id FROM \`$DB\`.wisp_dependencies d
             INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
             WHERE d.type = 'parent-child'
-            AND d.depends_on_id IS NOT NULL
             AND child_wisp.status IN ('open', 'hooked', 'in_progress')
         )
     "
@@ -401,10 +449,9 @@ while IFS= read -r DB; do
             WHERE status = 'closed'
             AND closed_at < DATE_SUB(NOW(), INTERVAL $PURGE_AGE_H HOUR)
             AND id NOT IN (
-                SELECT DISTINCT d.depends_on_id FROM \`$DB\`.dependencies d
+                SELECT DISTINCT d.depends_on_id FROM \`$DB\`.wisp_dependencies d
                 INNER JOIN \`$DB\`.wisps child_wisp ON d.issue_id = child_wisp.id
                 WHERE d.type = 'parent-child'
-                AND d.depends_on_id IS NOT NULL
                 AND child_wisp.status IN ('open', 'hooked', 'in_progress')
             )
         "; then
@@ -460,15 +507,32 @@ while IFS= read -r DB; do
         fi
     fi
 
-    # Step 5: Anomaly check — open wisp count.
-    get_sql_count "$DB" "open wisp" "
+    # Step 5a: Anomaly check — stale open wisp count. Fresh workflow load can
+    # legitimately exceed the threshold on busy cities; only old non-message
+    # rows indicate a reaper leak.
+    get_sql_count "$DB" "stale open wisp anomaly" "
         SELECT COUNT(*) FROM \`$DB\`.wisps
         WHERE status IN ('open', 'hooked', 'in_progress')
+        AND issue_type NOT IN ('message')
+        AND created_at < DATE_SUB(NOW(), INTERVAL $MAX_AGE_H HOUR)
     "
-    OPEN_WISPS=$SQL_COUNT_RESULT
+    REAPABLE_WISPS=$SQL_COUNT_RESULT
 
-    if [ "$OPEN_WISPS" -gt "$ALERT_THRESHOLD" ]; then
-        ANOMALIES="${ANOMALIES}$DB: $OPEN_WISPS open wisps (threshold: $ALERT_THRESHOLD)\n"
+    if [ "$REAPABLE_WISPS" -gt "$ALERT_THRESHOLD" ]; then
+        ANOMALIES="${ANOMALIES}$DB: $REAPABLE_WISPS stale open wisps (threshold: $ALERT_THRESHOLD, age: ${MAX_AGE})\n"
+    fi
+
+    # Step 5b: Mail-wisp backlog count, observed separately from reapable wisps.
+    get_sql_count "$DB" "open mail wisp" "
+        SELECT COUNT(*) FROM \`$DB\`.wisps
+        WHERE status IN ('open', 'hooked', 'in_progress')
+        AND issue_type = 'message'
+    "
+    MAIL_WISPS=$SQL_COUNT_RESULT
+    TOTAL_MAIL_WISPS=$((TOTAL_MAIL_WISPS + MAIL_WISPS))
+
+    if [ "$MAIL_ALERT_THRESHOLD" -gt 0 ] && [ "$MAIL_WISPS" -gt "$MAIL_ALERT_THRESHOLD" ]; then
+        ANOMALIES="${ANOMALIES}$DB: $MAIL_WISPS open mail-wisps (mail threshold: $MAIL_ALERT_THRESHOLD)\n"
     fi
 
     # Commit Dolt changes. Must use CALL (not SELECT) and have an active
@@ -494,15 +558,61 @@ done <<EOF
 $DATABASES
 EOF
 
+# Step 6: prune closed gm session beads from the city's primary bead store.
+if [ -d "$CITY_BEADS_DIR" ] && command -v bd >/dev/null 2>&1; then
+    SESSION_PRUNE_ATTEMPTED=1
+    BD_PRUNE_ARGS=(prune --pattern 'gm-*' --older-than "$SESSION_PURGE_AGE")
+    if [ -z "$DRY_RUN" ]; then
+        BD_PRUNE_ARGS+=(--force)
+    fi
+    BD_PRUNE_ARGS+=(--json)
+
+    if PRUNE_JSON=$((
+        cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" bd "${BD_PRUNE_ARGS[@]}"
+    ) 2>/dev/null); then
+        :
+    else
+        PRUNE_JSON='{"pruned_count":0}'
+    fi
+    PRUNE_COUNT=$(printf '%s' "$PRUNE_JSON" | sed -n 's/.*"pruned_count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    [ -z "$PRUNE_COUNT" ] && PRUNE_COUNT=0
+    TOTAL_SESSIONS_PRUNED=$PRUNE_COUNT
+    if [ "$PRUNE_COUNT" -gt 1000 ]; then
+        record_anomaly "gm" "$PRUNE_COUNT closed session beads pruned in one run (threshold: 1000)"
+    fi
+fi
+
+if [ -d "$CITY_BEADS_DIR" ] && [ -z "$DRY_RUN" ] && command -v gc >/dev/null 2>&1; then
+    SESSION_PRUNE_ATTEMPTED=1
+    if SESSION_STATE_PRUNE_JSON=$((
+        cd "$CITY_ABS" && BEADS_DIR="$CITY_BEADS_DIR" gc session prune --state drained --before "$SESSION_STATE_PRUNE_AGE" --json
+    ) 2>&1); then
+        :
+    else
+        record_anomaly "gm" "terminal session-state prune failed: $(sanitize_output "$SESSION_STATE_PRUNE_JSON")"
+        SESSION_STATE_PRUNE_JSON='{"count":0}'
+    fi
+    SESSION_STATE_PRUNE_COUNT=$(printf '%s' "$SESSION_STATE_PRUNE_JSON" | sed -n 's/.*"count"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' | head -1)
+    [ -z "$SESSION_STATE_PRUNE_COUNT" ] && SESSION_STATE_PRUNE_COUNT=0
+    TOTAL_SESSIONS_PRUNED=$((TOTAL_SESSIONS_PRUNED + SESSION_STATE_PRUNE_COUNT))
+    if [ "$SESSION_STATE_PRUNE_COUNT" -gt 1000 ]; then
+        record_anomaly "gm" "$SESSION_STATE_PRUNE_COUNT terminal session-state beads pruned in one run (threshold: 1000)"
+    fi
+fi
+
+if [ "$HAD_DATABASES" -eq 0 ] && [ "$SESSION_PRUNE_ATTEMPTED" -eq 0 ]; then
+    exit 0
+fi
+
 # Report.
 if [ -n "$ANOMALIES" ]; then
     gc mail send mayor/ -s "ESCALATION: Reaper anomalies detected [MEDIUM]" \
         -m "$ANOMALIES" 2>/dev/null || true
 fi
 
-SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED"
+SUMMARY="reaper — stale_wisps:$TOTAL_STALE_WISPS, closed_wisps:$TOTAL_CLOSED_WISPS, purged:$TOTAL_PURGED, sessions-pruned:$TOTAL_SESSIONS_PRUNED, closed:$TOTAL_ISSUES_CLOSED, skipped_non_city_issues:$TOTAL_STALE_ISSUES_SKIPPED, mail_wisps:$TOTAL_MAIL_WISPS"
 if [ -n "$DRY_RUN" ]; then
-    SUMMARY="$SUMMARY (dry run)"
+    SUMMARY="$SUMMARY, would_close_wisps:$TOTAL_WOULD_CLOSE_WISPS (dry run)"
 fi
 
 gc session nudge deacon/ "DOG_DONE: $SUMMARY" 2>/dev/null || true

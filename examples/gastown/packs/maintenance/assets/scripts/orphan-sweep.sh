@@ -11,24 +11,91 @@
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
+# Trace bd invocations to $GC_BD_TRACE when set (no-op otherwise).
+case "${BASH_SOURCE[0]}" in
+    */*) __SCRIPT_DIR="$(cd "${BASH_SOURCE[0]%/*}" && pwd)" ;;
+    *) __SCRIPT_DIR="$(pwd)" ;;
+esac
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/_bd_trace.sh" "orphan-sweep"
+
 CITY="${GC_CITY:-.}"
 
-# Step 1: Collect in-progress beads from HQ and every rig.
+# Step 1: Collect in-progress beads from HQ and every rig whose session
+# liveness can be determined.
 # `gc bd list` without --rig is HQ-scoped from the city cwd, so per-rig
 # beads are invisible to a bare query — walk every rig explicitly.
 TMP=$(mktemp) || exit 0
-trap 'rm -f "$TMP"' EXIT
+SESSION_TMP=$(mktemp) || {
+    rm -f "$TMP"
+    exit 0
+}
+trap 'rm -f "$TMP" "$SESSION_TMP"' EXIT
 
-gc bd list --status=in_progress --json --limit=0 2>/dev/null >>"$TMP" || true
-
+RIG_NAMES=""
 RIG_LIST=$(gc rig list --json 2>/dev/null) || RIG_LIST=""
 if [ -n "$RIG_LIST" ]; then
     RIG_NAMES=$(echo "$RIG_LIST" | jq -r '.rigs[] | select(.hq == false) | .name' 2>/dev/null) || RIG_NAMES=""
-    while IFS= read -r rig; do
-        [ -z "$rig" ] && continue
-        gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >>"$TMP" || true
-    done <<<"$RIG_NAMES"
 fi
+
+append_session_list() {
+    local session_fetch_tmp
+    session_fetch_tmp=$(mktemp) || return 1
+    if "$@" >"$session_fetch_tmp" 2>/dev/null; then
+        cat "$session_fetch_tmp" >>"$SESSION_TMP"
+        rm -f "$session_fetch_tmp"
+        return 0
+    fi
+    rm -f "$session_fetch_tmp"
+    return 1
+}
+
+append_hq_scope() {
+    local bead_fetch_tmp
+    bead_fetch_tmp=$(mktemp) || return 1
+    append_session_list gc session list --json || {
+        rm -f "$bead_fetch_tmp"
+        return 1
+    }
+    gc bd list --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
+    append_session_list gc session list --json || {
+        rm -f "$bead_fetch_tmp"
+        return 1
+    }
+    cat "$bead_fetch_tmp" >>"$TMP"
+    rm -f "$bead_fetch_tmp"
+}
+
+append_rig_scope() {
+    local rig="$1"
+    local bead_fetch_tmp
+    bead_fetch_tmp=$(mktemp) || return 1
+    append_session_list gc --rig "$rig" session list --json || {
+        rm -f "$bead_fetch_tmp"
+        return 1
+    }
+    gc bd list --rig "$rig" --status=in_progress --json --limit=0 2>/dev/null >"$bead_fetch_tmp" || true
+    append_session_list gc --rig "$rig" session list --json || {
+        rm -f "$bead_fetch_tmp"
+        return 1
+    }
+    cat "$bead_fetch_tmp" >>"$TMP"
+    rm -f "$bead_fetch_tmp"
+}
+
+# Step 1b: Get all known live session identities around each bead-list query.
+# The second liveness pass closes the session-list-before-bd-list race where a
+# newly spawned session can claim work after the first pass but before bd-list.
+# HQ liveness is required; per-rig failures only skip that rig's staged bead
+# rows so one stale or unreachable rig does not disable cleanup elsewhere.
+append_hq_scope || exit 0
+
+while IFS= read -r rig; do
+    [ -z "$rig" ] && continue
+    if ! append_rig_scope "$rig"; then
+        echo "orphan-sweep: skipping rig $rig after session-list failure" >&2
+    fi
+done <<<"$RIG_NAMES"
 
 IN_PROGRESS=$(jq -c -s 'add // []' "$TMP" 2>/dev/null) || IN_PROGRESS="[]"
 if [ "$IN_PROGRESS" = "[]" ]; then
@@ -46,21 +113,51 @@ if [ -z "$AGENTS" ]; then
     exit 0
 fi
 
-# Step 2b: Collect identities of every live (non-closed) session so that
-# pool-spawned ephemeral assignees (e.g. gastown__polekitten-gc-q9j0om) are
-# treated as known. The Go-side releaseOrphanedPoolAssignments path validates
-# these via liveOpenSessionAssignmentExists, but this shell sweep ran without
-# that guard — an ephemeral assignee whose template-stripped form did not
-# match any agent name was incorrectly reset, racing against active polekitten
-# work and producing the false-orphan loop tracked in ga-nvx.
-SESSIONS_JSON=$(gc session list --json 2>/dev/null) || SESSIONS_JSON="[]"
-LIVE_SESSION_IDS=$(echo "$SESSIONS_JSON" | jq -r '
-    .[]
-    | select(.Closed == false)
-    | [.ID, .SessionName, .Alias, .AgentName]
+# Step 2b: Parse identities of every session row that `gc session list --json`
+# reports as open so that pool-spawned ephemeral assignees (e.g.
+# gastown__polekitten-gc-q9j0om) are treated as known. The Go-side
+# releaseOrphanedPoolAssignments path validates these from session beads via
+# liveOpenSessionAssignmentExists, but this shell sweep only has the CLI JSON
+# contract available. That means it protects the exposed wire identities below;
+# it cannot see bead-only fields such as configured_named_identity or
+# alias_history unless the CLI starts exporting them.
+#
+# The default CLI path already omits closed sessions. The closed/state guards
+# below keep explicit or future session-list producers from making terminal
+# rows live while preserving any non-closed row the CLI reports.
+#
+# This shell sweep ran without a live-session guard before ga-nvx: an ephemeral
+# assignee whose template-stripped form did not match any agent name was
+# incorrectly reset, racing against active polekitten work and producing a
+# false-orphan loop.
+# Two bugs the chronic strip pattern (gastownhall/gascity#2363) revealed:
+# (1) The JSON shape is {"sessions":[...], "summary":..., "filters":..., "schema_version":...},
+#     so `.[]` iterated four top-level scalar keys instead of session objects.
+# (2) Field names vary by runtime/API path. The current CLI emits snake_case
+#     (.closed/.id/.session_name/.alias/.agent_name); PascalCase is accepted
+#     only as forward-compatible hardening so a casing change cannot make
+#     LIVE_SESSION_IDS empty and strip active pool claims.
+LIVE_SESSION_IDS=$(jq -r -s '
+    def pick($snake; $pascal; $default):
+      if has($snake) and .[$snake] != null then .[$snake]
+      elif has($pascal) and .[$pascal] != null then .[$pascal]
+      else $default end;
+    .[] | .sessions[]?
+    | select(
+        (pick("closed"; "Closed"; false) == false)
+        and ((pick("state"; "State"; "") | ascii_downcase) != "closed")
+      )
+    | [
+        pick("id"; "ID"; null),
+        pick("session_name"; "SessionName"; null),
+        pick("alias"; "Alias"; null),
+        pick("agent_name"; "AgentName"; null),
+        pick("template"; "Template"; null),
+        pick("name"; "Name"; null)
+      ]
     | .[]
     | select(. != null and . != "")
-' 2>/dev/null) || LIVE_SESSION_IDS=""
+' "$SESSION_TMP" 2>/dev/null) || exit 0
 
 agent_exists() {
     local candidate="$1"

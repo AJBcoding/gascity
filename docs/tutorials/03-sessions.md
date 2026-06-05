@@ -21,10 +21,6 @@ $ cat pack.toml
 name = "my-city"
 schema = 2
 
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -72,8 +68,8 @@ then pass that to `gc session peek`:
 ```shell
 ~/my-project
 $ gc session list --template my-project/reviewer
-ID       TEMPLATE  STATE     REASON  TITLE     AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer  creating  create  reviewer  1s   -
+ID       TEMPLATE              STATE     REASON  TARGET        TITLE     AGE  LAST ACTIVE
+mc-8sfd  my-project/reviewer   creating  create  reviewer-a1b  reviewer  1s   -
 
 ~/my-project
 $ gc session peek mc-8sfd
@@ -82,26 +78,29 @@ $ gc session peek mc-8sfd
   Run `gc prime` to initialize your context.
 
   # Code Reviewer Agent
-  You are an agent in a Gas City workspace. Check for available work and
-  execute it.
+  You are an agent in a Gas City workspace. Claim routed work before executing it.
 
   ## Your tools
-  - `bd ready` — see available work items
-  - `bd show <id>` — see details of a work item
-  - `bd close <id>` — mark work as done
+  - `gc hook` — find routed work
+  - `bd update <id> --claim` — atomically claim unassigned work
+  - `bd show <id> --json` — verify assignee and metadata
+  - `bd close <id>` — mark work done
+  - `gc runtime drain-ack` — end the session when idle
 
   ## How to work
-  1. Check for available work: `bd ready`
-  2. Pick a bead and execute the work described in its title
-  3. When done, close it: `bd close <id>`
-  4. Check for more work. Repeat until the queue is empty.
+  1. Check assigned work: `bd ready --assignee="$GC_SESSION_NAME" --json --limit=1`
+  2. If none is assigned, run `gc hook`
+  3. Claim unassigned routed work with `bd update <id> --claim`
+  4. Verify `assignee` and `gc.continuation_group` metadata with `bd show <id> --json`
+  5. Review the code, write the requested feedback, and close the bead
+  6. If no assigned continuation work is ready, run `gc runtime drain-ack && exit`
 
   ## Reviewing Code
   Read the code and provide feedback on bugs, security issues, and style.
 
 ... # content elided
 
-• Ran bd ready --json
+• Ran gc hook
   └ warning: beads.role not configured (GH#2950).
       Fix: git config beads.role maintainer
     … +282 lines
@@ -152,9 +151,9 @@ active, you can see it in the list of sessions:
 ~/my-project
 $ gc session list
 2026/04/07 21:50:21 tmux state cache: refreshed 2 sessions in 3.82725ms
-ID       TEMPLATE  STATE     REASON          TITLE     AGE  LAST ACTIVE
-mc-8sfd  my-project/reviewer  creating  create          reviewer  1s   -
-mc-5o1   mayor     active    session,config  mayor     10h  14m ago
+ID       TEMPLATE              STATE     REASON          TARGET        TITLE     AGE  LAST ACTIVE
+mc-8sfd  my-project/reviewer   creating  create          reviewer-a1b  reviewer  1s   -
+mc-5o1   mayor                 active    session,config  mayor         mayor     10h  14m ago
 ```
 
 However, once the work is done, the reviewer will go idle and its session will
@@ -171,15 +170,12 @@ City is up and idle. No pending work, no agents running besides me. What would
   you like to do?
 ```
 
-So the mayor is clearly idle, but has not been shutdown. Why not? If you take a
-look again at your `pack.toml` file, you'll see why:
+So the mayor is clearly idle, but has not been shutdown. Why not? If you look
+again at your `pack.toml` file, you'll see the named session that keeps it
+alive:
 
 ```toml
 ...
-[[agent]]
-name = "mayor"
-prompt_template = "agents/mayor/prompt.template.md"
-
 [[named_session]]
 template = "mayor"
 mode = "always"
@@ -187,7 +183,7 @@ mode = "always"
 ```
 
 The mayor has a specially named session called "mayor" that is always running.
-It's kept up but the system so that you can have quick access to it for a chat
+It's kept up by the system so that you can have quick access to it for a chat
 or some planning or whatever you'd like to do. A polecat is designed to be
 transient, but an agent is a member of your "crew" (whether city-wide or
 rig-specific) if it's always around and ready to chat interactively or receive
@@ -233,8 +229,8 @@ sessions:
 ```shell
 ~/my-city
 $ gc session list
-ID      ALIAS  TEMPLATE  STATE
-my-4    —      mayor     active
+ID    TEMPLATE  STATE   REASON          TARGET  TITLE  AGE  LAST ACTIVE
+my-4  mayor     active  session,config  mayor   mayor  2m   5s ago
 ```
 
 ## Session logs

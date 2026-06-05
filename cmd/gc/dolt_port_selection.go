@@ -13,9 +13,21 @@ import (
 
 func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 	cityPath = normalizePathForCompare(cityPath)
-	if port := strings.TrimSpace(os.Getenv("GC_DOLT_PORT")); port != "" {
-		return port, nil
+	envPort := strings.TrimSpace(os.Getenv("GC_DOLT_PORT"))
+
+	// If the city uses a shared dolt server, return the shared server port
+	// without attempting managed dolt state resolution.
+	if cityUsesSharedDoltServer(cityPath) {
+		port := resolveSharedDoltServerPort()
+		if port != "" {
+			return port, nil
+		}
 	}
+
+	// Also check if a shared server port is resolvable — rigs inherit the
+	// city's shared-server config but their own path won't have the flag.
+	// Fall back to shared server if available before hashing a new port.
+	sharedPort := resolveSharedDoltServerPort()
 
 	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
 	if err != nil {
@@ -72,6 +84,14 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 			}
 			return strconv.Itoa(repaired.Port), nil
 		}
+	}
+	// No managed state found. Prefer the shared server port if available,
+	// otherwise hash city path into a deterministic port.
+	if envPort != "" {
+		return envPort, nil
+	}
+	if sharedPort != "" {
+		return sharedPort, nil
 	}
 	seed := deterministicManagedDoltPortSeed(cityPath)
 	return strconv.Itoa(nextAvailableManagedDoltPort(seed)), nil
@@ -151,6 +171,29 @@ func nextAvailableManagedDoltPort(seed int) int {
 			port = 10000
 		}
 		if managedDoltPortAvailable(port) {
+			return port
+		}
+		port++
+	}
+	return seed
+}
+
+// nextAvailableManagedDoltPortForHost is the host-aware variant used by
+// startManagedDoltProcessWithOptions after a host-aware wait on the original
+// port has failed. Using the same host as the eventual bind avoids picking a
+// port that probes free on 127.0.0.1 but is actually busy on the bind host
+// (e.g. another process holds 192.168.1.5:X while leaving 127.0.0.1:X free,
+// and dolt is binding 0.0.0.0:X, which would fail). Blank host normalizes
+// to "0.0.0.0" inside managedDoltPortAvailableFn (the indirection over
+// managedDoltPortAvailableForHost) to match the bind default in
+// startManagedDoltProcessWithOptions.
+func nextAvailableManagedDoltPortForHost(host string, seed int) int {
+	port := seed
+	for attempts := 0; attempts < 100; attempts++ {
+		if port > 60000 {
+			port = 10000
+		}
+		if managedDoltPortAvailableFn(host, port) {
 			return port
 		}
 		port++

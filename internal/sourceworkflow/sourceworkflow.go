@@ -42,6 +42,10 @@ type ConflictError struct {
 // Used by WorkflowMatchesSource to scope cross-store singleton checks.
 const SourceStoreRefMetadataKey = "gc.source_store_ref"
 
+// WorkflowSubtreeClosedReason is stamped on workflow subtree force-closes so
+// strict stores that require a human-readable close reason accept the cleanup.
+const WorkflowSubtreeClosedReason = "source workflow cleanup: subtree force-closed by CloseWorkflowSubtree"
+
 // WorkflowSkippedCloseReason is the canonical close_reason stamped on
 // workflow-subtree beads when they are force-closed via the
 // gc.outcome=skipped cleanup path (gc convoy delete --skip, force-replace
@@ -164,7 +168,7 @@ func ListLiveRoots(store beads.Store, sourceBeadID, sourceStoreRef, rootStoreRef
 	if store == nil || sourceBeadID == "" {
 		return nil, nil
 	}
-	roots, err := store.List(beads.ListQuery{
+	roots, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		Metadata: map[string]string{
 			"gc.source_bead_id": sourceBeadID,
 		},
@@ -358,7 +362,7 @@ func ListWorkflowBeads(store beads.Store, rootID string) ([]beads.Bead, error) {
 	if err != nil {
 		return nil, err
 	}
-	descendants, err := store.List(beads.ListQuery{
+	descendants, err := beads.HandlesFor(store).Live.List(beads.ListQuery{
 		IncludeClosed: true,
 		Metadata: map[string]string{
 			"gc.root_bead_id": rootID,
@@ -448,7 +452,7 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 	}
 	return store.CloseAll(ordered, map[string]string{
 		"gc.outcome":   "skipped",
-		"close_reason": WorkflowSkippedCloseReason,
+		"close_reason": WorkflowSubtreeClosedReason,
 	})
 }
 
@@ -456,10 +460,12 @@ func CloseWorkflowSubtree(store beads.Store, rootID string) (int, error) {
 // bead so force-replacement can restore them if the replacement's finalize
 // or post-finalize invariant check fails.
 type WorkflowBeadSnapshot struct {
-	ID       string
-	Status   string
-	Assignee string
-	Outcome  string
+	ID            string
+	Status        string
+	Assignee      string
+	Outcome       string
+	FailureReason string
+	CloseReason   string
 }
 
 // SnapshotOpenWorkflowBeads records the status/assignee/outcome of every
@@ -476,10 +482,12 @@ func SnapshotOpenWorkflowBeads(store beads.Store, rootID string) ([]WorkflowBead
 			continue
 		}
 		out = append(out, WorkflowBeadSnapshot{
-			ID:       bead.ID,
-			Status:   bead.Status,
-			Assignee: bead.Assignee,
-			Outcome:  bead.Metadata["gc.outcome"],
+			ID:            bead.ID,
+			Status:        bead.Status,
+			Assignee:      bead.Assignee,
+			Outcome:       bead.Metadata["gc.outcome"],
+			FailureReason: bead.Metadata["gc.failure_reason"],
+			CloseReason:   bead.Metadata["close_reason"],
 		})
 	}
 	return out, nil
@@ -505,6 +513,12 @@ func RestoreWorkflowBeads(store beads.Store, snapshots []WorkflowBeadSnapshot) e
 		}
 		if err := store.SetMetadata(snapshot.ID, "gc.outcome", snapshot.Outcome); err != nil {
 			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s outcome: %w", snapshot.ID, err))
+		}
+		if err := store.SetMetadata(snapshot.ID, "gc.failure_reason", snapshot.FailureReason); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s failure reason: %w", snapshot.ID, err))
+		}
+		if err := store.SetMetadata(snapshot.ID, "close_reason", snapshot.CloseReason); err != nil {
+			restoreErr = errors.Join(restoreErr, fmt.Errorf("restore bead %s close reason: %w", snapshot.ID, err))
 		}
 	}
 	return restoreErr

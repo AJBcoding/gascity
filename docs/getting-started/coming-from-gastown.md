@@ -47,7 +47,7 @@ can be expressed in.
 
 | Gas Town concept | Gas City concept | What changes for you |
 |---|---|---|
-| Town config + rig config + role homes | PackV2: `pack.toml`, `city.toml`, `agents/`, and `.gc/` | Definition, deployment, and machine-local state are separated instead of being spread across role-specific directories and managers. |
+| Town config + rig config + role homes | `pack.toml`, `city.toml`, `agents/`, and `.gc/` | Definition, deployment, and machine-local state are separated instead of being spread across role-specific directories and managers. |
 | Mayor, deacon, witness, refinery, polecat, crew, dog | Configured agents | Gas City has no baked-in role names in Go. These are pack conventions, not SDK primitives. |
 | Plugin | Order | An exec order runs shell directly with no agent session. A formula order instantiates agent work. If you were thinking "plugin that runs a command", start with an exec order. |
 | Convoy | Convoy bead plus sling/formulas | Convoys are still bead-backed work grouping, but there is no special convoy runtime layer you have to use to get orchestration. |
@@ -232,7 +232,22 @@ Use an exec order before inventing a plugin, helper role, or hidden session.
 
 That is the direct Gas City answer to many old Town automation tasks.
 
-## Common Gastown Overrides In PackV2
+### "How do I get to my mayor?"
+
+```bash
+gc session attach mayor
+```
+
+The Mayor session is the primary Gas Town experience — an interactive Claude
+session with full city context that coordinates everything. The CLI is
+plumbing; this is the product.
+
+City-scoped agents from the Gastown pack — `mayor`, `deacon`, `boot` — are all
+accessible the same way. Use `gc session list` to see what is running.
+
+This replaces `gt session at mayor/` or `tmux attach -t gt-mayor` from Gas Town.
+
+## Common Gastown Overrides
 
 If you are using the Gastown pack, these are the most common local changes.
 
@@ -248,7 +263,8 @@ name = "my-city"
 schema = 2
 
 [imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 ```
 
 ```toml
@@ -257,7 +273,8 @@ source = "./assets/gastown"
 name = "myproject"
 
 [rigs.imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 ```
 
 ```bash
@@ -274,7 +291,8 @@ This is the cleanest answer to "I want more or fewer polecats for this rig."
 name = "myproject"
 
 [rigs.imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -291,7 +309,8 @@ max = 10
 name = "myproject"
 
 [rigs.imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 
 [[rigs.patches]]
 agent = "gastown.polecat"
@@ -348,7 +367,8 @@ This is what rig overrides are for:
 name = "myproject"
 
 [rigs.imports.gastown]
-source = "./assets/gastown"
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:d3617d1319a1206ac85f69ba024ec395c49c6f4b"
 
 [[rigs.patches]]
 agent = "gastown.refinery"
@@ -518,7 +538,8 @@ of re-expressing the intent in Gas City's primitives.
 If you already know Gas Town, this is the shortest path to becoming effective
 in Gas City:
 
-1. Read the Nine Concepts Overview (`engdocs/architecture/nine-concepts`).
+1. Read the [Primitives Reference](/concepts/primitives) — the nine building
+   blocks of Gas City in user terms.
 2. Read the Config System docs (`engdocs/architecture/config`).
 3. Read Orders (`engdocs/architecture/orders`) and mentally remap "plugins" to
    "orders".

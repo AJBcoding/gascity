@@ -36,21 +36,80 @@ const (
 )
 
 // ConfigState is the canonical endpoint-bearing subset of .beads/config.yaml.
+//
+// Backend determines which connection fields are meaningful. Empty Backend
+// preserves the historical Dolt-only behavior (callers that don't set Backend
+// continue to use DoltHost/DoltPort/DoltUser). When Backend == "mysql" the
+// Dolt fields are ignored and the Mysql* fields are written/read instead
+// (yaml keys mysql.server-host, mysql.server-port, mysql.server-user,
+// mysql.database — these are the keys bd's config layer expects).
 type ConfigState struct {
 	IssuePrefix    string
+	Backend        string
 	EndpointOrigin EndpointOrigin
 	EndpointStatus EndpointStatus
 	DoltHost       string
 	DoltPort       string
 	DoltUser       string
+	Dolt           DoltConfig
+	MysqlHost      string
+	MysqlPort      string
+	MysqlUser      string
+	MysqlDatabase  string
+}
+
+// DoltConfig is the Dolt-specific subset of .beads/config.yaml that GC owns.
+type DoltConfig struct {
+	DisableEventFlush *bool
+}
+
+// DisableEventFlushEnabled returns whether managed Dolt launches should disable
+// Dolt's event-flush telemetry reporter. Missing config defaults to true.
+func (c DoltConfig) DisableEventFlushEnabled() bool {
+	if c.DisableEventFlush == nil {
+		return true
+	}
+	return *c.DisableEventFlush
 }
 
 // MetadataState is the canonical subset of .beads/metadata.json used by GC.
+//
+// Backend determines which backend-specific fields are meaningful. When
+// returned from LoadMetadataState the populated backend-specific fields are
+// guaranteed consistent with Backend — i.e. a state with Backend == "postgres"
+// always has every Postgres field non-empty and PostgresPort already verified
+// as a TCP-port-shaped string. Backend == "mysql" requires MysqlHost,
+// MysqlPort, MysqlUser, MysqlDatabase all non-empty with port verified.
 type MetadataState struct {
-	Database     string
-	Backend      string
-	DoltMode     string
-	DoltDatabase string
+	Database         string `json:"database"`
+	Backend          string `json:"backend"`
+	DoltMode         string `json:"dolt_mode,omitempty"`
+	DoltDatabase     string `json:"dolt_database,omitempty"`
+	PostgresHost     string `json:"postgres_host,omitempty"`
+	PostgresPort     string `json:"postgres_port,omitempty"`
+	PostgresUser     string `json:"postgres_user,omitempty"`
+	PostgresDatabase string `json:"postgres_database,omitempty"`
+	MysqlHost        string `json:"mysql_host,omitempty"`
+	MysqlPort        string `json:"mysql_port,omitempty"`
+	MysqlUser        string `json:"mysql_user,omitempty"`
+	MysqlDatabase    string `json:"mysql_database,omitempty"`
+}
+
+// MetadataParseError reports a failure to parse or validate metadata.json.
+//
+// Returned by LoadMetadataState for JSON parse failures and for every E1–E5
+// rejection in the metadata contract. Callers may use errors.As to
+// discriminate parse failures from I/O failures (which surface as plain OS
+// errors).
+type MetadataParseError struct {
+	// Path is the absolute path to the metadata.json file that failed.
+	Path string
+	// Reason is the verbatim rejection reason text (the part after `: `).
+	Reason string
+}
+
+func (e *MetadataParseError) Error() string {
+	return fmt.Sprintf("load metadata %s: %s", e.Path, e.Reason)
 }
 
 var deprecatedMetadataKeys = []string{
@@ -61,6 +120,42 @@ var deprecatedMetadataKeys = []string{
 	"dolt_server_port",
 	"dolt_server_user",
 	"dolt_port",
+}
+
+var doltBackendKeys = []string{
+	"dolt_mode",
+	"dolt_database",
+}
+
+var postgresBackendKeys = []string{
+	"postgres_host",
+	"postgres_port",
+	"postgres_user",
+	"postgres_database",
+}
+
+var mysqlBackendKeys = []string{
+	"mysql_host",
+	"mysql_port",
+	"mysql_user",
+	"mysql_database",
+}
+
+// crossBackendKeysToScrub returns the on-disk metadata keys that should be
+// removed when canonicalising for the given backend. An empty backend
+// preserves all backend-specific keys (today's behavior for unknown-shape
+// metadata).
+func crossBackendKeysToScrub(backend string) []string {
+	switch backend {
+	case "dolt":
+		return append(append([]string{}, postgresBackendKeys...), mysqlBackendKeys...)
+	case "postgres":
+		return append(append([]string{}, doltBackendKeys...), mysqlBackendKeys...)
+	case "mysql":
+		return append(append([]string{}, doltBackendKeys...), postgresBackendKeys...)
+	default:
+		return nil
+	}
 }
 
 var deprecatedConfigKeys = []string{
@@ -114,6 +209,62 @@ func ReadAutoStartDisabled(fs fsys.FS, path string) (bool, error) {
 	}
 	if value, ok := configStringValue(mappingRoot(doc), "dolt.auto-start"); ok {
 		return value == "false", nil
+	}
+	return false, nil
+}
+
+// ReadExportAuto returns the configured value of export.auto along with a
+// presence indicator. ok=false means the key is absent from the config OR
+// the value is not a recognized boolean (the upstream bd default is true).
+// Used by gc to gate cleanup of stale .beads/issues.jsonl exports: when
+// export.auto is explicitly false, the JSONL is a stale artifact that bd's
+// auto-import-on-write path (sa-41j3kp) would otherwise reload on every
+// write, stalling bd create for minutes on large datasets.
+//
+// Because this gates destructive cleanup, parsing is strict: only the
+// boolean literals strconv.ParseBool accepts count as present. A garbage
+// value (e.g. "yes", "off", "foo") returns ok=false so callers fall back
+// to other gc-managed signals rather than mis-treating the scope as
+// canonical.
+func ReadExportAuto(fs fsys.FS, path string) (value bool, ok bool, err error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, false, nil
+		}
+		if raw, scanOK := scanConfigLineValue(fs, path, "export.auto:"); scanOK {
+			if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
+				return parsed, true, nil
+			}
+			return false, false, nil
+		}
+		return false, false, err
+	}
+	if raw, present := configStringValue(mappingRoot(doc), "export.auto"); present {
+		if parsed, parseErr := strconv.ParseBool(raw); parseErr == nil {
+			return parsed, true, nil
+		}
+		return false, false, nil
+	}
+	return false, false, nil
+}
+
+// ReadSharedServerEnabled reports whether dolt.shared-server is true in config.
+// When true, the city relies on an externally-managed shared Dolt server
+// rather than a gc-managed per-city instance.
+func ReadSharedServerEnabled(fs fsys.FS, path string) (bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		if value, ok := scanConfigLineValue(fs, path, "dolt.shared-server:"); ok {
+			return value == "true", nil
+		}
+		return false, err
+	}
+	if value, ok := configStringValue(mappingRoot(doc), "dolt.shared-server"); ok {
+		return value == "true", nil
 	}
 	return false, nil
 }
@@ -172,6 +323,24 @@ func ScopeHasEndpointAuthority(fs fsys.FS, scopeRoot string) bool {
 	return ConfigHasEndpointAuthority(cfg)
 }
 
+// ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.
+func ReadDoltConfig(fs fsys.FS, path string) (DoltConfig, bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return DoltConfig{}, false, nil
+		}
+		if data, readErr := fs.ReadFile(path); readErr == nil {
+			if cfg, ok := readDoltConfigFromData(data); ok {
+				return cfg, true, nil
+			}
+		}
+		return DoltConfig{}, false, err
+	}
+	cfg := readDoltConfigFromRoot(mappingRoot(doc))
+	return cfg, cfg.hasValues(), nil
+}
+
 // ReadDoltDatabase reads the pinned dolt_database from metadata.json.
 func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 	data, err := fs.ReadFile(path)
@@ -189,6 +358,183 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 		return value, true, nil
 	}
 	return "", false, nil
+}
+
+// LoadMetadataState parses .beads/metadata.json at path and returns the
+// canonical MetadataState if the file exists and validates.
+//
+// Returns (zero, false, nil) when the file does not exist — callers decide
+// whether absence is an error in their context (mirrors ReadIssuePrefix and
+// ReadDoltDatabase). Returns a non-nil error for read failures other than
+// ENOENT and for any of the E1–E5 rejection cases. Validation failures are
+// wrapped in *MetadataParseError; callers may use errors.As to discriminate.
+//
+// Validation order is deterministic: the operator always sees the same
+// top-most message when several things are wrong. Order is JSON parse (E1) →
+// mixed-backend (E3) → unknown backend (E2) → postgres-required (E4) →
+// postgres-port-format (E5). An empty Backend is permitted at the parse
+// layer; downstream consumers that need a backend must check
+// state.Backend != "" themselves.
+func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return MetadataState{}, false, nil
+		}
+		return MetadataState{}, false, err
+	}
+
+	abs, absErr := filepath.Abs(path)
+	if absErr != nil {
+		abs = path
+	}
+
+	var state MetadataState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return MetadataState{}, false, &MetadataParseError{
+			Path:   abs,
+			Reason: fmt.Sprintf("invalid metadata.json: %v", err),
+		}
+	}
+
+	if other, ok := mixedBackendField(state); ok {
+		return MetadataState{}, false, &MetadataParseError{
+			Path:   abs,
+			Reason: fmt.Sprintf("cannot mix backend fields in a single scope (backend=%s but %s is also set)", state.Backend, other),
+		}
+	}
+
+	switch state.Backend {
+	case "", "dolt", "postgres", "mysql":
+		// allowed
+	default:
+		return MetadataState{}, false, &MetadataParseError{
+			Path:   abs,
+			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, postgres, mysql)", state.Backend),
+		}
+	}
+
+	if state.Backend == "postgres" {
+		if state.PostgresHost == "" || state.PostgresPort == "" || state.PostgresUser == "" || state.PostgresDatabase == "" {
+			return MetadataState{}, false, &MetadataParseError{
+				Path:   abs,
+				Reason: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
+			}
+		}
+		port, err := strconv.Atoi(state.PostgresPort)
+		if err != nil || port < 1 || port > 65535 {
+			return MetadataState{}, false, &MetadataParseError{
+				Path:   abs,
+				Reason: fmt.Sprintf("postgres_port must be a TCP port (1..65535), got %q", state.PostgresPort),
+			}
+		}
+	}
+
+	if state.Backend == "mysql" {
+		if state.MysqlHost == "" || state.MysqlPort == "" || state.MysqlUser == "" || state.MysqlDatabase == "" {
+			return MetadataState{}, false, &MetadataParseError{
+				Path:   abs,
+				Reason: "backend=mysql requires mysql_host, mysql_port, mysql_user, mysql_database (all four must be non-empty)",
+			}
+		}
+		port, err := strconv.Atoi(state.MysqlPort)
+		if err != nil || port < 1 || port > 65535 {
+			return MetadataState{}, false, &MetadataParseError{
+				Path:   abs,
+				Reason: fmt.Sprintf("mysql_port must be a TCP port (1..65535), got %q", state.MysqlPort),
+			}
+		}
+	}
+
+	return state, true, nil
+}
+
+// mixedBackendField reports the first populated "other-backend" field name
+// (relative to state.Backend). For explicit backends, any populated field from
+// the other backends is mixed. For empty or unknown backends, mixed still
+// means more than one backend family appears.
+//
+// Field-iteration order is the JSON-key declaration order on MetadataState
+// (dolt_*, postgres_*, mysql_*). When state.Backend is empty or unknown and
+// multiple backend families appear, the first populated field across all
+// backends wins (with Dolt fields preferred per declaration order).
+func mixedBackendField(state MetadataState) (string, bool) {
+	type entry struct {
+		name    string
+		value   string
+		backend string
+	}
+	fields := []entry{
+		{"dolt_mode", state.DoltMode, "dolt"},
+		{"dolt_database", state.DoltDatabase, "dolt"},
+		{"postgres_host", state.PostgresHost, "postgres"},
+		{"postgres_port", state.PostgresPort, "postgres"},
+		{"postgres_user", state.PostgresUser, "postgres"},
+		{"postgres_database", state.PostgresDatabase, "postgres"},
+		{"mysql_host", state.MysqlHost, "mysql"},
+		{"mysql_port", state.MysqlPort, "mysql"},
+		{"mysql_user", state.MysqlUser, "mysql"},
+		{"mysql_database", state.MysqlDatabase, "mysql"},
+	}
+	var firstDolt, firstPostgres, firstMysql string
+	for _, f := range fields {
+		if f.value == "" {
+			continue
+		}
+		switch f.backend {
+		case "dolt":
+			if firstDolt == "" {
+				firstDolt = f.name
+			}
+		case "postgres":
+			if firstPostgres == "" {
+				firstPostgres = f.name
+			}
+		case "mysql":
+			if firstMysql == "" {
+				firstMysql = f.name
+			}
+		}
+	}
+	switch state.Backend {
+	case "postgres":
+		if firstDolt != "" {
+			return firstDolt, true
+		}
+		if firstMysql != "" {
+			return firstMysql, true
+		}
+	case "dolt":
+		if firstPostgres != "" {
+			return firstPostgres, true
+		}
+		if firstMysql != "" {
+			return firstMysql, true
+		}
+	case "mysql":
+		if firstDolt != "" {
+			return firstDolt, true
+		}
+		if firstPostgres != "" {
+			return firstPostgres, true
+		}
+	default:
+		populated := 0
+		first := ""
+		for _, name := range []string{firstDolt, firstPostgres, firstMysql} {
+			if name == "" {
+				continue
+			}
+			if first == "" {
+				first = name
+			}
+			populated++
+		}
+		if populated > 1 {
+			return first, true
+		}
+	}
+	return "", false
 }
 
 // EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
@@ -219,6 +565,16 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 		changed = setString(root, "issue-prefix", prefix) || changed
 	}
 	changed = setBool(root, "dolt.auto-start", false) || changed
+	doltConfig := readDoltConfigFromRoot(root)
+	if state.Dolt.DisableEventFlush != nil {
+		doltConfig.DisableEventFlush = state.Dolt.DisableEventFlush
+	}
+	if doltConfig.DisableEventFlush == nil {
+		enabled := true
+		doltConfig.DisableEventFlush = &enabled
+	}
+	changed = setNestedBool(root, "dolt", "disable-event-flush", *doltConfig.DisableEventFlush) || changed
+	changed = deleteKeys(root, "dolt.disable-event-flush", "dolt.disable_event_flush") || changed
 	// Managed beads are Dolt-backed; issues.jsonl auto-export is redundant and
 	// triggers a re-import cycle that stalls bd writes for minutes on large
 	// datasets. BD_EXPORT_AUTO env-var suppression only covers gc's own calls,
@@ -234,20 +590,44 @@ func EnsureCanonicalConfig(fs fsys.FS, path string, state ConfigState) (bool, er
 	host := strings.TrimSpace(state.DoltHost)
 	port := strings.TrimSpace(state.DoltPort)
 	user := strings.TrimSpace(state.DoltUser)
-	if host != "" {
-		changed = setString(root, "dolt.host", host) || changed
+	mysqlHost := strings.TrimSpace(state.MysqlHost)
+	mysqlPort := strings.TrimSpace(state.MysqlPort)
+	mysqlUser := strings.TrimSpace(state.MysqlUser)
+	mysqlDatabase := strings.TrimSpace(state.MysqlDatabase)
+	backend := strings.TrimSpace(state.Backend)
+
+	if backend == "mysql" {
+		// Mysql-backed scopes never carry dolt.host/port/user — bd reads
+		// connection params from mysql.* keys instead.
+		changed = deleteKeys(root, "dolt.host", "dolt.port", "dolt.user") || changed
+		if mysqlHost != "" {
+			changed = setString(root, "mysql.server-host", mysqlHost) || changed
+		}
+		if mysqlPort != "" {
+			changed = setPort(root, "mysql.server-port", mysqlPort) || changed
+		}
+		if mysqlUser != "" {
+			changed = setString(root, "mysql.server-user", mysqlUser) || changed
+		}
+		if mysqlDatabase != "" {
+			changed = setString(root, "mysql.database", mysqlDatabase) || changed
+		}
 	} else {
-		changed = deleteKeys(root, "dolt.host") || changed
-	}
-	if port != "" {
-		changed = setPort(root, "dolt.port", port) || changed
-	} else {
-		changed = deleteKeys(root, "dolt.port") || changed
-	}
-	if user != "" {
-		changed = setString(root, "dolt.user", user) || changed
-	} else {
-		changed = deleteKeys(root, "dolt.user") || changed
+		if host != "" {
+			changed = setString(root, "dolt.host", host) || changed
+		} else {
+			changed = deleteKeys(root, "dolt.host") || changed
+		}
+		if port != "" {
+			changed = setPort(root, "dolt.port", port) || changed
+		} else {
+			changed = deleteKeys(root, "dolt.port") || changed
+		}
+		if user != "" {
+			changed = setString(root, "dolt.user", user) || changed
+		} else {
+			changed = deleteKeys(root, "dolt.user") || changed
+		}
 	}
 
 	changed = deleteKeys(root, deprecatedConfigKeys...) || changed
@@ -278,10 +658,18 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 
 	changed := false
 	defaults := map[string]string{
-		"database":      strings.TrimSpace(state.Database),
-		"backend":       strings.TrimSpace(state.Backend),
-		"dolt_mode":     strings.TrimSpace(state.DoltMode),
-		"dolt_database": strings.TrimSpace(state.DoltDatabase),
+		"database":          strings.TrimSpace(state.Database),
+		"backend":           strings.TrimSpace(state.Backend),
+		"dolt_mode":         strings.TrimSpace(state.DoltMode),
+		"dolt_database":     strings.TrimSpace(state.DoltDatabase),
+		"postgres_host":     strings.TrimSpace(state.PostgresHost),
+		"postgres_port":     strings.TrimSpace(state.PostgresPort),
+		"postgres_user":     strings.TrimSpace(state.PostgresUser),
+		"postgres_database": strings.TrimSpace(state.PostgresDatabase),
+		"mysql_host":        strings.TrimSpace(state.MysqlHost),
+		"mysql_port":        strings.TrimSpace(state.MysqlPort),
+		"mysql_user":        strings.TrimSpace(state.MysqlUser),
+		"mysql_database":    strings.TrimSpace(state.MysqlDatabase),
 	}
 	for key, want := range defaults {
 		if want == "" {
@@ -297,6 +685,20 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 			delete(meta, key)
 			changed = true
 		}
+	}
+	for _, key := range crossBackendKeysToScrub(strings.TrimSpace(state.Backend)) {
+		if _, ok := meta[key]; ok {
+			delete(meta, key)
+			changed = true
+		}
+	}
+
+	scopeRoot := filepath.Dir(filepath.Dir(filepath.Clean(path)))
+	if projectID, ok, err := ReadProjectIdentity(fs, scopeRoot); err != nil {
+		return false, err
+	} else if ok && projectID != "" && trimmedString(meta["project_id"]) != projectID {
+		meta["project_id"] = projectID
+		changed = true
 	}
 	if !changed {
 		return false, nil
@@ -314,6 +716,11 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return false, err
+	}
+
+	repairedLines, repaired := repairMalformedConfigLines(strings.Split(string(data), "\n"))
+	if repaired {
+		data = []byte(strings.Join(repairedLines, "\n"))
 	}
 
 	prefix := strings.TrimSpace(state.IssuePrefix)
@@ -342,9 +749,11 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	port := strings.TrimSpace(state.DoltPort)
 	user := strings.TrimSpace(state.DoltUser)
 	deletions := map[string]struct{}{
-		"dolt.password":    {},
-		"dolt_port":        {},
-		"dolt_server_port": {},
+		"dolt.password":            {},
+		"dolt.disable-event-flush": {},
+		"dolt.disable_event_flush": {},
+		"dolt_port":                {},
+		"dolt_server_port":         {},
 	}
 	if host != "" {
 		replacements["dolt.host"] = "dolt.host: " + host
@@ -361,13 +770,16 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 	} else {
 		deletions["dolt.user"] = struct{}{}
 	}
+	disableEventFlush := doltDisableEventFlushFallbackValue(data, state)
 
 	lines := strings.Split(string(data), "\n")
 	out := make([]string, 0, len(lines)+len(replacements))
 	seen := make(map[string]bool, len(replacements))
-	changed := false
+	changed := repaired
 
-	for _, line := range lines {
+	lastTopLevelIndex := lastTopLevelKeyIndex(lines)
+
+	for i, line := range lines {
 		key, _, ok := topLevelConfigLine(line)
 		if !ok {
 			out = append(out, line)
@@ -379,6 +791,12 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		}
 		want, manage := replacements[key]
 		if !manage {
+			// When fallback rewrites malformed input, keep YAML's
+			// last-write-wins semantics for duplicate top-level keys.
+			if key != "" && i != lastTopLevelIndex[key] {
+				changed = true
+				continue
+			}
 			out = append(out, line)
 			continue
 		}
@@ -414,6 +832,9 @@ func ensureCanonicalConfigFallback(fs fsys.FS, path string, state ConfigState) (
 		out = append(out, want)
 		changed = true
 	}
+	var doltChanged bool
+	out, doltChanged = ensureFallbackNestedDoltDisableEventFlush(out, disableEventFlush)
+	changed = doltChanged || changed
 
 	if !changed {
 		return false, nil
@@ -486,6 +907,24 @@ func configStringValue(root *yaml.Node, keys ...string) (string, bool) {
 	return "", false
 }
 
+func configBoolValue(root *yaml.Node, keys ...string) (bool, bool) {
+	if value, ok := configStringValue(root, keys...); ok {
+		parsed, err := strconv.ParseBool(value)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func nestedConfigBoolValue(root *yaml.Node, section string, keys ...string) (bool, bool) {
+	sectionNode := findValue(root, section)
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		return false, false
+	}
+	return configBoolValue(sectionNode, keys...)
+}
+
 func scanConfigLineValue(fs fsys.FS, path string, prefixes ...string) (string, bool) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
@@ -510,26 +949,138 @@ func scanConfigLineValueFromData(data []byte, prefixes ...string) (string, bool)
 	return "", false
 }
 
+func scanConfigBoolValueFromData(data []byte, prefixes ...string) (bool, bool) {
+	if raw, ok := scanConfigLineValueFromData(data, prefixes...); ok {
+		parsed, err := strconv.ParseBool(raw)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func scanNestedConfigBoolValueFromData(data []byte, section string, keys ...string) (bool, bool) {
+	if raw, ok := scanNestedConfigLineValueFromData(data, section, keys...); ok {
+		parsed, err := strconv.ParseBool(raw)
+		if err == nil {
+			return parsed, true
+		}
+	}
+	return false, false
+}
+
+func scanNestedConfigLineValueFromData(data []byte, section string, keys ...string) (string, bool) {
+	inSection := false
+	for _, line := range strings.Split(string(data), string(rune(10))) {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+			continue
+		}
+		if strings.TrimLeft(line, " \t") == line {
+			key, value, ok := topLevelConfigLine(line)
+			inSection = ok && key == section && value == ""
+			continue
+		}
+		if !inSection {
+			continue
+		}
+		key, value, ok := strings.Cut(trimmed, ":")
+		if !ok {
+			continue
+		}
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		for _, want := range keys {
+			if key == want {
+				return value, true
+			}
+		}
+	}
+	return "", false
+}
+
 func readConfigStateFromData(data []byte) ConfigState {
-	return ConfigState{
+	state := ConfigState{
 		IssuePrefix:    scanConfigValueFromData(data, "issue_prefix:", "issue-prefix:"),
 		EndpointOrigin: endpointOriginValue(scanConfigValueFromData(data, "gc.endpoint_origin:")),
 		EndpointStatus: endpointStatusValue(scanConfigValueFromData(data, "gc.endpoint_status:")),
 		DoltHost:       scanConfigValueFromData(data, "dolt.host:"),
 		DoltPort:       scanConfigValueFromData(data, "dolt.port:"),
 		DoltUser:       scanConfigValueFromData(data, "dolt.user:"),
+		MysqlHost:      scanConfigValueFromData(data, "mysql.server-host:"),
+		MysqlPort:      scanConfigValueFromData(data, "mysql.server-port:"),
+		MysqlUser:      scanConfigValueFromData(data, "mysql.server-user:"),
+		MysqlDatabase:  scanConfigValueFromData(data, "mysql.database:"),
 	}
+	if state.MysqlHost != "" || state.MysqlDatabase != "" {
+		state.Backend = "mysql"
+	}
+	return state
 }
 
 func readConfigStateFromRoot(root *yaml.Node) ConfigState {
-	return ConfigState{
+	state := ConfigState{
 		IssuePrefix:    configValue(root, "issue_prefix", "issue-prefix"),
 		EndpointOrigin: endpointOriginValue(configValue(root, "gc.endpoint_origin")),
 		EndpointStatus: endpointStatusValue(configValue(root, "gc.endpoint_status")),
 		DoltHost:       configValue(root, "dolt.host"),
 		DoltPort:       configValue(root, "dolt.port"),
 		DoltUser:       configValue(root, "dolt.user"),
+		MysqlHost:      configValue(root, "mysql.server-host"),
+		MysqlPort:      configValue(root, "mysql.server-port"),
+		MysqlUser:      configValue(root, "mysql.server-user"),
+		MysqlDatabase:  configValue(root, "mysql.database"),
 	}
+	if state.MysqlHost != "" || state.MysqlDatabase != "" {
+		state.Backend = "mysql"
+	}
+	return state
+}
+
+func readDoltConfigFromRoot(root *yaml.Node) DoltConfig {
+	var cfg DoltConfig
+	if value, ok := nestedConfigBoolValue(root, "dolt", "disable-event-flush", "disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+		return cfg
+	}
+	if value, ok := configBoolValue(root, "dolt.disable-event-flush", "dolt.disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+	}
+	return cfg
+}
+
+func readDoltConfigFromData(data []byte) (DoltConfig, bool) {
+	cfg := readDoltConfigFromDataOrEmpty(data)
+	return cfg, cfg.hasValues()
+}
+
+func readDoltConfigFromDataOrEmpty(data []byte) DoltConfig {
+	var cfg DoltConfig
+	if value, ok := scanNestedConfigBoolValueFromData(data, "dolt", "disable-event-flush", "disable_event_flush"); ok {
+		cfg.DisableEventFlush = &value
+		return cfg
+	}
+	if value, ok := scanConfigBoolValueFromData(data, "dolt.disable-event-flush:", "dolt.disable_event_flush:"); ok {
+		cfg.DisableEventFlush = &value
+	}
+	return cfg
+}
+
+func (c DoltConfig) hasValues() bool {
+	return c.DisableEventFlush != nil
+}
+
+func doltDisableEventFlushFallbackValue(data []byte, state ConfigState) bool {
+	if state.Dolt.DisableEventFlush != nil {
+		return *state.Dolt.DisableEventFlush
+	}
+	if cfg, ok := readDoltConfigFromData(data); ok && cfg.DisableEventFlush != nil {
+		return *cfg.DisableEventFlush
+	}
+	return true
 }
 
 func configValue(root *yaml.Node, keys ...string) string {
@@ -558,6 +1109,77 @@ func topLevelConfigLine(line string) (key, value string, ok bool) {
 		return "", "", false
 	}
 	return strings.TrimSpace(key), strings.TrimSpace(value), true
+}
+
+func ensureFallbackNestedDoltDisableEventFlush(lines []string, value bool) ([]string, bool) {
+	want := "  disable-event-flush: " + boolString(value)
+	sectionIndex := -1
+	for i, line := range lines {
+		key, _, ok := topLevelConfigLine(line)
+		if ok && key == "dolt" {
+			sectionIndex = i
+		}
+	}
+	if sectionIndex == -1 {
+		return append(lines, "dolt:", want), true
+	}
+
+	sectionEnd := len(lines)
+	for i := sectionIndex + 1; i < len(lines); i++ {
+		if _, _, ok := topLevelConfigLine(lines[i]); ok {
+			sectionEnd = i
+			break
+		}
+	}
+
+	out := make([]string, 0, len(lines)+1)
+	out = append(out, lines[:sectionIndex]...)
+	changed := false
+	if strings.TrimSpace(lines[sectionIndex]) != "dolt:" {
+		out = append(out, "dolt:")
+		changed = true
+	} else {
+		out = append(out, lines[sectionIndex])
+	}
+
+	seen := false
+	for _, line := range lines[sectionIndex+1 : sectionEnd] {
+		key, ok := nestedConfigLineKey(line)
+		if ok && (key == "disable-event-flush" || key == "disable_event_flush") {
+			if seen {
+				changed = true
+				continue
+			}
+			seen = true
+			if line != want {
+				out = append(out, want)
+				changed = true
+				continue
+			}
+		}
+		out = append(out, line)
+	}
+	if !seen {
+		out = append(out, want)
+		changed = true
+	}
+	out = append(out, lines[sectionEnd:]...)
+	return out, changed
+}
+
+func nestedConfigLineKey(line string) (string, bool) {
+	if strings.TrimLeft(line, " \t") == line {
+		return "", false
+	}
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+		return "", false
+	}
+	key, _, ok := strings.Cut(trimmed, ":")
+	if !ok {
+		return "", false
+	}
+	return strings.TrimSpace(key), true
 }
 
 func endpointOriginValue(value string) EndpointOrigin {
@@ -592,8 +1214,60 @@ func findValue(root *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
+func setNestedBool(root *yaml.Node, section, key string, value bool) bool {
+	sectionNode := findValue(root, section)
+	changed := false
+	if sectionNode == nil || sectionNode.Kind != yaml.MappingNode {
+		sectionNode = &yaml.Node{Kind: yaml.MappingNode}
+		changed = setMapping(root, section, sectionNode) || changed
+	}
+	return setBool(sectionNode, key, value) || changed
+}
+
+func setMapping(root *yaml.Node, key string, value *yaml.Node) bool {
+	if root == nil || root.Kind != yaml.MappingNode {
+		return false
+	}
+	out := make([]*yaml.Node, 0, len(root.Content))
+	seen := false
+	changed := false
+	for i := 0; i+1 < len(root.Content); i += 2 {
+		if root.Content[i].Value != key {
+			out = append(out, root.Content[i], root.Content[i+1])
+			continue
+		}
+		if seen {
+			changed = true
+			continue
+		}
+		seen = true
+		if root.Content[i+1] != value {
+			changed = true
+		}
+		out = append(out, root.Content[i], value)
+	}
+	if seen {
+		if changed {
+			root.Content = out
+		}
+		return changed
+	}
+	root.Content = append(root.Content,
+		&yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key},
+		value,
+	)
+	return true
+}
+
 func setString(root *yaml.Node, key, value string) bool {
 	return setScalar(root, key, value, "!!str")
+}
+
+func boolString(value bool) string {
+	if value {
+		return "true"
+	}
+	return "false"
 }
 
 func setBool(root *yaml.Node, key string, value bool) bool {
@@ -676,4 +1350,112 @@ func trimmedString(value any) string {
 		return ""
 	}
 	return trimmed
+}
+
+// repairMalformedConfigLines splits top-level config lines that have been
+// glued together by an upstream writer that forgot a trailing newline.
+// Returns the (possibly-expanded) line slice and a flag indicating whether
+// any line was split.
+//
+// Concretely this handles the ga-um7 reproducer: `bd init` against a git
+// repo can leave a line like
+//
+//	sync.remote: "<url>"types.custom: <value>
+//
+// which would otherwise trip the YAML parser and survive the line-based
+// fallback unchanged.
+func repairMalformedConfigLines(lines []string) ([]string, bool) {
+	out := make([]string, 0, len(lines))
+	changed := false
+	for _, line := range lines {
+		parts := splitGluedConfigLine(line)
+		if len(parts) > 1 {
+			changed = true
+		}
+		out = append(out, parts...)
+	}
+	return out, changed
+}
+
+// splitGluedConfigLine recursively splits a top-level config line that
+// contains a quoted-string value immediately followed by another top-level
+// key. Returns the original line as a one-element slice when no split is
+// possible.
+func splitGluedConfigLine(line string) []string {
+	trimmedLeft := strings.TrimLeft(line, " \t")
+	if trimmedLeft != line || strings.HasPrefix(trimmedLeft, "#") {
+		return []string{line}
+	}
+	colon := strings.Index(line, ":")
+	if colon <= 0 {
+		return []string{line}
+	}
+	rest := line[colon+1:]
+	quoteStart := strings.Index(rest, `"`)
+	if quoteStart < 0 {
+		return []string{line}
+	}
+	quoteEnd := strings.Index(rest[quoteStart+1:], `"`)
+	if quoteEnd < 0 {
+		return []string{line}
+	}
+	afterQuote := quoteStart + 1 + quoteEnd + 1
+	tail := strings.TrimLeft(rest[afterQuote:], " \t")
+	if !looksLikeTopLevelKeyStart(tail) {
+		return []string{line}
+	}
+	head := line[:colon+1+afterQuote]
+	// The tail may itself glue another key; recurse so chains of
+	// missing-newline writes all get split apart.
+	return append([]string{head}, splitGluedConfigLine(tail)...)
+}
+
+// looksLikeTopLevelKeyStart reports whether s begins with a YAML-style
+// top-level key followed by a colon (e.g. `types.custom: value`).
+func looksLikeTopLevelKeyStart(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		if r == ':' {
+			return i > 0
+		}
+		if !isYamlKeyRune(r) {
+			return false
+		}
+	}
+	return false
+}
+
+func isYamlKeyRune(r rune) bool {
+	// This is intentionally a narrow .beads/config.yaml repair heuristic,
+	// not a general YAML key parser.
+	switch {
+	case r >= 'a' && r <= 'z':
+		return true
+	case r >= 'A' && r <= 'Z':
+		return true
+	case r >= '0' && r <= '9':
+		return true
+	case r == '.' || r == '-' || r == '_':
+		return true
+	default:
+		return false
+	}
+}
+
+// lastTopLevelKeyIndex returns a map from top-level key name to the index
+// of its final occurrence in lines. Used by the fallback writer to drop
+// earlier duplicates so YAML last-write-wins semantics survive a rewrite.
+func lastTopLevelKeyIndex(lines []string) map[string]int {
+	last := make(map[string]int, len(lines))
+	for i, line := range lines {
+		if key, _, ok := topLevelConfigLine(line); ok {
+			if key == "" {
+				continue
+			}
+			last[key] = i
+		}
+	}
+	return last
 }

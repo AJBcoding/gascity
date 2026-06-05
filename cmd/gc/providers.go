@@ -3,14 +3,18 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -21,10 +25,12 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionacp "github.com/gastownhall/gascity/internal/runtime/acp"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
+	sessioncloudflare "github.com/gastownhall/gascity/internal/runtime/cloudflare"
 	sessionexec "github.com/gastownhall/gascity/internal/runtime/exec"
 	sessionhybrid "github.com/gastownhall/gascity/internal/runtime/hybrid"
 	sessionk8s "github.com/gastownhall/gascity/internal/runtime/k8s"
 	sessionsubprocess "github.com/gastownhall/gascity/internal/runtime/subprocess"
+	sessiont3bridge "github.com/gastownhall/gascity/internal/runtime/t3bridge"
 	sessiontmux "github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
@@ -89,6 +95,7 @@ func tmuxConfigFromSession(sc config.SessionConfig, cityName, _ string) sessiont
 		NudgeReadyTimeout:  sc.NudgeReadyTimeoutDuration(),
 		NudgeRetryInterval: sc.NudgeRetryIntervalDuration(),
 		NudgeLockTimeout:   sc.NudgeLockTimeoutDuration(),
+		NudgeUserIdleSecs:  sc.NudgeIdleSecsOrDefault(),
 		DebounceMs:         sc.DebounceMsOrDefault(),
 		DisplayMs:          sc.DisplayMsOrDefault(),
 		SocketName:         socketName,
@@ -117,7 +124,11 @@ func providerStateDir(providerName, cityPath string) string {
 //   - default → real tmux provider
 func newSessionProviderByName(name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
 	if strings.HasPrefix(name, "exec:") {
-		return sessionexec.NewProvider(strings.TrimPrefix(name, "exec:")), nil
+		script := strings.TrimPrefix(name, "exec:")
+		if isLegacyT3BridgeExecScript(script) {
+			return sessiont3bridge.NewProvider(), nil
+		}
+		return sessionexec.NewProvider(script), nil
 	}
 	switch name {
 	case "fake":
@@ -139,6 +150,10 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 			return sessionacp.NewProviderWithDir(providerStateDir("acp", cityPath), cfg), nil
 		}
 		return sessionacp.NewProvider(cfg), nil
+	case "t3bridge":
+		return sessiont3bridge.NewProvider(), nil
+	case "cloudflare":
+		return sessioncloudflare.NewProvider()
 	case "k8s":
 		return sessionk8s.NewProvider()
 	case "hybrid":
@@ -146,6 +161,10 @@ func newSessionProviderByName(name string, sc config.SessionConfig, cityName, ci
 	default:
 		return sessiontmux.NewProviderWithConfig(tmuxConfigFromSession(sc, cityName, cityPath)), nil
 	}
+}
+
+func isLegacyT3BridgeExecScript(script string) bool {
+	return filepath.Base(strings.TrimSpace(script)) == "gc-session-t3"
 }
 
 // newSessionProvider returns a runtime.Provider based on the session provider
@@ -166,12 +185,12 @@ func newSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provid
 
 func newStatusSessionProviderForCity(cfg *config.City, cityPath string) runtime.Provider {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newSessionProviderFromContext(ctx, nil)
+	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, nil))
 }
 
 func newStatusSessionProviderForCityWithSnapshot(cfg *config.City, cityPath string, sessionBeads *sessionBeadSnapshot) runtime.Provider {
 	ctx := sessionProviderContextForCity(cfg, cityPath, os.Getenv("GC_SESSION"))
-	return newSessionProviderFromContext(ctx, sessionBeads)
+	return newBoundedStatusProvider(newSessionProviderFromContext(ctx, sessionBeads))
 }
 
 func registerStatusProviderACPRoutes(sp runtime.Provider, snapshot *sessionBeadSnapshot, cityName string, cfg *config.City) {
@@ -335,9 +354,10 @@ func observedACPSessionNames(snapshot *sessionBeadSnapshot, cfg *config.City) []
 	if snapshot == nil {
 		return nil
 	}
-	names := make([]string, 0, len(snapshot.open))
-	seen := make(map[string]bool, len(snapshot.open))
-	for _, bead := range snapshot.Open() {
+	open := snapshot.Open()
+	names := make([]string, 0, len(open))
+	seen := make(map[string]bool, len(open))
+	for _, bead := range open {
 		if !beadUsesACPTransport(bead, cfg) {
 			continue
 		}
@@ -480,7 +500,7 @@ func normalizeRawBeadsProvider(cityPath, provider string) string {
 		return provider
 	}
 	script := strings.TrimSpace(strings.TrimPrefix(provider, "exec:"))
-	if samePath(script, gcBeadsBdScriptPath(cityPath)) {
+	if samePath(script, gcBeadsBdScriptPath(cityPath)) || samePath(script, legacyGcBeadsBdScriptPath(cityPath)) {
 		return "bd"
 	}
 	return provider
@@ -504,19 +524,62 @@ func rawBeadsProviderFromConfig(cityPath string) string {
 	return "bd"
 }
 
+func configuredBeadsBackendValue(cityPath string) string {
+	if v := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(peekBeadsBackend(filepath.Join(cityPath, "city.toml")))
+}
+
+func beadsBackend(cityPath string) string {
+	backend := strings.ToLower(configuredBeadsBackendValue(cityPath))
+	if backend == "" {
+		return "dolt"
+	}
+	return backend
+}
+
+func cityUsesDoltliteBeadsBackend(cityPath string) bool {
+	return beadsBackend(cityPath) == "doltlite"
+}
+
 func providerUsesBdStoreContract(provider string) bool {
-	provider = strings.TrimSpace(provider)
-	if provider == "" || provider == "bd" {
-		return true
-	}
-	if strings.HasPrefix(provider, "exec:") && execProviderBase(provider) == "gc-beads-bd" {
-		return true
-	}
-	return false
+	return contract.ProviderUsesBDContract(provider)
 }
 
 func cityUsesBdStoreContract(cityPath string) bool {
 	return providerUsesBdStoreContract(rawBeadsProvider(cityPath))
+}
+
+func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
+	return cityUsesBdStoreContract(cityPath) && !cityUsesDoltliteBeadsBackend(cityPath)
+}
+
+// cityUsesMySQLBackend returns true when the city's bd metadata declares
+// backend: mysql. Such cities have NO managed dolt runtime — bd talks to
+// an external MySQL server via DSN-style connection params stored in
+// .beads/metadata.json. gc must skip ALL dolt-runtime machinery for these
+// cities (publication, state files, port resolution, restart loops).
+//
+// Mirrors the postgres detection in postgresMetadataForScope but uses a
+// minimal direct read so callers in dolt-only paths don't pull in the full
+// scope-resolution machinery.
+func cityUsesMySQLBackend(cityPath string) bool {
+	if strings.TrimSpace(cityPath) == "" {
+		return false
+	}
+	metaPath := filepath.Join(cityPath, ".beads", "metadata.json")
+	data, err := os.ReadFile(metaPath)
+	if err != nil {
+		return false
+	}
+	var meta struct {
+		Backend string `json:"backend"`
+	}
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return false
+	}
+	return strings.EqualFold(strings.TrimSpace(meta.Backend), "mysql")
 }
 
 func rawBeadsProviderForScope(scopeRoot, cityPath string) string {
@@ -631,6 +694,10 @@ func gcBeadsBdScriptPath(cityPath string) string {
 	return filepath.Join(cityPath, citylayout.SystemPacksRoot, "bd", "assets", "scripts", "gc-beads-bd.sh")
 }
 
+func legacyGcBeadsBdScriptPath(cityPath string) string {
+	return filepath.Join(cityPath, ".gc", "scripts", "gc-beads-bd.sh")
+}
+
 // mailProviderName returns the mail provider name.
 // Priority: GC_MAIL env var → city.toml [mail].provider → "" (default: beadmail).
 func mailProviderName() string {
@@ -638,39 +705,42 @@ func mailProviderName() string {
 		return v
 	}
 	if cp, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cp, io.Discard); err == nil && cfg.Mail.Provider != "" {
-			return cfg.Mail.Provider
-		}
+		return mailProviderNameForCity(cp)
+	}
+	return ""
+}
+
+func mailProviderNameForCity(cityPath string) string {
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil && cfg.Mail.Provider != "" {
+		return cfg.Mail.Provider
 	}
 	return ""
 }
 
 // newMailProvider returns a mail.Provider based on the mail provider name
 // (env var → city.toml → default) and the given bead store (used as the
-// default backend). Shared callers such as the API use the stateless beadmail
-// provider so long-lived instances observe fresh session state.
+// default backend). Shared callers such as the API use the cached beadmail
+// provider so repeated mail reads reuse one session-topology enumeration.
+// The cache lasts for the provider lifetime; topology refresh for long-lived
+// providers is handled by rebuilding the provider.
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - default → beadmail (backed by beads.Store, no subprocess)
 func newMailProvider(store beads.Store) mail.Provider {
-	v := mailProviderName()
-	if strings.HasPrefix(v, "exec:") {
-		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
-	}
-	switch v {
-	case "fake":
-		return mail.NewFake()
-	case "fail":
-		return mail.NewFailFake()
-	default:
-		return beadmail.New(store)
-	}
+	return newMailProviderNamed(mailProviderName(), store, true)
 }
 
 func newCommandMailProvider(store beads.Store) mail.Provider {
-	v := mailProviderName()
+	return newMailProviderNamed(mailProviderName(), store, true)
+}
+
+func newCommandMailProviderNamed(v string, store beads.Store) mail.Provider {
+	return newMailProviderNamed(v, store, true)
+}
+
+func newMailProviderNamed(v string, store beads.Store, cached bool) mail.Provider {
 	if strings.HasPrefix(v, "exec:") {
 		return mailexec.NewProvider(strings.TrimPrefix(v, "exec:"))
 	}
@@ -680,7 +750,10 @@ func newCommandMailProvider(store beads.Store) mail.Provider {
 	case "fail":
 		return mail.NewFailFake()
 	default:
-		return beadmail.NewCached(store)
+		if cached {
+			return beadmail.NewCached(store)
+		}
+		return beadmail.New(store)
 	}
 }
 
@@ -703,27 +776,54 @@ func openCityMailProvider(stderr io.Writer, cmdName string) (mail.Provider, int)
 // eventsProviderName returns the events provider name.
 // Priority: GC_EVENTS env var → city.toml [events].provider → "" (default: file JSONL).
 func eventsProviderName() string {
+	return eventsProviderConfig().Provider
+}
+
+func eventsProviderConfig() config.EventsConfig {
+	return eventsProviderConfigWithWarnings(io.Discard)
+}
+
+func eventsProviderConfigWithWarnings(w io.Writer) config.EventsConfig {
+	cfg := config.EventsConfig{}
+	if cp, err := resolveCity(); err == nil {
+		if cityCfg, err := loadCityConfig(cp, w); err == nil {
+			cfg = cityCfg.Events
+		}
+	}
+	if v := os.Getenv("GC_EVENTS"); v != "" {
+		cfg.Provider = v
+	}
+	return cfg
+}
+
+// fastEventsProviderName returns the events provider name for hook-driven
+// event emission. It intentionally reads only top-level city.toml so bead
+// hooks do not expand imports or validate remote pack caches on every write.
+func fastEventsProviderName() string {
 	if v := os.Getenv("GC_EVENTS"); v != "" {
 		return v
 	}
 	if cp, err := resolveCity(); err == nil {
-		if cfg, err := loadCityConfig(cp, io.Discard); err == nil && cfg.Events.Provider != "" {
-			return cfg.Events.Provider
+		if p := peekEventsProvider(filepath.Join(cp, "city.toml")); p != "" {
+			return p
 		}
 	}
 	return ""
 }
 
-// newEventsProvider returns an events.Provider based on the events provider
-// name (env var → city.toml → default) and the given events file path (used
-// as the default backend).
+// newEventsProviderForName returns an events.Provider based on the already
+// resolved provider name and the given events file path (used as the default
+// backend).
 //
 //   - "fake" → in-memory fake (all ops succeed)
 //   - "fail" → broken fake (all ops return errors)
 //   - "exec:<script>" → user-supplied script (absolute path or PATH lookup)
 //   - default → file-backed JSONL provider
-func newEventsProvider(eventsPath string, stderr io.Writer) (events.Provider, error) {
-	v := eventsProviderName()
+func newEventsProviderForName(v, eventsPath string, stderr io.Writer) (events.Provider, error) {
+	return newEventsProviderForNameWithConfig(v, eventsPath, stderr, config.EventsConfig{})
+}
+
+func newEventsProviderForNameWithConfig(v, eventsPath string, stderr io.Writer, eventsCfg config.EventsConfig) (events.Provider, error) {
 	if strings.HasPrefix(v, "exec:") {
 		return eventsexec.NewProvider(strings.TrimPrefix(v, "exec:"), stderr), nil
 	}
@@ -733,17 +833,116 @@ func newEventsProvider(eventsPath string, stderr io.Writer) (events.Provider, er
 	case "fail":
 		return events.NewFailFake(), nil
 	default:
-		return events.NewFileRecorder(eventsPath, stderr)
+		return newFileEventsRecorder(eventsPath, eventsCfg, stderr)
 	}
+}
+
+type eventsRotationSettings struct {
+	enabled              bool
+	maxSizeBytes         int64
+	checkIntervalRecords int
+	checkInterval        time.Duration
+	archiveRetainAge     time.Duration
+}
+
+func eventsRotationSettingsFromConfig(eventsCfg config.EventsConfig, stderr io.Writer) eventsRotationSettings {
+	rot := eventsCfg.Rotation
+	settings := eventsRotationSettings{
+		enabled:              rot.EnabledOrDefault(),
+		maxSizeBytes:         rot.MaxSizeBytesOrDefault(),
+		checkIntervalRecords: rot.CheckIntervalRecordsOrDefault(),
+		checkInterval:        rot.CheckIntervalDurationOrDefault(),
+		archiveRetainAge:     rot.ArchiveRetainAgeDuration(),
+	}
+	if raw, ok := os.LookupEnv("GC_EVENTS_ROTATION_ENABLED"); ok {
+		if parsed, parseOK := parseEventsRotationEnabled(raw); parseOK {
+			settings.enabled = parsed
+		} else {
+			warnEventsRotation(stderr, "events.rotation: warning: ignoring invalid GC_EVENTS_ROTATION_ENABLED=%q\n", raw)
+		}
+	}
+	if raw, ok := os.LookupEnv("GC_EVENTS_ROTATION_MAX_SIZE_BYTES"); ok {
+		if n, err := strconv.ParseInt(strings.TrimSpace(raw), 10, 64); err == nil {
+			settings.maxSizeBytes = n
+		} else {
+			warnEventsRotation(stderr, "events.rotation: warning: ignoring invalid GC_EVENTS_ROTATION_MAX_SIZE_BYTES=%q\n", raw)
+		}
+	}
+	if raw, ok := os.LookupEnv("GC_EVENTS_ROTATION_RETAIN_AGE"); ok {
+		if strings.TrimSpace(raw) == "" {
+			settings.archiveRetainAge = 0
+		} else if d, err := time.ParseDuration(raw); err == nil {
+			settings.archiveRetainAge = d
+			if d > 0 && d < 168*time.Hour {
+				warnEventsRotation(stderr, "events.rotation: warning: archive_retain_age=%s may delete recent archives\n", raw)
+			}
+		} else {
+			warnEventsRotation(stderr, "events.rotation: warning: ignoring invalid GC_EVENTS_ROTATION_RETAIN_AGE=%q\n", raw)
+		}
+	}
+	return settings
+}
+
+func parseEventsRotationEnabled(raw string) (bool, bool) {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "1", "t", "true", "y", "yes", "on", "enabled":
+		return true, true
+	case "0", "f", "false", "n", "no", "off", "disabled":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
+func warnEventsRotation(stderr io.Writer, format string, args ...any) {
+	if stderr == nil {
+		return
+	}
+	fmt.Fprintf(stderr, format, args...) //nolint:errcheck // best-effort operator warning
+}
+
+func eventsFileRecorderOptions(eventsCfg config.EventsConfig, stderr io.Writer) []events.FileRecorderOption {
+	settings := eventsRotationSettingsFromConfig(eventsCfg, stderr)
+	maxSize := settings.maxSizeBytes
+	if !settings.enabled {
+		maxSize = 0
+	}
+	return []events.FileRecorderOption{
+		events.WithMaxSize(maxSize),
+		events.WithRotationCheckRecords(settings.checkIntervalRecords),
+		events.WithRotationCheckInterval(settings.checkInterval),
+		events.WithArchiveRetainAge(settings.archiveRetainAge),
+	}
+}
+
+func newFileEventsRecorder(eventsPath string, eventsCfg config.EventsConfig, stderr io.Writer) (*events.FileRecorder, error) {
+	return events.NewFileRecorder(eventsPath, stderr, eventsFileRecorderOptions(eventsCfg, stderr)...)
 }
 
 // openCityEventsProvider resolves the city and returns an events.Provider.
 // Returns (nil, exitCode) on failure.
 func openCityEventsProvider(stderr io.Writer, cmdName string) (events.Provider, int) {
+	return openCityEventsProviderWithConfig(func() config.EventsConfig {
+		return eventsProviderConfigWithWarnings(stderr)
+	}, stderr, cmdName)
+}
+
+func openCityEventEmitProvider(stderr io.Writer, cmdName string) (events.Provider, int) {
+	return openCityEventsProviderWithName(fastEventsProviderName, stderr, cmdName)
+}
+
+func openCityEventsProviderWithName(providerName func() string, stderr io.Writer, cmdName string) (events.Provider, int) {
+	return openCityEventsProviderWithConfig(func() config.EventsConfig {
+		return config.EventsConfig{Provider: providerName()}
+	}, stderr, cmdName)
+}
+
+func openCityEventsProviderWithConfig(providerConfig func() config.EventsConfig, stderr io.Writer, cmdName string) (events.Provider, int) {
 	// For exec: and test doubles, no city needed.
-	v := eventsProviderName()
+	eventsCfg := providerConfig()
+	v := eventsCfg.Provider
 	if strings.HasPrefix(v, "exec:") || v == "fake" || v == "fail" {
-		p, err := newEventsProvider("", stderr)
+		p, err := newEventsProviderForNameWithConfig(v, "", stderr, eventsCfg)
 		if err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 			return nil, 1
@@ -757,7 +956,7 @@ func openCityEventsProvider(stderr io.Writer, cmdName string) (events.Provider, 
 		return nil, 1
 	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
-	p, err := newEventsProvider(eventsPath, stderr)
+	p, err := newEventsProviderForNameWithConfig(v, eventsPath, stderr, eventsCfg)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err) //nolint:errcheck // best-effort stderr
 		return nil, 1

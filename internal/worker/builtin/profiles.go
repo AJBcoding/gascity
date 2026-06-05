@@ -42,6 +42,7 @@ type BuiltinProviderSpec struct {
 	ReadyPromptPrefix      string
 	ProcessNames           []string
 	EmitsPermissionWarning bool
+	AcceptStartupDialogs   *bool
 	Env                    map[string]string
 	PathCheck              string
 	SupportsACP            bool
@@ -59,6 +60,8 @@ type BuiltinProviderSpec struct {
 	ACPCommand             string
 	ACPArgs                []string
 }
+
+func boolPtr(b bool) *bool { return &b }
 
 // ProfileIdentity captures the explicit production identity for a canonical
 // worker profile.
@@ -78,8 +81,8 @@ const (
 )
 
 var builtinProviderOrder = []string{
-	"claude", "codex", "gemini", "kiro", "cursor", "copilot",
-	"amp", "opencode", "auggie", "pi", "omp",
+	"claude", "codex", "gemini", "kimi", "kiro", "cursor", "copilot",
+	"amp", "opencode", "auggie", "pi", "omp", "antigravity",
 }
 
 var builtinProviderSpecs = map[string]BuiltinProviderSpec{
@@ -141,9 +144,13 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Type:  "select",
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
-					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
+					{Value: "opus", Label: "Opus", FlagArgs: []string{"--model", "claude-opus-4-8"}, FlagAliases: [][]string{{"-m", "claude-opus-4-8"}}},
+					{Value: "opus-4-7", Label: "Opus 4.7", FlagArgs: []string{"--model", "claude-opus-4-7"}, FlagAliases: [][]string{{"-m", "claude-opus-4-7"}}},
 					{Value: "sonnet", Label: "Sonnet", FlagArgs: []string{"--model", "claude-sonnet-4-6"}, FlagAliases: [][]string{{"-m", "claude-sonnet-4-6"}}},
 					{Value: "haiku", Label: "Haiku", FlagArgs: []string{"--model", "claude-haiku-4-5-20251001"}, FlagAliases: [][]string{{"-m", "claude-haiku-4-5-20251001"}}},
+					{Value: "claude-opus-latest", Label: "Opus (proxy)", FlagArgs: []string{"--model", "claude-opus-latest"}, FlagAliases: [][]string{{"-m", "claude-opus-latest"}}},
+					{Value: "claude-opus-latest[1m]", Label: "Opus (proxy, 1M)", FlagArgs: []string{"--model", "claude-opus-latest[1m]"}, FlagAliases: [][]string{{"-m", "claude-opus-latest[1m]"}}},
+					{Value: "claude-sonnet-latest", Label: "Sonnet (proxy)", FlagArgs: []string{"--model", "claude-sonnet-latest"}, FlagAliases: [][]string{{"-m", "claude-sonnet-latest"}}},
 				},
 			},
 		},
@@ -190,6 +197,7 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 				Choices: []BuiltinOptionChoice{
 					{Value: "", Label: "Default"},
 					{Value: "gpt-5.5", Label: "GPT-5.5", FlagArgs: []string{"--model", "gpt-5.5"}, FlagAliases: [][]string{{"-m", "gpt-5.5"}}},
+					{Value: "gpt-5-4", Label: "GPT-5.4", FlagArgs: []string{"--model", "gpt-5-4"}, FlagAliases: [][]string{{"-m", "gpt-5-4"}}},
 					{Value: "gpt-5.3-codex-spark", Label: "GPT-5.3 Codex Spark", FlagArgs: []string{"--model", "gpt-5.3-codex-spark"}, FlagAliases: [][]string{{"-m", "gpt-5.3-codex-spark"}}},
 					{Value: "o3", Label: "o3", FlagArgs: []string{"--model", "o3"}, FlagAliases: [][]string{{"-m", "o3"}}},
 					{Value: "o4-mini", Label: "o4-mini", FlagArgs: []string{"--model", "o4-mini"}, FlagAliases: [][]string{{"-m", "o4-mini"}}},
@@ -266,6 +274,34 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 			},
 		},
 	},
+	"kimi": {
+		DisplayName:          "Kimi Code CLI",
+		Command:              "kimi",
+		Args:                 []string{"--yolo", "--no-thinking"},
+		PromptMode:           "none",
+		ReadyDelayMs:         5000,
+		ProcessNames:         []string{"kimi", "python"},
+		AcceptStartupDialogs: boolPtr(false),
+		SupportsACP:          true,
+		InstructionsFile:     "AGENTS.md",
+		ResumeFlag:           "--session",
+		ResumeStyle:          "flag",
+		PrintArgs:            []string{"--quiet", "--prompt"},
+		TitleModel:           "kimi-k2.6",
+		ACPArgs:              []string{"--yolo", "--no-thinking", "acp"},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "kimi-k2.6", Label: "Kimi K2.6", FlagArgs: []string{"--model", "kimi-k2.6"}, FlagAliases: [][]string{{"-m", "kimi-k2.6"}}},
+					{Value: "kimi-k2-thinking-turbo", Label: "Kimi K2 Thinking Turbo", FlagArgs: []string{"--model", "kimi-k2-thinking-turbo"}, FlagAliases: [][]string{{"-m", "kimi-k2-thinking-turbo"}}},
+				},
+			},
+		},
+	},
 	"kiro": {
 		DisplayName:      "Kiro",
 		Command:          "kiro-cli",
@@ -290,6 +326,18 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		InstructionsFile:  "AGENTS.md",
 		ResumeFlag:        "--resume",
 		ResumeStyle:       "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "mcp_approval",
+				Label:   "MCP Approval",
+				Type:    "select",
+				Default: "prompt",
+				Choices: []BuiltinOptionChoice{
+					{Value: "prompt", Label: "Prompt for MCP approval"},
+					{Value: "approve", Label: "Approve visible MCP servers", FlagArgs: []string{"--approve-mcps"}},
+				},
+			},
+		},
 	},
 	"copilot": {
 		DisplayName: "GitHub Copilot",
@@ -345,6 +393,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ResumeFlag:       "--session",
 		ResumeStyle:      "flag",
 		ACPArgs:          []string{"acp"},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "opencode/deepseek-v4-flash-free", Label: "DeepSeek V4 Flash Free", FlagArgs: []string{"--model", "opencode/deepseek-v4-flash-free"}, FlagAliases: [][]string{{"-m", "opencode/deepseek-v4-flash-free"}}},
+					{Value: "opencode/nemotron-3-super-free", Label: "Nemotron 3 Super Free", FlagArgs: []string{"--model", "opencode/nemotron-3-super-free"}, FlagAliases: [][]string{{"-m", "opencode/nemotron-3-super-free"}}},
+					{Value: "opencode/big-pickle", Label: "Big Pickle", FlagArgs: []string{"--model", "opencode/big-pickle"}, FlagAliases: [][]string{{"-m", "opencode/big-pickle"}}},
+				},
+			},
+		},
 	},
 	"auggie": {
 		// Hook mechanism: Auggie CLI exposes SessionStart, SessionEnd,
@@ -375,6 +436,19 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:     []string{"pi", "node", "bun"},
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--session",
+		ResumeStyle:      "flag",
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:   "model",
+				Label: "Model",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "ollama-cloud-gpt-oss-20b", Label: "Ollama Cloud GPT-OSS 20B", FlagArgs: []string{"--provider", "ollama-cloud", "--model", "gpt-oss:20b"}},
+				},
+			},
+		},
 	},
 	"omp": {
 		DisplayName:      "Oh My Pi (OMP)",
@@ -384,6 +458,51 @@ var builtinProviderSpecs = map[string]BuiltinProviderSpec{
 		ProcessNames:     []string{"omp", "node", "bun"},
 		SupportsHooks:    true,
 		InstructionsFile: "AGENTS.md",
+		ResumeFlag:       "--resume",
+		ResumeStyle:      "flag",
+	},
+	"antigravity": {
+		// Antigravity does not currently expose a provider hook mechanism
+		// that Gas City can install; nudges still drain via the supervisor
+		// dispatcher / per-session poller.
+		DisplayName: "Antigravity",
+		Command:     "agy",
+		OptionDefaults: map[string]string{
+			"permission_mode": "unrestricted",
+		},
+		PromptMode:        "flag",
+		PromptFlag:        "--prompt-interactive",
+		ReadyPromptPrefix: "> ",
+		ReadyDelayMs:      5000,
+		ProcessNames:      []string{"agy"},
+		InstructionsFile:  "AGENTS.md",
+		ResumeFlag:        "--conversation",
+		ResumeStyle:       "flag",
+		PrintArgs:         []string{"--print"},
+		PermissionModes: map[string]string{
+			"unrestricted": "--dangerously-skip-permissions",
+		},
+		OptionsSchema: []BuiltinProviderOption{
+			{
+				Key:     "permission_mode",
+				Label:   "Permission Mode",
+				Type:    "select",
+				Default: "unrestricted",
+				Choices: []BuiltinOptionChoice{
+					{Value: "unrestricted", Label: "Bypass permissions", FlagArgs: []string{"--dangerously-skip-permissions"}},
+					{Value: "standard", Label: "Standard (prompt for permissions)", FlagArgs: []string{}},
+				},
+			},
+			{
+				Key:   "sandbox",
+				Label: "Sandbox",
+				Type:  "select",
+				Choices: []BuiltinOptionChoice{
+					{Value: "", Label: "Default"},
+					{Value: "enabled", Label: "Enabled", FlagArgs: []string{"--sandbox"}},
+				},
+			},
+		},
 	},
 }
 
@@ -417,8 +536,14 @@ func CanonicalProfileIdentity(profile string) (ProfileIdentity, bool) {
 		return newProfileIdentity(profile, "codex"), true
 	case "gemini/tmux-cli":
 		return newProfileIdentity(profile, "gemini"), true
+	case "kimi/tmux-cli":
+		return newProfileIdentity(profile, "kimi"), true
 	case "opencode/tmux-cli":
 		return newProfileIdentity(profile, "opencode"), true
+	case "pi/tmux-cli":
+		return newProfileIdentity(profile, "pi"), true
+	case "antigravity/tmux-cli":
+		return newProfileIdentity(profile, "antigravity"), true
 	default:
 		return ProfileIdentity{}, false
 	}

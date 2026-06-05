@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -37,12 +38,15 @@ func newBeadsCityCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Manage canonical city endpoint topology",
 		Long: `Manage the canonical city endpoint topology for bd-backed beads stores.
 
-Use use-managed to make the city GC-managed again. Use use-external to pin the
-city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
+Use use-managed to make the city GC-managed again (managed Dolt). Use
+use-external to pin the city to an external Dolt endpoint and rewrite
+inherited rig mirrors. Use use-mysql to switch the city to a MySQL backend
+(creates the database, writes canonical metadata, runs bd init, and cascades
+to inherited rigs).`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc beads city: missing subcommand (use-managed, use-external)") //nolint:errcheck
+				fmt.Fprintln(stderr, "gc beads city: missing subcommand (use-managed, use-external, use-mysql)") //nolint:errcheck
 			} else {
 				fmt.Fprintf(stderr, "gc beads city: unknown subcommand %q\n", args[0]) //nolint:errcheck
 			}
@@ -52,6 +56,7 @@ city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
 	cmd.AddCommand(
 		newBeadsCityUseManagedCmd(stdout, stderr),
 		newBeadsCityUseExternalCmd(stdout, stderr),
+		newBeadsCityUseMysqlCmd(stdout, stderr),
 	)
 	return cmd
 }
@@ -185,7 +190,12 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 				}
 				managedStopScript = gcBeadsBdScriptPath(cityPath)
 			}
-			managedStopEnv = append([]string(nil), providerLifecycleProcessEnv(cityPath, provider)...)
+			providerEnv, err := providerLifecycleProcessEnvWithError(cityPath, provider)
+			if err != nil {
+				fmt.Fprintf(stderr, "%s: building managed provider env: %v\n", name, err) //nolint:errcheck
+				return 1
+			}
+			managedStopEnv = append([]string(nil), providerEnv...)
 		}
 	}
 
@@ -229,7 +239,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "stopping managed local provider", err)
 			return 1
 		}
-		if err := clearManagedDoltRuntimeStateIfOwned(cityPath); err != nil {
+		if err := clearManagedDoltRuntimeStateUnlessPostgres(cityPath); err != nil {
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "clearing managed runtime state", err)
 			return 1
 		}
@@ -455,8 +465,21 @@ func syncCityEndpointCompatConfig(fs fsys.FS, cityPath, tomlPath string, cfg *co
 func syncCityManagedPortArtifacts(fs fsys.FS, cityPath string, cityState contract.ConfigState, plans []cityRigEndpointPlan) error {
 	managedPort := ""
 	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity {
+		owned, err := managedDoltLifecycleOwned(cityPath)
+		if err != nil {
+			return fmt.Errorf("determining managed dolt ownership for port artifact sync: %w", err)
+		}
+		if !owned {
+			return nil
+		}
 		port, err := readManagedRuntimePublishedPort(cityPath)
-		if err == nil {
+		if err != nil {
+			if os.IsNotExist(err) {
+				managedPort = ""
+			} else {
+				return fmt.Errorf("reading managed runtime published port: %w", err)
+			}
+		} else {
 			managedPort = port
 		}
 	}
