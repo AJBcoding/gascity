@@ -410,9 +410,23 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	}()
 	trackingIndex := newOrderDispatchTrackingIndex()
 	budgetSpent := 0
+	total := len(m.aa)
+	start := 0
+	if total > 0 {
+		start = m.nextDispatchStart % total
+	}
+	spendDispatchBudget := func(idx int) bool {
+		budgetSpent++
+		if m.maxDispatchesPerTick > 0 {
+			m.nextDispatchStart = (idx + 1) % total
+		}
+		return m.maxDispatchesPerTick > 0 && budgetSpent >= m.maxDispatchesPerTick
+	}
 
 	cityIsMySQL := cityUsesMySQLBackend(cityPath)
-	for _, a := range m.aa {
+	for offset := 0; offset < total; offset++ {
+		idx := (start + offset) % total
+		a := m.aa[idx]
 		// Skip orders targeting suspended rigs.
 		if m.orderRigSuspended(a) {
 			continue

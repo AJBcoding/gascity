@@ -16,12 +16,13 @@ import (
 
 // PathContext holds template variables for work_dir expansion.
 type PathContext struct {
-	Agent     string
-	AgentBase string
-	Rig       string
-	RigRoot   string
-	CityRoot  string
-	CityName  string
+	Agent         string
+	AgentBase     string
+	Rig           string
+	RigRoot       string
+	CityRoot      string
+	CityName      string
+	WorktreesRoot string
 	// Dirs holds resolved workspace directory paths keyed by name.
 	// Available in templates as {{.Dirs.name}} or {{index .Dirs "name"}}.
 	Dirs map[string]string

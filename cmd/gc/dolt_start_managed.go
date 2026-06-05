@@ -143,8 +143,12 @@ func startManagedDoltProcessWithOptions(cityPath, host, port, user, logLevel str
 		timeout = 30 * time.Second
 	}
 	report := managedDoltStartReport{}
-	doltConfig, err := resolveManagedDoltConfigForStart(cityPath, archiveLevel)
-	if err != nil {
+	// Resolve the dolt config to surface any error early; the writer fetches
+	// its own copy via loadDoltConfigForCity, so the value is dropped here.
+	// TODO(rebase): unify config resolution paths to honor env overrides
+	// (resolveManagedDoltConfigForStart adds GC_DOLT_* env overrides that
+	// loadDoltConfigForCity does not). Tracked separately.
+	if _, err := resolveManagedDoltConfigForStart(cityPath, archiveLevel); err != nil {
 		return report, err
 	}
 

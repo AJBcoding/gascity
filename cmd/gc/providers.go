@@ -551,6 +551,10 @@ func cityUsesBdStoreContract(cityPath string) bool {
 	return providerUsesBdStoreContract(rawBeadsProvider(cityPath))
 }
 
+func cityUsesManagedDoltBeadsLifecycle(cityPath string) bool {
+	return cityUsesBdStoreContract(cityPath) && !cityUsesDoltliteBeadsBackend(cityPath)
+}
+
 // cityUsesMySQLBackend returns true when the city's bd metadata declares
 // backend: mysql. Such cities have NO managed dolt runtime — bd talks to
 // an external MySQL server via DSN-style connection params stored in

@@ -2538,6 +2538,7 @@ func DoltConfigExpectedValues() []DoltConfigExpectedValue {
 func DoltConfigExpectedValuesForCity(cityPath string) []DoltConfigExpectedValue {
 	autoGcEnable, autoGcSysVar := resolveExpectedAutoGc(cityPath)
 	autocommit := resolveExpectedAutocommit(cityPath)
+	doltConfig := resolveExpectedDoltConfig(cityPath)
 	values := []DoltConfigExpectedValue{
 		{"behavior.autocommit", autocommit},
 		{"behavior.auto_gc_behavior.enable", autoGcEnable},
@@ -2576,6 +2577,23 @@ func managedDoltConfigExpectedWaitTimeout() int {
 		return 0
 	}
 	return n
+}
+
+// resolveExpectedDoltConfig returns the DoltConfig used to compute Effective*
+// listener fields, walking the same priority chain as the writer: city.toml
+// [dolt] → ~/.gc/city.toml [dolt] → zero value.
+func resolveExpectedDoltConfig(cityPath string) config.DoltConfig {
+	if cityPath != "" {
+		if cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err == nil && cfg != nil {
+			return cfg.Dolt
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if cfg, err := config.Load(fsys.OSFS{}, filepath.Join(home, ".gc", "city.toml")); err == nil && cfg != nil {
+			return cfg.Dolt
+		}
+	}
+	return config.DoltConfig{}
 }
 
 // resolveExpectedAutoGc returns (behavior.auto_gc_behavior.enable,

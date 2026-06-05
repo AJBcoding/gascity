@@ -87,6 +87,9 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 	}
 	// No managed state found. Prefer the shared server port if available,
 	// otherwise hash city path into a deterministic port.
+	if envPort != "" {
+		return envPort, nil
+	}
 	if sharedPort != "" {
 		return sharedPort, nil
 	}

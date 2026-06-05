@@ -51,10 +51,25 @@ type ConfigState struct {
 	DoltHost       string
 	DoltPort       string
 	DoltUser       string
+	Dolt           DoltConfig
 	MysqlHost      string
 	MysqlPort      string
 	MysqlUser      string
 	MysqlDatabase  string
+}
+
+// DoltConfig is the Dolt-specific subset of .beads/config.yaml that GC owns.
+type DoltConfig struct {
+	DisableEventFlush *bool
+}
+
+// DisableEventFlushEnabled returns whether managed Dolt launches should disable
+// Dolt's event-flush telemetry reporter. Missing config defaults to true.
+func (c DoltConfig) DisableEventFlushEnabled() bool {
+	if c.DisableEventFlush == nil {
+		return true
+	}
+	return *c.DisableEventFlush
 }
 
 // MetadataState is the canonical subset of .beads/metadata.json used by GC.
@@ -306,6 +321,24 @@ func ScopeHasEndpointAuthority(fs fsys.FS, scopeRoot string) bool {
 		return false
 	}
 	return ConfigHasEndpointAuthority(cfg)
+}
+
+// ReadDoltConfig reads the Dolt-specific GC config object from config.yaml.
+func ReadDoltConfig(fs fsys.FS, path string) (DoltConfig, bool, error) {
+	doc, err := readConfigDoc(fs, path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return DoltConfig{}, false, nil
+		}
+		if data, readErr := fs.ReadFile(path); readErr == nil {
+			if cfg, ok := readDoltConfigFromData(data); ok {
+				return cfg, true, nil
+			}
+		}
+		return DoltConfig{}, false, err
+	}
+	cfg := readDoltConfigFromRoot(mappingRoot(doc))
+	return cfg, cfg.hasValues(), nil
 }
 
 // ReadDoltDatabase reads the pinned dolt_database from metadata.json.

@@ -31,9 +31,6 @@ func newDoltConfigCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 		dataDir      string
 		logLevel     string
 		archiveLevel int
-		maxConns     int
-		readTimeout  int
-		writeTimeout int
 		cityPath     string
 		scopeDir     string
 		issuePrefix  string
@@ -122,7 +119,7 @@ func writeManagedDoltConfigFile(path, host, port, dataDir, logLevel string, arch
 	if logLevel == "" {
 		logLevel = "warning"
 	}
-	archiveLevel := doltConfig.EffectiveArchiveLevel()
+	doltConfig := loadDoltConfigForCity(cityPath)
 	maxConnections := doltConfig.EffectiveMaxConnections()
 	readTimeoutMillis := doltConfig.EffectiveReadTimeoutMillis()
 	writeTimeoutMillis := doltConfig.EffectiveWriteTimeoutMillis()
@@ -207,11 +204,27 @@ system_variables:
   dolt_stats_gc_enabled: "OFF"
   dolt_stats_memory_only: "ON"
   dolt_stats_paused: "ON"
-%s`, logLevel, port, host, dataDir, autocommitYAML, autoGcEnableYAML, resolvedArchive, autoGcSysVarYAML, waitTimeoutLine)
+%s`, logLevel, port, host, maxConnections, readTimeoutMillis, writeTimeoutMillis, dataDir, autocommitYAML, autoGcEnableYAML, resolvedArchive, autoGcSysVarYAML, waitTimeoutLine)
 	if err := fsys.WriteFileAtomic(fsys.OSFS{}, path, []byte(content), 0o644); err != nil {
 		return fmt.Errorf("write config file: %w", err)
 	}
 	return nil
+}
+
+// loadDoltConfigForCity loads the [dolt] block from city.toml or the global
+// ~/.gc/city.toml fallback. Returns a zero DoltConfig if neither is readable.
+func loadDoltConfigForCity(cityPath string) config.DoltConfig {
+	if cityPath != "" {
+		if cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err == nil && cfg != nil {
+			return cfg.Dolt
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if cfg, err := config.Load(fsys.OSFS{}, filepath.Join(home, ".gc", "city.toml")); err == nil && cfg != nil {
+			return cfg.Dolt
+		}
+	}
+	return config.DoltConfig{}
 }
 
 // resolveDoltAutoGc returns whether Dolt auto_gc should be enabled, with

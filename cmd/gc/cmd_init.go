@@ -81,6 +81,7 @@ type wizardConfig struct {
 	startCommand     string // custom start command (workspace-level)
 	bootstrapProfile string // hosted bootstrap profile, or "" for local defaults
 	mysql            initMysqlOptions
+	err              error // wizard-time error (e.g. provider-discovery failure); doInit short-circuits when set
 }
 
 // defaultWizardConfig returns a non-interactive wizardConfig that produces
@@ -103,6 +104,60 @@ const (
 	bootstrapProfileK8sCell          = cityinit.BootstrapProfileK8sCell
 	bootstrapProfileSingleHostCompat = cityinit.BootstrapProfileSingleHostCompat
 )
+
+type wizardProviderChoice struct {
+	Name        string
+	DisplayName string
+}
+
+func configuredWizardProviderChoices(ctx context.Context) ([]wizardProviderChoice, error) {
+	names := api.ProviderReadinessNames()
+	items, err := initProbeProvidersReadiness(ctx, names, true)
+	if err != nil {
+		return nil, fmt.Errorf("checking provider readiness: %w", err)
+	}
+	choices := make([]wizardProviderChoice, 0, len(names))
+	builtins := config.BuiltinProviders()
+	for _, name := range names {
+		item, ok := items[name]
+		if !ok || item.Status != api.ProbeStatusConfigured {
+			continue
+		}
+		displayName := strings.TrimSpace(item.DisplayName)
+		if displayName == "" {
+			displayName = builtins[name].DisplayName
+		}
+		if displayName == "" {
+			displayName = name
+		}
+		choices = append(choices, wizardProviderChoice{Name: name, DisplayName: displayName})
+	}
+	return choices, nil
+}
+
+func providerChoiceKeys(choices []wizardProviderChoice) []string {
+	out := make([]string, 0, len(choices))
+	for _, choice := range choices {
+		out = append(out, choice.Name)
+	}
+	return out
+}
+
+func resolveDefaultProviderChoice(input string, choices []wizardProviderChoice) string {
+	input = strings.TrimSpace(input)
+	if input == "" {
+		return ""
+	}
+	if n, err := strconv.Atoi(input); err == nil && n >= 1 && n <= len(choices) {
+		return choices[n-1].Name
+	}
+	for _, choice := range choices {
+		if input == choice.Name {
+			return choice.Name
+		}
+	}
+	return ""
+}
 
 // isTerminal reports whether f is connected to a terminal (not a pipe or file).
 func isTerminal(f *os.File) bool {
@@ -201,11 +256,11 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 	}
 
 	return wizardConfig{
-		interactive:  true,
-		configName:   configName,
-		provider:     provider,
-		startCommand: startCommand,
-		mysql:        promptWizardBackend(br, stdout),
+		interactive:     true,
+		configName:      configName,
+		defaultProvider: defaultProvider,
+		providers:       providers,
+		mysql:           promptWizardBackend(br, stdout),
 	}
 }
 
@@ -384,8 +439,11 @@ the password is read from --mysql-password or $GC_MYSQL_PASSWORD.`,
 				fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr
 				return err
 			}
+			if flagMode != "" {
+				mode = flagMode
+			}
 			code := cmdInitWithOptionsInternal(args, providerFlag, bootstrapProfileFlag, nameFlag, out, stderr, skipProviderReadiness, preserveExisting, jsonOut, mysql)
-			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, providerFlag, bootstrapProfileFlag, mode, stdout)
+			return writeInitJSONOrExit(code, jsonOut, args, nameFlag, wiz.configName, wiz.defaultProvider, wiz.providers, bootstrapProfileFlag, mode, stdout)
 		},
 	}
 	cmd.Flags().StringVar(&fileFlag, "file", "", "path to a TOML file to use as city.toml")
@@ -530,8 +588,6 @@ func cmdInitWithOptionsInternal(args []string, providerFlag, bootstrapProfileFla
 	}
 	var wiz wizardConfig
 	switch {
-	case preparedSet:
-		wiz = prepared
 	case forceDefaultWizard:
 		wiz = defaultWizardConfig()
 	case isTerminalFunc(os.Stdin):

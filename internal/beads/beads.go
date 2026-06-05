@@ -48,6 +48,14 @@ type Bead struct {
 	// garbage collection. Reads must opt in via ListQuery.TierMode (or the
 	// WithEphemeral/WithBothTiers QueryOpts on the legacy label helpers).
 	Ephemeral bool `json:"ephemeral,omitempty"`
+	// NoHistory routes the bead to durable no-history storage on Create. These
+	// rows are visible in normal durable reads but do not add Dolt history.
+	NoHistory bool `json:"no_history,omitempty"`
+	// DeferUntil hides the bead from ready/claimable views until this time,
+	// mirroring bd's defer_until column (a future value means "not yet ready";
+	// nil or past means ready). Create paths preserve it; UpdateOpts does not
+	// mutate it.
+	DeferUntil *time.Time `json:"defer_until,omitempty"`
 	// Force, when true, passes `--force` to `bd create`. The validator
 	// honors --force to override prefix-mismatch checks (used when a
 	// formula creates a wisp with a step-suffix ID like "stf-80a.1"

@@ -1725,6 +1725,15 @@ type DoltConfig struct {
 	//   "on" / "true"     → behavior.autocommit=true  (commit per statement)
 	// Empty (default) → "batch". Override globally with env GC_DOLT_AUTOCOMMIT.
 	Autocommit string `toml:"autocommit,omitempty" jsonschema:"default=batch"`
+	// MaxConnections overrides the managed Dolt listener max_connections.
+	// 0 means use the managed default.
+	MaxConnections int `toml:"max_connections,omitempty" jsonschema:"default=256"`
+	// ReadTimeoutMillis overrides the managed Dolt listener read_timeout_millis.
+	// 0 means use the managed default.
+	ReadTimeoutMillis int `toml:"read_timeout_millis,omitempty" jsonschema:"default=30000"`
+	// WriteTimeoutMillis overrides the managed Dolt listener write_timeout_millis.
+	// 0 means use the managed default.
+	WriteTimeoutMillis int `toml:"write_timeout_millis,omitempty" jsonschema:"default=300000"`
 }
 
 // FormulasConfig holds legacy formula directory settings.
@@ -1733,6 +1742,30 @@ type FormulasConfig struct {
 	// packs use the well-known formulas/ directory; authored [formulas].dir
 	// is rejected for schema 2 configs.
 	Dir string `toml:"dir,omitempty" jsonschema:"-"`
+}
+
+// EffectiveMaxConnections returns the managed Dolt listener max_connections.
+func (d DoltConfig) EffectiveMaxConnections() int {
+	if d.MaxConnections > 0 {
+		return d.MaxConnections
+	}
+	return DefaultDoltMaxConnections
+}
+
+// EffectiveReadTimeoutMillis returns the managed Dolt listener read timeout.
+func (d DoltConfig) EffectiveReadTimeoutMillis() int {
+	if d.ReadTimeoutMillis > 0 {
+		return d.ReadTimeoutMillis
+	}
+	return DefaultDoltReadTimeoutMillis
+}
+
+// EffectiveWriteTimeoutMillis returns the managed Dolt listener write timeout.
+func (d DoltConfig) EffectiveWriteTimeoutMillis() int {
+	if d.WriteTimeoutMillis > 0 {
+		return d.WriteTimeoutMillis
+	}
+	return DefaultDoltWriteTimeoutMillis
 }
 
 // OrdersConfig holds order settings.
