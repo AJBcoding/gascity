@@ -3,7 +3,16 @@ package doctor
 import (
 	"fmt"
 	"io"
+	"strings"
+	"time"
 )
+
+// DefaultCheckTimeout bounds how long an individual check may run before
+// the doctor runner abandons it and records a timed-out advisory error.
+// Picked to be long enough that healthy in-tree checks finish well within
+// the budget (most complete in milliseconds) while short enough that a
+// hung managed-bd / dolt probe does not stall a doctor run for minutes.
+const DefaultCheckTimeout = 5 * time.Second
 
 // Report summarizes the results of a doctor run.
 type Report struct {
@@ -28,6 +37,13 @@ type Report struct {
 // Doctor runs registered health checks and reports results.
 type Doctor struct {
 	checks []Check
+	// CheckTimeout bounds each check's execution. Zero falls back to
+	// DefaultCheckTimeout. A check that exceeds the bound is recorded as
+	// StatusError + SeverityAdvisory with a "check timed out" message;
+	// the runner moves on to the next check rather than blocking.
+	// Advisory severity means timeouts do not gate dispatch / exit code,
+	// so a slow probe never breaks automation that calls `gc doctor`.
+	CheckTimeout time.Duration
 }
 
 // Register adds a check to the doctor's check list.
@@ -65,15 +81,25 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 	}
 	ctx = &runCtx
 
+	timeout := d.CheckTimeout
+	if timeout <= 0 {
+		timeout = DefaultCheckTimeout
+	}
+
 	r := &Report{}
 	for _, c := range d.checks {
-		result := c.Run(ctx)
+		result := runWithTimeout(c, ctx, timeout)
 
-		// Attempt fix if requested and the check supports it.
-		if fix && result.Status != StatusOK && c.CanFix() {
+		// Attempt fix if requested and the check supports it. Skip --fix
+		// for timed-out checks: we do not know what state the abandoned
+		// goroutine left behind, and the fix has no observed failure to
+		// remediate.
+		if fix && result.Status != StatusOK && !isTimeoutResult(result) && c.CanFix() {
 			if err := c.Fix(ctx); err == nil {
-				// Re-run to verify the fix worked.
-				result = c.Run(ctx)
+				// Re-run to verify the fix worked. Re-uses the same per-
+				// check timeout so a check that only hangs on Fix-followup
+				// still cannot stall the run.
+				result = runWithTimeout(c, ctx, timeout)
 				if result.Status == StatusOK {
 					result.Fixed = true
 				} else {
@@ -109,6 +135,55 @@ func (d *Doctor) run(ctx *CheckContext, w io.Writer, fix, stream bool) *Report {
 		}
 	}
 	return r
+}
+
+// runWithTimeout executes c.Run in a goroutine and returns the first
+// result observed within the given timeout. On timeout it synthesizes a
+// CheckResult marked StatusError + SeverityAdvisory so the timeout does
+// not gate dispatch / exit codes; an abandoned goroutine eventually
+// finishes on its own (the doctor is one-shot CLI; the process exits
+// soon afterward).
+func runWithTimeout(c Check, ctx *CheckContext, timeout time.Duration) *CheckResult {
+	done := make(chan *CheckResult, 1)
+	go func() {
+		// A panicking check would otherwise take the whole doctor down
+		// silently — recover so the run can continue, surface the panic
+		// as an error result, and let the operator see it.
+		defer func() {
+			if rec := recover(); rec != nil {
+				done <- &CheckResult{
+					Name:     c.Name(),
+					Status:   StatusError,
+					Severity: SeverityAdvisory,
+					Message:  fmt.Sprintf("check panicked: %v", rec),
+				}
+			}
+		}()
+		done <- c.Run(ctx)
+	}()
+	select {
+	case result := <-done:
+		return result
+	case <-time.After(timeout):
+		return &CheckResult{
+			Name:     c.Name(),
+			Status:   StatusError,
+			Severity: SeverityAdvisory,
+			Message:  fmt.Sprintf("check timed out after %s", timeout),
+			FixHint:  "rerun `gc doctor`; if the timeout persists, the underlying probe (managed-bd, dolt server, or controller socket) is likely unreachable",
+		}
+	}
+}
+
+// isTimeoutResult reports whether a CheckResult was synthesized by
+// runWithTimeout in response to a timeout. Used to skip --fix attempts
+// for timed-out checks.
+func isTimeoutResult(r *CheckResult) bool {
+	if r == nil {
+		return false
+	}
+	return r.Status == StatusError && r.Severity == SeverityAdvisory &&
+		strings.HasPrefix(r.Message, "check timed out")
 }
 
 // printResult writes a single check result line to w.

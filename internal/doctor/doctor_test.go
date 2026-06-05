@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // mockCheck is a configurable Check for testing the runner.
@@ -488,5 +489,85 @@ func TestPrintSummary_AdvisoryRenderedSeparately(t *testing.T) {
 	PrintSummary(&buf, &Report{Passed: 3, Failed: 1, BlockingFailed: 1})
 	if got := buf.String(); strings.Contains(got, "advisory") {
 		t.Errorf("summary = %q, must not include 'advisory' when all failures are blocking", got)
+	}
+}
+
+// hangingCheck blocks until its release channel is closed. Used to test
+// the per-check timeout: the doctor runner must abandon a check that
+// exceeds CheckTimeout rather than blocking the entire run.
+type hangingCheck struct {
+	name    string
+	release chan struct{}
+}
+
+func (c *hangingCheck) Name() string { return c.name }
+func (c *hangingCheck) Run(_ *CheckContext) *CheckResult {
+	<-c.release
+	return &CheckResult{Name: c.name, Status: StatusOK, Message: "would have been ok"}
+}
+func (c *hangingCheck) CanFix() bool              { return false }
+func (c *hangingCheck) Fix(_ *CheckContext) error { return nil }
+func (c *hangingCheck) WarmupEligible() bool      { return false }
+
+// TestDoctor_PerCheckTimeout verifies that a check exceeding the per-run
+// timeout is reported as a timed-out advisory error and the runner moves
+// on to subsequent checks instead of blocking forever. Reproduces gs-khn:
+// gc doctor on uninitialized v2 cities was hanging because some checks
+// (managed-bd / dolt server probes) could block indefinitely.
+func TestDoctor_PerCheckTimeout(t *testing.T) {
+	hung := &hangingCheck{name: "blocked", release: make(chan struct{})}
+	defer close(hung.release) // unblock so the abandoned goroutine can exit
+
+	d := &Doctor{CheckTimeout: 50 * time.Millisecond}
+	d.Register(hung)
+	d.Register(&mockCheck{name: "after", status: StatusOK, msg: "ok"})
+
+	done := make(chan *Report, 1)
+	go func() {
+		var buf bytes.Buffer
+		done <- d.Run(&CheckContext{CityPath: "/tmp"}, &buf, false)
+	}()
+
+	select {
+	case r := <-done:
+		if len(r.Results) != 2 {
+			t.Fatalf("Results length = %d, want 2", len(r.Results))
+		}
+		first := r.Results[0]
+		if first.Name != "blocked" {
+			t.Errorf("Results[0].Name = %q, want %q", first.Name, "blocked")
+		}
+		if first.Status != StatusError {
+			t.Errorf("timed-out check Status = %v, want StatusError", first.Status)
+		}
+		if first.Severity != SeverityAdvisory {
+			t.Errorf("timed-out check Severity = %v, want SeverityAdvisory (timeouts must not gate exit)", first.Severity)
+		}
+		if !strings.Contains(first.Message, "timed out") {
+			t.Errorf("timed-out check Message = %q, want to contain 'timed out'", first.Message)
+		}
+		if r.Results[1].Name != "after" || r.Results[1].Status != StatusOK {
+			t.Errorf("subsequent check skipped or wrong: got %+v", r.Results[1])
+		}
+		if r.BlockingFailed != 0 {
+			t.Errorf("BlockingFailed = %d, want 0 (timeout is advisory)", r.BlockingFailed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Doctor.Run did not return — timeout not enforced")
+	}
+}
+
+// TestDoctor_PerCheckTimeoutDefault verifies a Doctor with zero-value
+// CheckTimeout falls back to a sensible default rather than 0 (which
+// would time out every check immediately).
+func TestDoctor_PerCheckTimeoutDefault(t *testing.T) {
+	d := &Doctor{} // CheckTimeout omitted
+	d.Register(&mockCheck{name: "fast", status: StatusOK, msg: "ok"})
+
+	var buf bytes.Buffer
+	r := d.Run(&CheckContext{CityPath: "/tmp"}, &buf, false)
+
+	if r.Passed != 1 {
+		t.Errorf("Passed = %d, want 1 (zero CheckTimeout must not time out fast checks)", r.Passed)
 	}
 }
