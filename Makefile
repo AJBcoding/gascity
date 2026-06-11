@@ -21,7 +21,50 @@ LDFLAGS := -X main.version=$(VERSION) \
            -X main.commit=$(COMMIT) \
            -X main.date=$(BUILD_TIME)
 
-.PHONY: build build-zp check check-all check-bd check-docker check-docs check-dolt check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke
+unique_words = $(if $1,$(firstword $1) $(call unique_words,$(filter-out $(firstword $1),$1)))
+
+# macOS: icu4c (a transitive Dolt / go-icu-regex CGO build dependency) is
+# keg-only under Homebrew, so its headers/libs are not on the default CGO
+# search path. Point CGO at them when icu4c is present. This is a no-op on
+# Linux and other platforms (where system ICU, e.g. libicu-dev, is found
+# normally) and a no-op on macOS when icu4c is not installed.
+ifeq ($(shell uname),Darwin)
+ICU_PREFIX := $(shell brew --prefix icu4c 2>/dev/null)
+ifneq ($(ICU_PREFIX),)
+CGO_CPPFLAGS += -I$(ICU_PREFIX)/include
+CGO_LDFLAGS += -L$(ICU_PREFIX)/lib
+export CGO_CPPFLAGS
+export CGO_LDFLAGS
+endif
+endif
+
+# Linux: some non-system compilers (Nix, Flox, etc.) don't search /usr/include
+# or /usr/lib by default. If system ICU headers exist but the compiler doesn't
+# see them, intentionally let system paths participate in the whole CGO build.
+# Set SYS_USR_CGO_FALLBACK=0 to disable this fallback for hermetic or cross-CGO
+# builds.
+ifeq ($(shell uname),Linux)
+SYS_USR_CGO_FALLBACK ?= 1
+ifneq ($(SYS_USR_CGO_FALLBACK),0)
+SYS_USR_INCLUDE ?= /usr/include
+SYS_USR_LIB_ROOT ?= /usr/lib
+SYS_USR_LIB64_ROOT ?= /usr/lib64
+ifneq ($(wildcard $(SYS_USR_INCLUDE)/unicode/uregex.h),)
+ifeq ($(shell $(CC) -E -Wp,-v -x c /dev/null 2>&1 | sed 's/^[[:space:]]*//' | grep -F -x -q "$(SYS_USR_INCLUDE)" && echo yes),)
+SYS_USR_MULTIARCH_CANDIDATES := $(strip $(shell dpkg-architecture -q DEB_HOST_MULTIARCH 2>/dev/null) $(shell $(CC) -print-multiarch 2>/dev/null))
+SYS_USR_LIB_CANDIDATES := $(foreach arch,$(SYS_USR_MULTIARCH_CANDIDATES),$(SYS_USR_LIB_ROOT)/$(arch)) $(SYS_USR_LIB64_ROOT) $(SYS_USR_LIB_ROOT)
+SYS_USR_LIB_DIRS := $(strip $(call unique_words,$(strip $(foreach dir,$(SYS_USR_LIB_CANDIDATES),$(if $(wildcard $(dir)),$(dir))))))
+$(info Linux system CGO fallback active: adding -I$(SYS_USR_INCLUDE) $(addprefix -L,$(SYS_USR_LIB_DIRS)); set SYS_USR_CGO_FALLBACK=0 to disable)
+CGO_CPPFLAGS += -I$(SYS_USR_INCLUDE)
+CGO_LDFLAGS += $(addprefix -L,$(SYS_USR_LIB_DIRS))
+export CGO_CPPFLAGS
+export CGO_LDFLAGS
+endif
+endif
+endif
+endif
+
+.PHONY: build build-zp check check-all check-bd check-docker check-docs check-dolt check-native-dependency-surface check-routed-test-rows check-version-tag lint lint-full lint-new lint-changed fmt-check fmt vet test test-fast-parallel test-fsys-darwin-compile test-pack-registry-live test-native-doltlite-beads test-cmd-gc-process test-cmd-gc-process-shard test-cmd-gc-process-parallel test-worker-core test-worker-core-phase2 test-worker-core-phase2-real-transport setup-worker-inference test-worker-inference test-worker-inference-phase3 test-acceptance test-acceptance-b test-acceptance-c test-acceptance-all test-tutorial-goldens test-tutorial-regression test-tutorial test-integration test-integration-shards test-integration-shards-parallel test-integration-shards-cover test-integration-packages test-integration-packages-cover test-integration-review-formulas test-integration-review-formulas-cover test-integration-review-formulas-basic test-integration-review-formulas-basic-cover test-integration-review-formulas-retries test-integration-review-formulas-retries-cover test-integration-review-formulas-recovery test-integration-review-formulas-recovery-cover test-integration-bdstore test-integration-bdstore-cover test-integration-rest test-integration-rest-cover test-integration-rest-smoke test-integration-rest-smoke-cover test-integration-rest-full test-integration-rest-full-cover test-local-full-parallel test-mcp-mail test-docker test-k8s test-cover cover install install-tools install-buildx setup clean generate check-schema docker-base docker-agent docker-controller docs-dev diagrams-excalidraw dashboard-smoke
 
 ## build: compile gc binary with version metadata
 build:
@@ -229,6 +272,14 @@ vet:
 ## tests and corrupt live cities. Only the allowlist below survives. To opt
 ## extra vars through, set EXTRA_TEST_ENV='FOO=bar BAZ=qux' on the make line.
 ## See PR #746.
+##
+## Load-bearing: GC_DOLT_PORT and BEADS_DOLT_SERVER_PORT are deliberately NOT in
+## the allowlist below. They point bd at the live shared city Dolt server, so
+## letting them reach `go test` makes every bd-forking test write to PRODUCTION
+## Dolt — 18+ parallel workers pegged the shared server and stalled bd writes
+## city-wide (ga-w2kh1r). Do not add them. For a bare `go test` that bypasses
+## this wrapper, internal/testenv scrubs these vars at test-binary init in every
+## covered package (enforced by TestRequiresDedicatedTestenvImportFile).
 GOPATH_VAL    := $(shell go env GOPATH)
 GOCACHE_VAL   := $(shell go env GOCACHE)
 GOMODCACHE_VAL := $(shell go env GOMODCACHE)
@@ -285,7 +336,7 @@ TEST_ENV = env -i \
 ## cache input hashes over local working files.
 ## Wrapped in $(TEST_ENV) — see comment above for why.
 test: test-fsys-darwin-compile
-	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 ./...
+	$(TEST_ENV) GC_FAST_UNIT=1 scripts/go-test-observable test -- -p=4 -count=1 -timeout 15m ./...
 
 LOCAL_TEST_JOBS ?= $(shell nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 8)
 
@@ -307,8 +358,14 @@ test-pack-registry-live:
 		echo "Example: GC_TEST_GASCITY_PACKS_REGISTRY=main make test-pack-registry-live"; \
 		exit 2; \
 	fi
-	$(TEST_ENV) GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test ./cmd/gc -run '^TestPackRegistryLiveGascityPacksCatalog$$' -count=1
-	$(TEST_ENV) GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test -tags acceptance_a -timeout 10m ./test/acceptance -run '^TestPackRegistryLiveImportsEveryCatalogPack$$' -count=1
+	@# Keep the live canary portable on runners and local machines that do not
+	@# have the optional ICU C headers needed by the default CGO build path.
+	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test ./cmd/gc -run '^TestPackRegistryLiveGascityPacksCatalog$$' -count=1
+	$(TEST_ENV) CGO_ENABLED=0 GC_TEST_GASCITY_PACKS_REGISTRY="$${GC_TEST_GASCITY_PACKS_REGISTRY}" go test -tags acceptance_a -timeout 10m ./test/acceptance -run '^TestPackRegistryLiveImportsEveryCatalogPack$$' -count=1
+
+## update-bundled-gastown-pack: sync the embedded gastown pack to the latest registry release
+update-bundled-gastown-pack:
+	scripts/update-bundled-gastown-pack
 
 ## test-native-doltlite-beads: compile and run the native DoltLite read-store suite
 test-native-doltlite-beads:
@@ -517,7 +574,7 @@ check-docs:
 # Packages for coverage — exclude noise:
 #   session/tmux: integration-test-only, not meaningful for unit coverage
 #   beadstest: conformance helper, runs under internal/beads coverage
-UNIT_COVER_PKGS := $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest)
+UNIT_COVER_PKGS = $(shell go list -f '{{if or .TestGoFiles .XTestGoFiles}}{{.ImportPath}}{{end}}' ./... | grep -v -e /session/tmux -e /beadstest)
 
 ## test-cover: run fast unit-test coverage without the integration-tagged package sweep
 ## The skipped cmd/gc process-backed scenarios remain covered by

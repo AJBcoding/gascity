@@ -51,6 +51,10 @@ type AgentPatch struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Args overrides the provider's default arguments. Leave unset to keep
+	// the pack-defined args; set to an empty list to clear them; set to a
+	// populated list to replace them entirely (full replace, not append).
+	Args *[]string `toml:"args,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
@@ -196,8 +200,14 @@ type RigPatch struct {
 	Prefix *string `toml:"prefix,omitempty"`
 	// DefaultBranch overrides the rig's recorded mainline branch.
 	DefaultBranch *string `toml:"default_branch,omitempty"`
-	// Suspended overrides the rig's suspended state.
+	// Suspended is the deprecated, pre-runtime-state suspension override.
+	// Parsed for backwards compatibility; `gc doctor` surfaces it as a
+	// warning and recommends the rename to SuspendedOnStart. No behavioral
+	// code path reads it.
 	Suspended *bool `toml:"suspended,omitempty"`
+	// SuspendedOnStart overrides the rig's desired suspension state at
+	// city start. Mirrors Rig.SuspendedOnStart.
+	SuspendedOnStart *bool `toml:"suspended_on_start,omitempty"`
 	// FormulaVars adds or overrides rig-scoped formula var defaults.
 	// Additive merge: patch keys win over existing rig keys, unspecified
 	// keys are preserved.
@@ -441,6 +451,9 @@ func applyAgentPatchFields(a *Agent, p *AgentPatch) {
 	if p.Provider != nil {
 		a.Provider = *p.Provider
 	}
+	if p.Args != nil {
+		a.Args = append([]string(nil), (*p.Args)...)
+	}
 	if p.StartCommand != nil {
 		a.StartCommand = *p.StartCommand
 	}
@@ -615,6 +628,9 @@ func applyRigPatch(cfg *City, patch *RigPatch) error {
 			}
 			if patch.Suspended != nil {
 				r.Suspended = *patch.Suspended
+			}
+			if patch.SuspendedOnStart != nil {
+				r.SuspendedOnStart = *patch.SuspendedOnStart
 			}
 			if len(patch.FormulaVars) > 0 {
 				if r.FormulaVars == nil {

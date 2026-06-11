@@ -59,6 +59,7 @@ export type AgentOutputResponse = {
 
 export type AgentPatch = {
     AppendFragments: Array<string> | null;
+    Args: Array<string> | null;
     Attach: boolean | null;
     DefaultSlingFormula: string | null;
     DependsOn: Array<string> | null;
@@ -262,6 +263,7 @@ export type Bead = {
     ephemeral?: boolean;
     from?: string;
     id: string;
+    is_blocked?: boolean;
     issue_type: string;
     labels?: Array<string> | null;
     metadata?: {
@@ -799,7 +801,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | NoPayload | OutboundEventPayload | PostgresCredentialResolvedPayload | ProjectIdentityStampedPayload | RequestFailedPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | UnboundEventPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2417,6 +2419,7 @@ export type RigPatch = {
     Path: string | null;
     Prefix: string | null;
     Suspended: boolean | null;
+    SuspendedOnStart: boolean | null;
 };
 
 export type RigPatchSetInputBody = {
@@ -2751,6 +2754,25 @@ export type SessionResponse = {
     submission_capabilities?: SubmissionCapabilities;
     template: string;
     title: string;
+};
+
+export type SessionStrandedPayload = {
+    /**
+     * Canonical session bead ID for the stranded pool session (also the envelope Subject).
+     */
+    session_id: string;
+    /**
+     * Runtime session name from the session bead metadata, when set.
+     */
+    session_name?: string;
+    /**
+     * Pool template name when known at the emission site.
+     */
+    template?: string;
+    /**
+     * IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time.
+     */
+    work_bead_ids?: Array<string> | null;
 };
 
 /**
@@ -3295,6 +3317,41 @@ export type SupervisorHealthOutputBody = {
     version: string;
 };
 
+export type SupervisorRequestPayload = {
+    /**
+     * Handler duration in milliseconds.
+     */
+    duration_ms: number;
+    /**
+     * Canonical Host header without port.
+     */
+    host?: string;
+    /**
+     * HTTP method.
+     */
+    method: string;
+    /**
+     * Whether the Origin header, if present, matched CORS policy.
+     */
+    origin_allowed: boolean;
+    /**
+     * Request path with query string omitted and length bounded.
+     */
+    path: string;
+    /**
+     * Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only.
+     */
+    phase: 'start' | 'complete';
+    /**
+     * Network class of the remote address, not the raw address.
+     */
+    remote_addr_class: 'loopback' | 'private' | 'public' | 'unknown';
+    /**
+     * HTTP response status code. Start-phase records use 0 before the final response status is known.
+     */
+    status: number;
+};
+
 export type SupervisorShutdownPayload = {
     /**
      * For source=socket_stop, the address reported by the connecting client. Typically empty for unix-socket peers.
@@ -3479,6 +3536,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeSessionWorkQueryFailed) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
+    type: 'supervisor.request';
+} & TypedEventStreamEnvelopeSupervisorRequest) | ({
     type: 'supervisor.shutdown_requested';
 } & TypedEventStreamEnvelopeSupervisorShutdownRequested) | ({
     type: 'worker.operation';
@@ -4262,7 +4321,7 @@ export type TypedEventStreamEnvelopeSessionStopped = {
 export type TypedEventStreamEnvelopeSessionStranded = {
     actor: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionStrandedPayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -4351,6 +4410,20 @@ export type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
     subject?: string;
     ts: string;
     type: 'supervisor.fs_pressure.skipped_tick';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope supervisor.request
+ */
+export type TypedEventStreamEnvelopeSupervisorRequest = {
+    actor: string;
+    message?: string;
+    payload: SupervisorRequestPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.request';
     workflow?: WorkflowEventProjection;
 };
 
@@ -4510,6 +4583,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed) | ({
     type: 'supervisor.fs_pressure.skipped_tick';
 } & TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick) | ({
+    type: 'supervisor.request';
+} & TypedTaggedEventStreamEnvelopeSupervisorRequest) | ({
     type: 'supervisor.shutdown_requested';
 } & TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested) | ({
     type: 'worker.operation';
@@ -5349,7 +5424,7 @@ export type TypedTaggedEventStreamEnvelopeSessionStranded = {
     actor: string;
     city: string;
     message?: string;
-    payload: NoPayload;
+    payload: SessionStrandedPayload;
     seq: number;
     subject?: string;
     ts: string;
@@ -5444,6 +5519,21 @@ export type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick = {
     subject?: string;
     ts: string;
     type: 'supervisor.fs_pressure.skipped_tick';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope supervisor.request
+ */
+export type TypedTaggedEventStreamEnvelopeSupervisorRequest = {
+    actor: string;
+    city: string;
+    message?: string;
+    payload: SupervisorRequestPayload;
+    seq: number;
+    subject?: string;
+    ts: string;
+    type: 'supervisor.request';
     workflow?: WorkflowEventProjection;
 };
 
@@ -11309,6 +11399,10 @@ export type GetV0CityByCityNameStatusData = {
          * How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
          */
         wait?: string;
+        /**
+         * When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
+         */
+        lite?: boolean;
     };
     url: '/v0/city/{cityName}/status';
 };

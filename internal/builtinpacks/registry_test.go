@@ -22,8 +22,7 @@ func TestAllAndSourceAreDeterministic(t *testing.T) {
 	want := []string{
 		"core=internal/bootstrap/packs/core",
 		"bd=examples/bd",
-		"dolt=examples/dolt",
-		"maintenance=examples/gastown/packs/maintenance",
+		"dolt=examples/bd/dolt",
 		"gastown=examples/gastown/packs/gastown",
 	}
 	if strings.Join(first, "\n") != strings.Join(want, "\n") {
@@ -55,6 +54,7 @@ func TestSourceRecognitionVariants(t *testing.T) {
 		{name: "with ref", src: coreSource + "#main", want: true},
 		{name: "github tree form", src: "https://github.com/gastownhall/gascity/tree/main/internal/bootstrap/packs/core", want: true},
 		{name: "github blob form", src: "https://github.com/gastownhall/gascity/blob/main/internal/bootstrap/packs/core/pack.toml", want: true},
+		{name: "legacy dolt subpath", src: Repository + "//examples/dolt", want: true},
 		{name: "different repo", src: "https://github.com/example/gascity.git//internal/bootstrap/packs/core", want: false},
 		{name: "unknown subpath", src: Repository + "//internal/bootstrap/packs/missing", want: false},
 	}
@@ -141,9 +141,12 @@ func TestMaterializeSyntheticRepoProductionCallersStayInPackman(t *testing.T) {
 			switch entry.Name() {
 			case ".git", ".gc", "node_modules", "worktrees":
 				return filepath.SkipDir
-			default:
-				return nil
 			}
+			// Skip git worktrees embedded in the repo (have a .git file, not dir).
+			if fi, serr := os.Stat(filepath.Join(path, ".git")); serr == nil && !fi.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
@@ -341,4 +344,24 @@ func testRepoRoot(t *testing.T) string {
 		t.Fatalf("repo root %q missing go.mod: %v", root, err)
 	}
 	return root
+}
+
+func TestSyntheticCacheKeyComponentMatchesContentHash(t *testing.T) {
+	want, err := SyntheticContentHash()
+	if err != nil {
+		t.Fatalf("SyntheticContentHash: %v", err)
+	}
+	got := SyntheticCacheKeyComponent()
+	if got == "" {
+		t.Fatal("SyntheticCacheKeyComponent returned empty for a valid binary")
+	}
+	if got != want {
+		t.Fatalf("SyntheticCacheKeyComponent = %q, want content hash %q", got, want)
+	}
+	if !strings.HasPrefix(got, "sha256:") {
+		t.Fatalf("SyntheticCacheKeyComponent = %q, want sha256 prefix", got)
+	}
+	if second := SyntheticCacheKeyComponent(); second != got {
+		t.Fatalf("SyntheticCacheKeyComponent not stable across calls: %q != %q", got, second)
+	}
 }

@@ -57,7 +57,12 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 		cfg = nil
 	}
 	reapStaleBdExportJSONL(dir)
-	return beads.NewBdStoreWithPrefix(dir, bdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
+	return beads.NewBdStoreWithPrefix(
+		dir,
+		bdCommandRunnerForCity(cityPath),
+		issuePrefixForScope(dir, cityPath, cfg),
+		bdStoreOptionsForConfig(cfg)...,
+	)
 }
 
 // bdStoreForRig opens a bead store at rigDir using rig-level Dolt config
@@ -74,7 +79,19 @@ func bdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...str
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
-	return beads.NewBdStoreWithPrefix(rigDir, bdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
+	return beads.NewBdStoreWithPrefix(
+		rigDir,
+		bdCommandRunnerForRig(cityPath, cfg, rigDir),
+		prefix,
+		bdStoreOptionsForConfig(cfg)...,
+	)
+}
+
+func bdStoreOptionsForConfig(cfg *config.City) []beads.BdStoreOption {
+	if cfg != nil && cfg.Beads.UsesBD105CLISemantics() {
+		return []beads.BdStoreOption{beads.WithBdStoreListSkipLabels(true)}
+	}
+	return nil
 }
 
 // reapStaleBdExportJSONL removes .beads/issues.jsonl best-effort when the
@@ -159,7 +176,12 @@ func scopeIsGCManaged(scopeRoot string) bool {
 
 func controlBdStoreForCity(dir, cityPath string, cfg *config.City) *beads.BdStore {
 	reapStaleBdExportJSONL(dir)
-	return beads.NewBdStoreWithPrefix(dir, controlBdCommandRunnerForCity(cityPath), issuePrefixForScope(dir, cityPath, cfg))
+	return beads.NewBdStoreWithPrefix(
+		dir,
+		controlBdCommandRunnerForCity(cityPath),
+		issuePrefixForScope(dir, cityPath, cfg),
+		bdStoreOptionsForConfig(cfg)...,
+	)
 }
 
 func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix ...string) *beads.BdStore {
@@ -173,7 +195,12 @@ func controlBdStoreForRig(rigDir, cityPath string, cfg *config.City, knownPrefix
 		}
 	}
 	reapStaleBdExportJSONL(rigDir)
-	return beads.NewBdStoreWithPrefix(rigDir, controlBdCommandRunnerForRig(cityPath, cfg, rigDir), prefix)
+	return beads.NewBdStoreWithPrefix(
+		rigDir,
+		controlBdCommandRunnerForRig(cityPath, cfg, rigDir),
+		prefix,
+		bdStoreOptionsForConfig(cfg)...,
+	)
 }
 
 func controlBdCommandRunnerForCity(cityPath string) beads.CommandRunner {
@@ -673,6 +700,26 @@ func appendBdCLIRemoteSyncOptOutEnvKeys(keys []string) []string {
 	return keys
 }
 
+// bdAutoBackupOptOutEnvKeys disables bd's PersistentPostRun auto-backup —
+// the hardcoded "backup_export" Dolt remote bd syncs on (almost) every
+// invocation. A stuck-looping backup_export sync was the root cause of the
+// 2026-06-08 town-wide Dolt wedge (ga-0eq): it saturated the commit path
+// while oscillating not-found/already-exists. gc never relies on this path
+// (managed backups run through mol-dog-backup), so it is pure downside here.
+// BD_BACKUP_ENABLED is the key bd's BD-prefixed Viper env binding consumes
+// today; keep BEADS_BACKUP_ENABLED as a compatibility alias only.
+var bdAutoBackupOptOutEnvKeys = [...]string{
+	"BD_BACKUP_ENABLED",
+	"BEADS_BACKUP_ENABLED",
+}
+
+func appendBdAutoBackupOptOutEnvKeys(keys []string) []string {
+	for _, key := range bdAutoBackupOptOutEnvKeys {
+		keys = append(keys, key)
+	}
+	return keys
+}
+
 var (
 	beadsExecCommandRunnerWithEnv             = beads.ExecCommandRunnerWithEnv
 	processEnvSnapshotExcludingNativeDoltOpen = beads.ProcessEnvSnapshotExcludingNativeDoltOpen
@@ -683,6 +730,7 @@ var recoverManagedBDCommand = func(cityPath string) error {
 	overrides := cityRuntimeEnvMapForCity(cityPath)
 	setProjectedDoltEnvEmpty(overrides)
 	applyBdCLIRemoteSyncOptOut(overrides)
+	applyBdAutoBackupOptOut(overrides)
 	environ := mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides)
 	environ = append(environ, providerLifecycleDoltPathEnv(cityPath)...)
 	if gcBin := resolveProviderLifecycleGCBinary(); gcBin != "" {
@@ -884,6 +932,19 @@ func resolvedRuntimeCityDoltTarget(cityPath string, allowRecovery bool) (contrac
 		if err := healthBeadsProvider(cityPath); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {
+				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
+			}
+		}
+	}
+	// Last-resort: when all other recovery paths have been exhausted but the
+	// managed Dolt lifecycle is owned, attempt to read the port directly from
+	// provider state using the symlink-aware validation path. This handles the
+	// case where currentPublishedOrRecoveredManagedDoltPort encounters a publish
+	// failure (e.g., write permission error, post-publish re-validation failure)
+	// while the server is still accessible.
+	if allowRecovery {
+		if owned, _ := managedDoltLifecycleOwned(cityPath); owned {
+			if port := currentResolvableManagedDoltPort(cityPath); port != "" {
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 			}
 		}
@@ -1337,6 +1398,17 @@ func bdRuntimeEnvWithError(cityPath string) (map[string]string, error) {
 	// large datasets.
 	env["BD_EXPORT_AUTO"] = "false"
 	applyBdCLIRemoteSyncOptOut(env)
+	// Suppress bd's PersistentPostRun auto-backup (the "backup_export" Dolt
+	// remote). Like BD_EXPORT_AUTO above, the env var is the bulletproof
+	// per-invocation guard: it covers fresh rig scopes whose config has not
+	// been canonicalized and overrides any drifted backup.enabled:true. A
+	// stuck-looping backup_export sync wedged the whole town on 2026-06-08
+	// (ga-0eq); managed backups run through mol-dog-backup, not this path.
+	applyBdAutoBackupOptOut(env)
+	// Opt-in: route bd through the pooling db-proxy (no-op unless [beads] proxied
+	// and bd supports it). Covers agent AND controller bd calls (rig env builds
+	// on this base).
+	applyProxiedPoolEnv(env, cityPath)
 	if !cityUsesBdStoreContract(cityPath) {
 		return env, nil
 	}
@@ -1389,6 +1461,8 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 	var projectionErr error
 	if cityUsesBdStoreContract(cityPath) {
 		source := map[string]string{"BEADS_DOLT_AUTO_START": "0"}
+		applyBdCLIRemoteSyncOptOut(source)
+		applyBdAutoBackupOptOut(source)
 		if cityUsesMySQLBackend(cityPath) {
 			// MySQL backend needs no env projection; bd reads connection
 			// details from .beads/config.yaml directly.
@@ -1411,6 +1485,9 @@ func cityRuntimeProcessEnvWithError(cityPath string) ([]string, error) {
 			}
 		}
 	}
+	// Opt-in: carry the proxied/pool env to the gc-beads-bd provider script and
+	// any bd it forks (no-op unless [beads] proxied and bd supports it).
+	applyProxiedPoolEnv(overrides, cityPath)
 	return mergeRuntimeEnv(processEnvSnapshotExcludingNativeDoltOpen(), overrides), projectionErr
 }
 
@@ -1419,6 +1496,19 @@ func applyBdCLIRemoteSyncOptOut(env map[string]string) {
 		return
 	}
 	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
+		env[key] = "false"
+	}
+}
+
+// applyBdAutoBackupOptOut forces bd's PersistentPostRun auto-backup off for
+// gc-managed bd invocations. It overrides any ambient or per-scope config
+// value so a fresh or drifted rig store cannot re-enable the destructive
+// backup_export sync (ga-0eq). See bdAutoBackupOptOutEnvKeys.
+func applyBdAutoBackupOptOut(env map[string]string) {
+	if env == nil {
+		return
+	}
+	for _, key := range bdAutoBackupOptOutEnvKeys {
 		env[key] = "false"
 	}
 }
@@ -1522,6 +1612,7 @@ func mergeRuntimeEnv(environ []string, overrides map[string]string) []string {
 		"GC_RIG_ROOT",
 	}
 	keys = appendBdCLIRemoteSyncOptOutEnvKeys(keys)
+	keys = appendBdAutoBackupOptOutEnvKeys(keys)
 	if len(overrides) > 0 {
 		for key := range overrides {
 			if !containsString(keys, key) {

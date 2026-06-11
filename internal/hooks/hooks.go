@@ -1,5 +1,5 @@
 // Package hooks installs provider-specific agent hook files into working
-// directories. Each provider (Claude, Codex, Gemini, OpenCode, Copilot, etc.)
+// directories. Each provider (Claude, Codex, Gemini, Antigravity, OpenCode, Copilot, etc.)
 // has its own file format and install location. Hook files are embedded at build time
 // and written idempotently — existing files are never overwritten.
 package hooks
@@ -29,12 +29,12 @@ var configFS embed.FS
 
 // supported lists provider names that have hook support wired into
 // Gas Town's installer.
-var supported = []string{"claude", "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp"}
+var supported = []string{"claude", "codex", "gemini", "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot", "cursor", "pi", "omp", "kimi"}
 
 const (
-	managedPiHookVersion       = 4
-	managedOpenCodeHookVersion = 2
-	managedOmpHookVersion      = 1
+	managedPiHookVersion       = 7
+	managedOpenCodeHookVersion = 5
+	managedOmpHookVersion      = 2
 )
 
 var (
@@ -154,8 +154,10 @@ func InstallWithResolver(fs fsys.FS, cityDir, workDir string, providers []string
 		switch family {
 		case "claude":
 			err = installClaude(fs, cityDir)
-		case "codex", "gemini", "kiro", "opencode", "copilot", "cursor", "pi", "omp":
+		case "codex", "gemini", "antigravity", "kiro", "opencode", "copilot", "cursor", "pi", "omp", "kimi":
 			err = installOverlayManaged(fs, workDir, family)
+		case "groq", "cerebras":
+			err = installOverlayManaged(fs, workDir, "opencode")
 		default:
 			return fmt.Errorf("unsupported hook provider %q", p)
 		}
@@ -187,6 +189,9 @@ func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 			return fmt.Errorf("reading %s: %w", name, err)
 		}
 		dst := filepath.Join(workDir, filepath.FromSlash(rel))
+		if provider == "antigravity" && rel == path.Join(".agents", "hooks.json") {
+			return writeJSONOverlayManaged(fs, dst, data)
+		}
 		if provider == "codex" && rel == path.Join(".codex", "hooks.json") {
 			return writeCodexHooksManaged(fs, dst, data)
 		}
@@ -197,6 +202,25 @@ func installOverlayManaged(fs fsys.FS, workDir, provider string) error {
 		}
 		return writeEmbeddedManaged(fs, dst, data, overlayManagedNeedsUpgrade(provider, rel))
 	})
+}
+
+func writeJSONOverlayManaged(fs fsys.FS, dst string, data []byte) error {
+	if existing, err := fs.ReadFile(dst); err == nil {
+		merged, mergeErr := overlay.MergeSettingsJSON(existing, data)
+		if mergeErr != nil {
+			return fmt.Errorf("merging %s: %w", dst, mergeErr)
+		}
+		if bytes.Equal(merged, existing) {
+			return nil
+		}
+		return writeManagedData(fs, dst, merged)
+	} else if _, statErr := fs.Stat(dst); statErr == nil {
+		return nil
+	}
+	if normalized, err := overlay.CanonicalJSON(data); err == nil {
+		data = normalized
+	}
+	return writeManagedData(fs, dst, data)
 }
 
 func overlayManagedNeedsUpgrade(provider, rel string) func([]byte) bool {
@@ -221,7 +245,10 @@ func piHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, "gc prime --hook") ||
 		!strings.Contains(content, "gc hook --inject") ||
 		!strings.Contains(content, "gc handoff --auto") ||
-		!strings.Contains(content, "mirrorTempCounter") {
+		!strings.Contains(content, "mirrorTempCounter") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
+		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -261,7 +288,10 @@ func opencodeHookNeedsUpgrade(existing []byte) bool {
 		!strings.Contains(content, `"experimental.session.compacting"`) ||
 		!strings.Contains(content, `runWithWarning(directory, "handoff", "--auto", "context cycle")`) ||
 		!strings.Contains(content, "output.context.push(handoff)") ||
-		!strings.Contains(content, "logRunFailure") {
+		!strings.Contains(content, "logRunFailure") ||
+		!strings.Contains(content, "logRunStderr(stderr);") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") {
 		return true
 	}
 	for _, marker := range []string{
@@ -296,10 +326,12 @@ func ompHookNeedsUpgrade(existing []byte) bool {
 	if ompHookVersion(content) < managedOmpHookVersion ||
 		!strings.Contains(content, "gascityOmpExtension") ||
 		!strings.Contains(content, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(content, "GC_PROVIDER_SESSION_ID_REQUIRED") ||
 		!strings.Contains(content, `pi.on("session_start"`) ||
 		!strings.Contains(content, `pi.on("session_compact"`) ||
 		!strings.Contains(content, `pi.on("before_agent_start"`) ||
-		!strings.Contains(content, "logRunFailure") {
+		!strings.Contains(content, "logRunFailure") ||
+		!strings.Contains(content, `stdio: ["ignore", "pipe", "inherit"]`) {
 		return true
 	}
 	for _, marker := range []string{
@@ -486,7 +518,7 @@ func desiredClaudeSettings(fs fsys.FS, cityDir string) ([]byte, claudeSettingsSo
 		return nil, claudeSettingsSourceNone, fmt.Errorf("upgrading Claude settings from %s: %w", overridePath, upgradeErr)
 	}
 
-	merged, err := overlay.MergeSettingsJSON(base, upgradedOverride)
+	merged, err := overlay.MergeSettingsJSON(base, upgradedOverride, overlay.WithWrapBareHooks())
 	if err != nil {
 		if overlay.IsOverlayObjectShapeError(err) {
 			return nil, claudeSettingsSourceNone, fmt.Errorf("invalid Claude settings override at %s: Claude settings override is not a JSON object; expected a JSON object; fix or remove the file to proceed with install: %w", overridePath, err)

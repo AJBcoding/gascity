@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
@@ -226,6 +227,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			register(newMysqlBackendCheck(rig.Path))
 		}
 		register(doctor.NewConfigValidCheck(cfg))
+		register(doctor.NewLegacySuspendedFieldCheck(cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
 		register(doctor.NewPreStartScriptsCheck(cfg))
@@ -239,11 +241,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		register(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))))
 		register(newCodexHooksDriftCheck(codexHookWorkDirs(cityPath, cfg)))
+		register(newBeadsProxiedCapabilityCheck(cfg))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
 		register(newMCPConfigDoctorCheck(cityPath, cfg, exec.LookPath))
 		register(newMCPSharedTargetDoctorCheck(cityPath, cfg, exec.LookPath))
 	}
 	if _, rawCfgErr := loadCityConfigForEditFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); rawCfgErr == nil {
+		register(newBuiltinIncludeDoctorCheck(cityPath))
 		register(newImportStateDoctorCheck(cityPath))
 		register(newJsonlArchiveDoctorCheck(cityPath))
 	}
@@ -294,9 +298,16 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewBeadsStoreCheck(cityPath, storeFactory))
 		register(newV2RoutedToNamespaceCheck(cfg, cityPath, storeFactory))
 		register(newRunTargetRoutedToBackfillCheck(cfg, cityPath, storeFactory))
+		register(newWorkOptionMetadataMigrationCheck(cfg, cityPath, storeFactory))
+		register(newBacklogDepthCheck(cityPath, storeFactory))
+		register(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 		register(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 	}
 	register(newDoctorDoltServerCheck(cityPath, opts.SkipCityDoltCheck))
+	// Host-level fork-rate watch: surfaces the per-command data-plane fork storm
+	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
+	// Advisory + read-only (/proc/stat); no config needed.
+	register(newForkRateCheck())
 	if cfgErr == nil && doctorWorkspaceHasPostgresScope(cityPath, cfg) {
 		register(doctor.NewPostgresAuthCheck(cityPath, cfg))
 	}
@@ -315,6 +326,10 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// invocation without retention. This check warns before the directory
 	// fills the disk and cascades into broken dolt writes.
 	register(doctor.NewBdBackupSizeCheckForConfig(cityPath, cfg, cfgErr))
+	// Stale bd backup state: corrupt-store quarantines that were never
+	// reclaimed and dolt-backup.json registrations pointing at deleted
+	// paths (ga-yfbs28).
+	register(doctor.NewBdBackupStateCheckForConfig(cityPath, cfg, cfgErr))
 	// Worktree checks deliberately run even when cfgErr != nil — they
 	// only need the city path, and a broken city.toml is exactly when
 	// silent disk-fill is most likely. The zero-value DoctorConfig
@@ -329,11 +344,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// Custom types check — city store.
 	register(doctor.NewCustomTypesCheck(cityPath, "city"))
 
-	// Per-rig checks. Skip suspended rigs — opening their bead store
-	// triggers bd auto-start of orphan Dolt servers (ga-wzk).
+	// Per-rig checks. Skip effectively-suspended rigs — opening their
+	// bead store triggers bd auto-start of orphan Dolt servers (ga-wzk).
 	if cfgErr == nil && cfg != nil {
+		suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 		for _, rig := range cfg.Rigs {
-			if rig.Suspended {
+			if suspensionstate.EffectiveRigSuspended(suspState, rig.Name, rig.EffectiveSuspendedOnStart()) {
 				continue
 			}
 			if strings.TrimSpace(rig.Path) == "" {
@@ -341,6 +357,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			}
 			register(doctor.NewRigPathCheck(rig))
 			register(doctor.NewRigGitCheck(rig))
+			register(doctor.NewRigRootBranchCheck(rig))
 			register(doctor.NewRigBDSplitStoreCheck(cityPath, rig))
 			register(doctor.NewRigBeadsCheck(cityPath, rig, storeFactory))
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || gcDoltSkip()))

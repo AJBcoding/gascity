@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
@@ -96,28 +97,25 @@ func parseGitHubTreeURL(s string) (source, subpath, ref string) {
 // resolvePackRef resolves a pack reference to a local directory.
 // Handles local paths, GitHub tree URLs, and git source//sub#ref URLs.
 func resolvePackRef(ref, declDir, cityRoot string) (string, error) {
-	if isGitHubTreeURL(ref) {
-		source, subpath, gitRef := parseGitHubTreeURL(ref)
-		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)
-		if err != nil {
-			return "", err
-		}
-		if subpath != "" {
-			return filepath.Join(cacheDir, subpath), nil
-		}
-		return cacheDir, nil
-	}
-	if isRemoteInclude(ref) {
+	if isGitHubTreeURL(ref) || isRemoteInclude(ref) {
+		// parseRemoteInclude handles GitHub tree/blob URLs too
+		// (remotesource.Parse short-circuits to ParseGitHubTreeOrBlob),
+		// so a single parse covers both remote forms.
 		source, subpath, gitRef := parseRemoteInclude(ref)
-		if gitRef == "" {
-			if cacheDir, ok, err := resolveLockedRemoteImport(ref, cityRoot); err != nil {
-				return "", err
-			} else if ok {
-				if subpath != "" {
-					return filepath.Join(cacheDir, subpath), nil
-				}
-				return cacheDir, nil
+		// packs.lock is authoritative for any remote source string it
+		// records, with or without an embedded ref: gc import install /
+		// upgrade already resolved the authored source to a commit and
+		// populated the repo cache. Consulting the lock first keeps
+		// locked imports (including registry-recommended GitHub tree
+		// URLs) resolvable without the legacy include cache, which has
+		// no remaining writer.
+		if cacheDir, ok, err := resolveLockedRemoteImport(ref, cityRoot); err != nil {
+			return "", err
+		} else if ok {
+			if subpath != "" {
+				return filepath.Join(cacheDir, subpath), nil
 			}
+			return cacheDir, nil
 		}
 		cacheDir, err := fetchRemoteInclude(source, gitRef, cityRoot)
 		if err != nil {
@@ -165,9 +163,7 @@ func resolveLockedRemoteImport(source, cityRoot string) (string, bool, error) {
 
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
-	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
-	}); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", false, err
 	}
 	return cacheDir, true, nil
@@ -199,12 +195,69 @@ func resolveInstalledRemoteImport(source, cityRoot string) (string, error) {
 
 	cacheRoot := filepath.Join(home, ".gc", "cache", "repos")
 	cacheDir := filepath.Join(cacheRoot, RepoCacheKey(source, entry.Commit))
-	if err := WithRepoCacheReadLock(cacheRoot, func() error {
-		return validateInstalledRemoteCache(source, cacheDir, entry.Commit)
-	}); err != nil {
+	if err := validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, entry.Commit); err != nil {
 		return "", err
 	}
 	return cacheDir, nil
+}
+
+// remoteCacheValidationCache memoizes successful remote-cache validations. The
+// installed remote pack cache is a commit-pinned, gc-managed checkout: validating
+// it costs a repo-cache flock plus two git execs (`rev-parse HEAD` and
+// `status --porcelain --ignored`, the latter walking the whole tree), and config
+// load runs it for every remote import on every reconcile (per rig, per pool).
+// Since the cache is immutable for a given commit unless `gc import install`
+// rewrites it, cache the success keyed by (cacheDir, commit) + a cheap stat
+// fingerprint so a warm cache is revalidated once and reused. Only successes are
+// cached; an error re-checks so a repaired cache is picked up immediately.
+var remoteCacheValidationCache sync.Map // cacheDir+"\x00"+commit -> remoteCacheValidationEntry
+
+type remoteCacheValidationEntry struct{ fingerprint string }
+
+// remoteCacheFingerprint is a cheap change signal for a remote cache checkout:
+// the size+mtime of the checkout root, its .git dir, and the git index. Git
+// checkout/status touch .git and the index; `gc import install` rewrites the
+// tree. A nested manual worktree edit touching none of these escapes detection
+// until the process restarts — acceptable for a pinned, gc-managed cache.
+func remoteCacheFingerprint(cacheDir string) string {
+	var b strings.Builder
+	for _, p := range []string{cacheDir, filepath.Join(cacheDir, ".git"), filepath.Join(cacheDir, ".git", "index")} {
+		if fi, err := os.Stat(p); err == nil {
+			fmt.Fprintf(&b, "%d:%d;", fi.Size(), fi.ModTime().UnixNano())
+		} else {
+			b.WriteString("-;")
+		}
+	}
+	return b.String()
+}
+
+// validateInstalledRemoteCacheLocked validates the remote cache under the
+// repo-cache read lock, memoizing the success so a warm, unchanged cache skips
+// both the flock and the git execs on subsequent loads.
+func validateInstalledRemoteCacheLocked(source, cacheRoot, cacheDir, commit string) error {
+	key := cacheDir + "\x00" + commit
+	fp := remoteCacheFingerprint(cacheDir)
+	if v, ok := remoteCacheValidationCache.Load(key); ok {
+		if v.(remoteCacheValidationEntry).fingerprint == fp {
+			return nil
+		}
+	}
+	if err := WithRepoCacheReadLock(cacheRoot, func() error {
+		return validateInstalledRemoteCache(source, cacheDir, commit)
+	}); err != nil {
+		return err
+	}
+	remoteCacheValidationCache.Store(key, remoteCacheValidationEntry{fingerprint: fp})
+	return nil
+}
+
+// ResetRemoteCacheValidationCache clears memoized remote-cache validations
+// (test isolation; also lets `gc import install` force revalidation in-process).
+func ResetRemoteCacheValidationCache() {
+	remoteCacheValidationCache.Range(func(k, _ any) bool {
+		remoteCacheValidationCache.Delete(k)
+		return true
+	})
 }
 
 func validateInstalledRemoteCache(source, cacheDir, commit string) error {
@@ -298,11 +351,18 @@ var repoCacheGitEnvBlacklist = map[string]bool{
 // RepoCacheKey computes the sha256 cache key for a remote source+commit pair.
 // This is the canonical implementation — packman.RepoCacheKey must produce
 // identical results. Bundled synthetic caches live in a distinct namespace so
-// current-binary content never collides with same-repo git checkouts.
+// current-binary content never collides with same-repo git checkouts, and they
+// additionally fold in the running binary's bundled-pack content hash so two gc
+// binaries with different embedded pack content resolve to different cache
+// directories instead of fighting over one shared marker (the citywide
+// "bundled pack cache content hash does not match current binary" wedge).
 func RepoCacheKey(source, commit string) string {
 	identity := NormalizeRemoteSource(source) + commit
 	if builtinpacks.IsSource(source) {
 		identity = builtinpacks.SyntheticCacheNamespace + "\x00" + NormalizeRemoteSource(source) + "\x00" + commit
+		if component := builtinpacks.SyntheticCacheKeyComponent(); component != "" {
+			identity += "\x00" + component
+		}
 	}
 	sum := sha256.Sum256([]byte(identity))
 	return fmt.Sprintf("%x", sum[:])

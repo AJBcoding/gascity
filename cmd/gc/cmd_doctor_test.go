@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 func prependDoctorJSONStubBinaries(t *testing.T, names ...string) {
@@ -33,7 +34,7 @@ func TestDoctorJSONSuccessIsParseableJSONOnly(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\n"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nincludes = [\".gc/system/packs/core\"]\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(cityDir, ".gc", "site.toml"), []byte("workspace_name = \"demo\"\n"), 0o644); err != nil {
@@ -879,13 +880,13 @@ func TestDoctorSkipsSuspendedRigChecks(t *testing.T) {
 
 	rigs := []config.Rig{
 		{Name: "active-rig", Path: activeDir},
-		{Name: "suspended-rig", Path: suspendedDir, Suspended: true},
+		{Name: "suspended-rig", Path: suspendedDir, SuspendedOnStart: true},
 	}
 
 	// Mirror the per-rig registration logic from doDoctor.
 	d := &doctor.Doctor{}
 	for _, rig := range rigs {
-		if rig.Suspended {
+		if suspensionstate.EffectiveRigSuspended(suspensionstate.State{}, rig.Name, rig.SuspendedOnStart) {
 			continue
 		}
 		d.Register(doctor.NewRigPathCheck(rig))

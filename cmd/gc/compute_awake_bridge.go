@@ -6,6 +6,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -16,6 +17,7 @@ import (
 // capability probes.
 func buildAwakeInputFromReconciler(
 	cfg *config.City,
+	cityPath string,
 	sessionBeads []beads.Bead,
 	poolDesired map[string]int,
 	namedSessionDemand map[string]bool,
@@ -35,15 +37,19 @@ func buildAwakeInputFromReconciler(
 		AttachedSessions:   make(map[string]bool),
 		PendingSessions:    make(map[string]bool),
 		ChatIdleTimeout:    cfg.ChatSessions.IdleTimeoutDuration(),
+		ManualGracePeriod:  cfg.ChatSessions.GracePeriodDuration(),
 		Now:                clk,
 	}
 
-	// Agents
+	// Agents. Load runtime suspension state once against the in-scope
+	// city path so suspension resolves against the controlled city
+	// rather than the process cwd.
+	suspState, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		agent := AwakeAgent{
 			QualifiedName:     a.QualifiedName(),
-			Suspended:         isAgentEffectivelySuspended(cfg, a),
+			Suspended:         isAgentEffectivelySuspendedWith(cfg, a, suspState),
 			SleepAfterIdle:    parseSleepDuration(a.SleepAfterIdle),
 			MinActiveSessions: a.EffectiveMinActiveSessions(),
 		}
@@ -115,6 +121,7 @@ func buildAwakeInputFromReconciler(
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil
+		bead.CreatedAt = b.CreatedAt
 		if t, err := time.Parse(time.RFC3339, b.Metadata["detached_at"]); err == nil && !t.IsZero() {
 			bead.IdleSince = t
 		}

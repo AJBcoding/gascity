@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type mkdirAllErrorFS struct {
@@ -1113,13 +1114,20 @@ func TestDoRigSuspend(t *testing.T) {
 		t.Errorf("output = %q, want suspend message", stdout.String())
 	}
 
-	// Verify config written with suspended=true.
+	// Verify suspension recorded in runtime state, not city.toml.
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !suspensionstate.IsRigSuspended(st, "frontend") {
+		t.Errorf("rig should be suspended in runtime state, got %+v", st)
+	}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].Suspended {
-		t.Errorf("rig should be suspended, got %+v", cfg.Rigs)
+	if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
+		t.Errorf("city.toml should NOT have suspended=true, got %+v", cfg.Rigs)
 	}
 }
 
@@ -1152,7 +1160,7 @@ func TestDoRigSuspendAlreadySuspended(t *testing.T) {
 
 func TestDoRigResume(t *testing.T) {
 	cityPath := t.TempDir()
-	cityToml := "[workspace]\n\n[[rigs]]\nname = \"frontend\"\nsuspended = true\n"
+	cityToml := "[workspace]\n\n[[rigs]]\nname = \"frontend\"\nsuspended_on_start = true\n"
 	siteToml := "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"frontend\"\npath = \"/some/path\"\n"
 	writeSchema2RigCity(t, cityPath, "test-city", cityToml, siteToml)
 
@@ -1165,13 +1173,24 @@ func TestDoRigResume(t *testing.T) {
 		t.Errorf("output = %q, want resume message", stdout.String())
 	}
 
-	// Verify config written with suspended=false.
+	// city.toml is intentionally NOT mutated; the explicit resume is
+	// recorded in .gc/runtime/rig-state.json and beats SuspendedOnStart.
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(cfg.Rigs) != 1 || cfg.Rigs[0].Suspended {
-		t.Errorf("rig should not be suspended, got %+v", cfg.Rigs)
+	if len(cfg.Rigs) != 1 || !cfg.Rigs[0].SuspendedOnStart {
+		t.Errorf("city.toml suspended_on_start should remain set, got %+v", cfg.Rigs)
+	}
+	st, err := suspensionstate.Load(fsys.OSFS{}, cityPath)
+	if err != nil {
+		t.Fatalf("suspensionstate.Load: %v", err)
+	}
+	if v, ok := suspensionstate.ExplicitRig(st, "frontend"); !ok || v {
+		t.Errorf("frontend should have explicit resume in runtime state, got (%v, %v)", v, ok)
+	}
+	if suspensionstate.EffectiveRigSuspended(st, "frontend", cfg.Rigs[0].SuspendedOnStart) {
+		t.Error("explicit resume in runtime state must beat suspended_on_start=true")
 	}
 }
 
@@ -1208,7 +1227,7 @@ func TestDoRigListShowsSuspended(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cityToml := "[workspace]\n\n[[rigs]]\nname = \"my-frontend\"\nsuspended = true\n"
+	cityToml := "[workspace]\n\n[[rigs]]\nname = \"my-frontend\"\nsuspended_on_start = true\n"
 	siteToml := fmt.Sprintf("workspace_name = \"test-city\"\n\n[[rig]]\nname = \"my-frontend\"\npath = %q\n", rigPath)
 	writeSchema2RigCity(t, cityPath, "test-city", cityToml, siteToml)
 
@@ -2736,6 +2755,105 @@ func TestDoRigAdd_AdoptWithoutPrefixMismatch(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "already has bead prefix") {
 		t.Errorf("error should mention prefix mismatch: %s", stderr.String())
+	}
+}
+
+// TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook verifies that --adopt on
+// a managed-Dolt (bd-contract) city invokes the init/hook machinery to
+// register types.custom and other config into the adopted store's DB.
+// Regression for ga-fg1ht3: the adopt branch previously skipped the init
+// path entirely, leaving the DB config table out of sync with config.yaml.
+func TestDoRigAdd_AdoptWithBdContractInvokesInitAndHook(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, "gc-beads-bd"))
+	t.Setenv("GC_DOLT", "")
+
+	// Stub lifecycle hooks — no real Dolt in unit tests. Record that the
+	// init path was invoked with the adopted rig dir.
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origInit := initDirIfReadyInitAndHookDir
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyInitAndHookDir = origInit
+	})
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+
+	var initCalls []string
+	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
+		initCalls = append(initCalls, dir)
+		return nil
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "adopted-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"name":"adopted-rig","issue_prefix":"ar"}`
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	configYaml := "issue_prefix: ar\n" +
+		"types.custom: molecule,convoy,session,merge-request,agent,role,rig,spec,convergence,step\n"
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte(configYaml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "ar", "", false, true, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("doRigAdd --adopt returned %d, stderr: %s", code, stderr.String())
+	}
+	if len(initCalls) == 0 {
+		t.Fatalf("ga-fg1ht3: --adopt on bd-contract city must invoke initAndHookDir to register types.custom; initCalls=%v", initCalls)
+	}
+	found := false
+	for _, dir := range initCalls {
+		if samePath(dir, rigPath) {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("initAndHookDir called but not for adopted rig path %q; calls=%v", rigPath, initCalls)
+	}
+	if !strings.Contains(stdout.String(), "Adopted existing beads database") {
+		t.Errorf("stdout should mention adoption: %s", stdout.String())
+	}
+}
+
+// TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit is a
+// control: the same stubbed harness wired through a NON-adopt add also calls
+// initAndHookDir, proving that the empty-initCalls failure above (pre-fix) was
+// real (adopt invoked init 0 times), not a harness artifact.
+func TestDoRigAdd_AdoptWithBdContractProvider_NonAdoptControlInvokesInit(t *testing.T) {
+	cityPath := t.TempDir()
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n", "")
+	t.Setenv("GC_BEADS", "exec:"+filepath.Join(cityPath, "gc-beads-bd"))
+	t.Setenv("GC_DOLT", "")
+
+	origEnsure := initDirIfReadyEnsureBeadsProvider
+	origInit := initDirIfReadyInitAndHookDir
+	t.Cleanup(func() {
+		initDirIfReadyEnsureBeadsProvider = origEnsure
+		initDirIfReadyInitAndHookDir = origInit
+	})
+	initDirIfReadyEnsureBeadsProvider = func(_ string) error { return nil }
+
+	var initCalls []string
+	initDirIfReadyInitAndHookDir = func(_, dir, _ string) error {
+		initCalls = append(initCalls, dir)
+		return nil
+	}
+
+	rigPath := filepath.Join(t.TempDir(), "fresh-rig")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	doRigAdd(fsys.OSFS{}, cityPath, rigPath, nil, "", "fr", "", false, false, &stdout, &stderr)
+	if len(initCalls) == 0 {
+		t.Fatalf("control: non-adopt rig add invoked initAndHookDir 0 times; stub not wired in? stderr=%s", stderr.String())
 	}
 }
 

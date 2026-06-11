@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The bundled maintenance pack was folded into the core pack, and builtin
+  packs are no longer implicitly included.** There is now one builtin pack —
+  core — carrying everything any city needs: the gc-* skills, default worker
+  prompts, core formulas, the mechanical housekeeping orders that used to
+  ship in the maintenance pack (gate-sweep, orphan-sweep, cross-rig-deps,
+  order-tracking-sweep, spawn-storm-detect, prune-branches, wisp-compact,
+  nudge-mail-sweep, nudge-on-route, cascade-nudge-on-blocker-close), the
+  check-binaries doctor check, and the per-provider hook overlays. Config
+  load no longer splices builtin packs into composition: `gc init` writes
+  explicit includes into city.toml (`[workspace] includes =
+  [".gc/system/packs/core", ".gc/system/packs/bd"]`; the bd entry only for
+  bd-provider cities), and the new fixable `builtin-pack-includes` doctor
+  check repairs missing includes and removes stale
+  `.gc/system/packs/maintenance` references. Config load still self-heals
+  the materialized `.gc/system/packs` content and warns once per city when a
+  required builtin include is missing. **Migration:** run
+  `gc doctor --fix` once per existing city; stale materialized maintenance
+  directories are pruned automatically.
+- **The implicit fallback dog is gone, and the `fallback` agent field was
+  removed.** The gastown pack now owns its dog pool outright
+  (`agents/dog/`, themed, with `mol-shutdown-dance`), and the dolt pack
+  keeps its own dolt dog for Dolt maintenance formulas. The
+  fallback-agent resolution mechanism (`fallback = true`, non-fallback
+  wins, first-loaded wins) was removed: cross-pack agent name collisions
+  are now hard errors, and a stale `fallback` key in a V2
+  `agents/<name>/agent.toml` is ignored while a V1 inline `[[agent]]`
+  entry fails the pack's unknown-key gate. External packs that relied on
+  the bundled fallback dog must define their own worker pool (or route
+  work to a pool they ship themselves).
+
 ### Added
 
 - `gc nudge drain --inject` now prepends a one-line current-time stamp
@@ -41,6 +73,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The synthetic bundled-pack cache key now folds in the running binary's
+  embedded-pack content hash, so two `gc` binaries with different bundled-pack
+  content resolve to different cache directories instead of fighting over one.
+  Previously the cache directory was keyed only on namespace+source+commit, so a
+  version-skewed deploy (controller and agents on different `gc` builds) left
+  both binaries materializing one shared directory in turn: each `gc import
+  install` was promptly clobbered by the other binary, re-wedging every `gc bd`
+  citywide with "bundled pack cache content hash does not match current binary"
+  roughly hourly. With the content hash in the key, `gc import install` for a
+  given binary sticks for that binary regardless of other versions running.
+  Note: deploying a binary with changed bundled-pack content still requires a
+  one-time `gc import install` (or bootstrap materialize) to populate the new
+  cache directory; that install is now durable rather than transient (ga-s9p).
+
 - Pool respawn after `gc runtime drain-ack` no longer waits up to a full patrol
   interval (default 60 s) before the replacement session starts. The async kill
   goroutine now pokes the controller once after the session is gone so Phase 2
@@ -59,6 +105,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeout", which would push unbounded. A failure to create the stderr-capture
   temp file now degrades to a per-database error rather than aborting the whole
   run.
+- Interactive `gc session new` tmux sessions now scroll tmux scrollback on the
+  mouse wheel instead of leaking the wheel to the focused TUI (Claude Code's own
+  history, a pager, or the shell). The gastown pack binds `WheelUpPane`→copy-mode
+  and `WheelDownPane`→passthrough, and the runtime resolves interactive sessions
+  to mouse-on across every create seam so tmux preserves the `mouse on` set at
+  session create: the `gc session new` CLI — both the managed-deferred reconciler
+  start (`templateParamsToConfig`, for `session_origin=manual` sessions) and the
+  unmanaged direct start (`workerSessionCreateHints`) — plus the API
+  provider/named paths (`sessionCreateHints`). Resume keeps mouse-on too
+  (`sessionResumeHints`), so the wheel survives suspend/restart. Headless agent
+  sessions stay mouse-off (controller-poll safety) — they resolve `MouseOn` from
+  the agent template path (`cfgAgent.MouseModeOn()`), which is unchanged and has
+  neither the `manual`/`named` interactive marker. Replaces the portharbour
+  po-vtg2 city-local `set-hook` stopgap with the in-source fix. Refs: ga-c4w.
 
 ## [1.2.1] - 2026-05-31
 

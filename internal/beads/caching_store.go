@@ -80,6 +80,8 @@ type CachingStore struct {
 	applyEventBeforeCommitForTest func()
 }
 
+var _ ConditionalAssignmentReleaser = (*CachingStore)(nil)
+
 type cacheState int
 
 const (
@@ -259,6 +261,13 @@ func NewCachingStoreForTestWithPrefix(backing Store, idPrefix string, onChange f
 	return newCachingStore(backing, idPrefix, onChange)
 }
 
+// SetPrimeRetryDelayForTest overrides the inter-attempt backoff Prime
+// uses when the backing store's full scan fails, so tests can exercise
+// prime-failure paths without real multi-second sleeps. Test-only.
+func (c *CachingStore) SetPrimeRetryDelayForTest(fn func(attempt int) time.Duration) {
+	c.primeRetryDelay = fn
+}
+
 func newCachingStore(backing Store, idPrefix string, onChange func(eventType, beadID string, payload json.RawMessage)) *CachingStore {
 	return &CachingStore{
 		backing:     backing,
@@ -337,8 +346,8 @@ func (c *CachingStore) noteLocalMutationLocked(ids ...string) uint64 {
 	return seq
 }
 
-// PrimeActive loads all non-closed beads (open + in_progress) across both
-// persistent issues and ephemeral wisps into the cache. These are fast indexed
+// PrimeActive loads the common active bead statuses (open + in_progress) across
+// both persistent issues and ephemeral wisps into the cache. These are fast indexed
 // queries that populate enough data for
 // startup paths without waiting for a full scan. The cache enters
 // cachePartial state: filtered active queries and Get hit cache for primed
@@ -360,6 +369,12 @@ func (c *CachingStore) PrimeActive() error {
 			c.recordProblem(fmt.Sprintf("prime active (%s)", status), err)
 		}
 		all = append(all, beads...)
+	}
+	if enriched, err := c.enrichReadyProjectionForCache(all); err != nil {
+		partialErr = errors.Join(partialErr, err)
+		c.recordProblem("prime active ready projection", err)
+	} else {
+		all = enriched
 	}
 
 	beadMap := make(map[string]Bead, len(all))
@@ -473,6 +488,12 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	}
 	if err != nil {
 		return fmt.Errorf("prime list: %w", err)
+	}
+	if enriched, enrichErr := c.enrichReadyProjectionForCache(all); enrichErr != nil {
+		c.recordProblem("prime ready projection", enrichErr)
+		partialErr = errors.Join(partialErr, enrichErr)
+	} else {
+		all = enriched
 	}
 	if err := c.cacheContextErr(ctx); err != nil {
 		return err
@@ -853,11 +874,30 @@ type listDependencyCompletenessStore interface {
 	listIncludesCompleteDependencies() bool
 }
 
+type cacheDependencySnapshotStore interface {
+	dependencySnapshotForCache(ids []string) (map[string][]Dep, bool, error)
+}
+
+type readyProjectionEnrichmentStore interface {
+	enrichReadyProjectionForCache([]Bead) ([]Bead, error)
+}
+
+func (c *CachingStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
+	if backing, ok := c.backing.(readyProjectionEnrichmentStore); ok {
+		return backing.enrichReadyProjectionForCache(items)
+	}
+	return items, nil
+}
+
 func (c *CachingStore) fetchDepsForBeads(beadMap map[string]Bead) (map[string][]Dep, bool, error) {
+	ids := beadIDs(beadMap)
+	if backing, ok := c.backing.(cacheDependencySnapshotStore); ok {
+		return backing.dependencySnapshotForCache(ids)
+	}
 	if backing, ok := c.backing.(listDependencyCompletenessStore); ok {
 		return depsFromBeads(beadMap, nil, false), backing.listIncludesCompleteDependencies(), nil
 	}
-	return c.fetchDepsForIDs(beadIDs(beadMap))
+	return c.fetchDepsForIDs(ids)
 }
 
 func (c *CachingStore) fetchDepsForIDs(ids []string) (map[string][]Dep, bool, error) {

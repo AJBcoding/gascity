@@ -513,8 +513,20 @@ type Rig struct {
 	// Captured by `gc rig add` from the rig's git config; set manually for
 	// rigs whose mainline isn't reachable via origin/HEAD.
 	DefaultBranch string `toml:"default_branch,omitempty"`
-	// Suspended prevents the reconciler from spawning agents in this rig. Toggle with gc rig suspend/resume.
+	// Suspended is the deprecated pre-runtime-state suspension flag.
+	// Parsed for backwards compatibility and treated as an alias for
+	// SuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing
+	// cities with `suspended = true` continue to start their rigs
+	// suspended after upgrade. Live suspend/resume commands no longer
+	// write this field. `gc doctor` flags it and offers `--fix` to
+	// rename to suspended_on_start.
 	Suspended bool `toml:"suspended,omitempty"`
+	// SuspendedOnStart is the rig's desired suspension state at city
+	// start. When true and no explicit entry exists for this rig in
+	// .gc/runtime/suspension-state.json, the rig is treated as
+	// suspended. Once the user has explicitly suspended or resumed the
+	// rig via `gc rig suspend/resume`, the runtime state wins.
+	SuspendedOnStart bool `toml:"suspended_on_start,omitempty"`
 	// FormulasDir is a rig-local formula directory (Layer 4). Overrides
 	// pack formulas for this rig by filename.
 	// Relative paths resolve against the city directory.
@@ -593,6 +605,10 @@ type AgentOverride struct {
 	Session *string `toml:"session,omitempty"`
 	// Provider overrides the provider name.
 	Provider *string `toml:"provider,omitempty"`
+	// Args overrides the provider's default arguments. Leave unset to keep
+	// the pack-defined args; set to an empty list to clear them; set to a
+	// populated list to replace them entirely (full replace, not append).
+	Args *[]string `toml:"args,omitempty"`
 	// StartCommand overrides the start command.
 	StartCommand *string `toml:"start_command,omitempty"`
 	// Lifecycle overrides the runtime lifecycle ("one_shot" or empty).
@@ -1053,6 +1069,17 @@ func (r *Rig) EffectiveDefaultBranch() string {
 	return strings.TrimSpace(r.DefaultBranch)
 }
 
+// EffectiveSuspendedOnStart returns the rig's committable startup
+// suspension default. The deprecated `suspended` field is honored as
+// an alias for `suspended_on_start` so legacy city.toml files keep
+// their behavior on upgrade. Use this everywhere a read site needs
+// the authored default — never read r.Suspended directly for
+// behavior; only `gc doctor` consults it (to warn about the legacy
+// field).
+func (r *Rig) EffectiveSuspendedOnStart() bool {
+	return r.Suspended || r.SuspendedOnStart
+}
+
 // EffectiveHQPrefix returns the bead ID prefix for the city's HQ store.
 // Uses the effective site-bound prefix first, then the declared workspace
 // Prefix, then derives one from the effective city name.
@@ -1144,11 +1171,20 @@ type Workspace struct {
 	Provider string `toml:"provider,omitempty"`
 	// StartCommand overrides the provider's command for all agents.
 	StartCommand string `toml:"start_command,omitempty"`
-	// Suspended controls whether the city is suspended. When true, all
-	// agents are effectively suspended: the reconciler won't spawn them,
-	// and gc hook/prime return empty. Inherits downward — individual
-	// agent/rig suspended fields are checked independently.
+	// Suspended is the deprecated pre-runtime-state city suspension
+	// flag. Parsed for backwards compatibility and treated as an alias
+	// for SuspendedOnStart by [Workspace.EffectiveSuspendedOnStart], so
+	// existing cities with `suspended = true` continue to start
+	// suspended after upgrade. Live suspend/resume commands no longer
+	// write this field. `gc doctor` flags it and offers `--fix` to
+	// rename to suspended_on_start.
 	Suspended bool `toml:"suspended,omitempty"`
+	// SuspendedOnStart is the city's desired suspension state at start.
+	// When true and no explicit entry exists in
+	// .gc/runtime/suspension-state.json, the city is treated as
+	// suspended. Once the user has explicitly suspended or resumed via
+	// `gc suspend/resume`, the runtime state wins.
+	SuspendedOnStart bool `toml:"suspended_on_start,omitempty"`
 	// MaxActiveSessions is the workspace-level cap on total concurrent sessions.
 	// Nil means unlimited. Agents and rigs inherit this if they don't set their own.
 	MaxActiveSessions *int `toml:"max_active_sessions,omitempty"`
@@ -1160,7 +1196,8 @@ type Workspace struct {
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
-	// "kiro", "opencode", "copilot", "cursor", "pi", "omp".
+	// "antigravity", "kiro", "opencode", "groq", "cerebras", "copilot",
+	// "cursor", "pi", "omp", "kimi".
 	InstallAgentHooks []string `toml:"install_agent_hooks,omitempty"`
 	// GlobalFragments lists named template fragments injected into every
 	// agent's rendered prompt. Applied before per-agent InjectFragments.
@@ -1207,23 +1244,64 @@ func (w *Workspace) SetLegacyDefaultRigIncludes(includes []string) {
 	w.DefaultRigIncludes = includes
 }
 
+// EffectiveSuspendedOnStart returns the workspace's committable
+// startup suspension default. The deprecated `suspended` field is
+// honored as an alias for `suspended_on_start` so legacy city.toml
+// files keep their behavior on upgrade. Use this everywhere a read
+// site needs the authored default — never read w.Suspended directly
+// for behavior; only `gc doctor` consults it (to warn about the
+// legacy field).
+func (w *Workspace) EffectiveSuspendedOnStart() bool {
+	return w.Suspended || w.SuspendedOnStart
+}
+
 // BeadsConfig holds bead store settings.
 type BeadsConfig struct {
-	// Provider selects the bead store backend: "bd" (default), "file",
-	// or "exec:<script>" for a user-supplied script.
+	// Provider selects the bead store backend: "bd" (default, Dolt-backed),
+	// "file", or "exec:<script>" for a user-supplied script. The "sqlite",
+	// "sqlite-cgo", and "coordstore" coordination-store providers were removed
+	// and now hard-error; migrate to "doltlite" or remove the setting.
 	Provider string `toml:"provider,omitempty" jsonschema:"default=bd"`
 	// Backend selects the bd storage engine when Provider is "bd".
 	// Empty defaults to "dolt"; T3Code uses "doltlite" for local dev stores.
 	Backend string `toml:"backend,omitempty"`
 	// EventHooks controls installation of the bead event-forwarding hooks
-	// (.beads/hooks/on_create,on_update,on_close). Defaults to true.
-	// This config surface is staged ahead of the native bead-event support;
-	// current hook behavior remains unchanged until lifecycle code opts in.
+	// (.beads/hooks/on_create,on_update,on_close) that shell out to
+	// `gc event emit` on every bead write. Defaults to true. Set to false
+	// once the controller's native cache-events already observe bead changes
+	// (the bd_hooks doctor gate): the lifecycle then removes the event hooks
+	// (leaving git hooks untouched) and stops reinstalling them, clearing the
+	// per-write churn and the native-store gate.
 	EventHooks *bool `toml:"event_hooks,omitempty" jsonschema:"default=true"`
 	// BDCompatibility selects the bd CLI semantics Gas City may rely on.
 	// Empty defaults to "bd-1.0.4", which keeps claimable work history-backed
-	// and avoids ready flags whose filtering is incomplete in bd 1.0.4.
+	// and avoids bd ready/list flags that are unavailable or incomplete in bd
+	// 1.0.4.
 	BDCompatibility string `toml:"bd_compatibility,omitempty" jsonschema:"enum=bd-1.0.4,enum=bd-1.0.5"`
+	// Proxied routes bd through the pooling db-proxy (ProxiedServerMode,
+	// external backend) instead of direct ServerMode, eliminating the per-call
+	// bd→dolt connection churn (#1978: ~71 new connections/sec to the managed
+	// dolt server). Defaults to false = current direct ServerMode, byte-for-byte
+	// identical, so existing cities are unaffected. Requires a bd build that
+	// supports `bd init --proxied-server` (external); when the resolved bd lacks
+	// it, gascity falls back to server mode and a doctor check flags it, so a
+	// city paired with a standard bd never breaks.
+	Proxied *bool `toml:"proxied,omitempty" jsonschema:"default=false"`
+	// ProxyPoolSize is the warm backend-connection pool size the db-proxy keeps
+	// per (capabilities, database) key when Proxied is true. Defaults to 4.
+	// The proxy is shared per workspace root, so all agents of a scope share one
+	// warm pool; the size is frozen by the first bd invocation that spawns the
+	// proxy (changing it requires restarting the db-proxy-child).
+	ProxyPoolSize *int `toml:"proxy_pool_size,omitempty" jsonschema:"default=4"`
+	// ProxyIdleTimeout is how long a db-proxy-child stays alive with no active
+	// client before it shuts down. The bd default (30s) is tuned for one busy
+	// workspace; gascity touches many scopes sparsely (controller patrol probes
+	// every rig once per interval), starving each proxy below 30s so it spawns,
+	// serves one op, idle-dies, and respawns on the next touch — pure churn that
+	// never reaches the warm-pool steady state. A longer timeout keeps proxies
+	// warm across sparse bursts. Go duration string; defaults to "10m". Read by
+	// bd as BEADS_PROXY_IDLE_TIMEOUT.
+	ProxyIdleTimeout *string `toml:"proxy_idle_timeout,omitempty" jsonschema:"default=10m"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1236,11 +1314,46 @@ func (b BeadsConfig) EventHooksEnabled() bool {
 	return b.EventHooks == nil || *b.EventHooks
 }
 
+// ProxiedEnabled reports whether bd should run in pooling ProxiedServerMode.
+// Unset preserves the current default of direct ServerMode (false).
+func (b BeadsConfig) ProxiedEnabled() bool {
+	return b.Proxied != nil && *b.Proxied
+}
+
+// defaultBeadsProxyPoolSize is the warm pool size used when Proxied is on and
+// ProxyPoolSize is unset or non-positive.
+const defaultBeadsProxyPoolSize = 4
+
+// ProxyPoolSizeOrDefault returns the configured pool size, or the default when
+// unset/non-positive.
+func (b BeadsConfig) ProxyPoolSizeOrDefault() int {
+	if b.ProxyPoolSize != nil && *b.ProxyPoolSize > 0 {
+		return *b.ProxyPoolSize
+	}
+	return defaultBeadsProxyPoolSize
+}
+
+// defaultBeadsProxyIdleTimeout is the proxy idle-shutdown timeout used when
+// Proxied is on and ProxyIdleTimeout is unset/blank. Chosen well above the
+// controller patrol interval so warm proxies survive between sparse probes.
+const defaultBeadsProxyIdleTimeout = "10m"
+
+// ProxyIdleTimeoutOrDefault returns the configured proxy idle timeout, or the
+// default when unset/blank.
+func (b BeadsConfig) ProxyIdleTimeoutOrDefault() string {
+	if b.ProxyIdleTimeout != nil {
+		if v := strings.TrimSpace(*b.ProxyIdleTimeout); v != "" {
+			return v
+		}
+	}
+	return defaultBeadsProxyIdleTimeout
+}
+
 const (
 	// BeadsBDCompatibility104 preserves behavior supported by installed bd
 	// 1.0.4, where ready filtering is reliable only for history-backed rows.
 	BeadsBDCompatibility104 = "bd-1.0.4"
-	// BeadsBDCompatibility105 opts into bd 1.0.5 ready/storage semantics.
+	// BeadsBDCompatibility105 opts into bd 1.0.5 CLI/storage semantics.
 	BeadsBDCompatibility105 = "bd-1.0.5"
 )
 
@@ -1258,10 +1371,16 @@ func (b BeadsConfig) NormalizedBDCompatibility() string {
 	}
 }
 
+// UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
+// command-line behavior.
+func (b BeadsConfig) UsesBD105CLISemantics() bool {
+	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+}
+
 // UsesBD105ReadySemantics reports whether generated bd ready commands may use
 // flags whose complete filter semantics require bd 1.0.5 or newer.
 func (b BeadsConfig) UsesBD105ReadySemantics() bool {
-	return b.NormalizedBDCompatibility() == BeadsBDCompatibility105
+	return b.UsesBD105CLISemantics()
 }
 
 // BeadPolicyConfig holds storage and retention defaults for a named bead use.
@@ -1271,7 +1390,8 @@ type BeadPolicyConfig struct {
 	Storage string `toml:"storage,omitempty" jsonschema:"enum=history,enum=no_history,enum=ephemeral"`
 	// DeleteAfterClose deletes matching GC-owned beads after they have been
 	// closed for this duration. Accepts Go duration syntax plus whole-day "d"
-	// units, e.g. "7d" or "1d12h". Empty means the policy is not GC-managed.
+	// units, e.g. "7d" or "1d12h". Empty defers to any controller-managed
+	// default for the policy type (e.g. order_tracking defaults to 7d).
 	DeleteAfterClose string `toml:"delete_after_close,omitempty"`
 }
 
@@ -1808,6 +1928,9 @@ type OrderOverride struct {
 	Pool *string `toml:"pool,omitempty"`
 	// Timeout overrides the per-order timeout. Go duration string.
 	Timeout *string `toml:"timeout,omitempty"`
+	// Idempotent overrides whether the order's dispatch is safe to repeat.
+	// Idempotent orders fail open when the open-work gate times out (#2893).
+	Idempotent *bool `toml:"idempotent,omitempty"`
 	// Env adds or overrides environment variables exported into an exec
 	// order's child process.
 	Env map[string]string `toml:"env,omitempty"`
@@ -1869,6 +1992,10 @@ type ChatSessionsConfig struct {
 	// IdleTimeout is the duration after which a detached chat session
 	// is auto-suspended. Duration string (e.g., "30m", "1h"). 0 = disabled.
 	IdleTimeout string `toml:"idle_timeout,omitempty"`
+	// GracePeriod is the duration after creation during which a manual
+	// session is protected from idle-sleep scale-to-zero. Duration string
+	// (e.g., "10m"). Empty = use default (10m). "0" = disabled.
+	GracePeriod string `toml:"grace_period,omitempty"`
 }
 
 // SessionSleepConfig configures default idle sleep policies by session class.
@@ -1892,6 +2019,27 @@ func (c ChatSessionsConfig) IdleTimeoutDuration() time.Duration {
 	d, err := time.ParseDuration(c.IdleTimeout)
 	if err != nil {
 		return 0
+	}
+	return d
+}
+
+// DefaultManualGracePeriod is the grace period for manual sessions when
+// no explicit grace_period is configured. Protects ad-hoc sessions from
+// idle-sleep scale-to-zero during their initial startup window.
+const DefaultManualGracePeriod = 10 * time.Minute
+
+// GracePeriodDuration parses GracePeriod, returning DefaultManualGracePeriod
+// if unset, 0 if explicitly set to "0", or the parsed duration.
+func (c ChatSessionsConfig) GracePeriodDuration() time.Duration {
+	switch c.GracePeriod {
+	case "":
+		return DefaultManualGracePeriod
+	case "0", "0s":
+		return 0
+	}
+	d, err := time.ParseDuration(c.GracePeriod)
+	if err != nil {
+		return DefaultManualGracePeriod
 	}
 	return d
 }
@@ -3063,11 +3211,6 @@ type Agent struct {
 	// attachment (e.g., tmux attach). When false, the agent can use a
 	// lighter runtime (subprocess instead of tmux). Defaults to true.
 	Attach *bool `toml:"attach,omitempty"`
-	// Fallback marks this agent as a fallback definition. During pack
-	// composition, a non-fallback agent with the same name wins silently.
-	// When two fallbacks collide, the first loaded (depth-first) wins.
-	// See docs/guides/shareable-packs.md for pack layout guidance.
-	Fallback bool `toml:"fallback,omitempty"`
 	// DependsOn lists agent names that must be awake before this agent wakes.
 	// Used for dependency-ordered startup and shutdown. Validated for cycles
 	// at config load time.
@@ -4257,12 +4400,17 @@ func configuredProviderOrder(providers map[string]ProviderSpec) []string {
 	return order
 }
 
+// validationAgentKey identifies the canonical route template for an agent.
+type validationAgentKey struct{ dir, binding, name string }
+
 // ValidateAgents checks agent configurations for errors. It returns an error
-// if any agent is missing required fields, has duplicate identities, or has
-// invalid pool bounds. Uniqueness is keyed on (dir, name) — the same name
-// in different dirs is allowed.
+// if any agent is missing required fields, has duplicate canonical identities,
+// or has invalid pool bounds. Uniqueness is keyed on (dir, binding, name), so
+// the same bare name may exist in the same scope when imports qualify it under
+// different bindings.
 func ValidateAgents(agents []Agent) error {
-	seen := make(map[agentKey]int, len(agents))
+	seen := make(map[validationAgentKey]int, len(agents))
+	layoutSeen := make(map[agentKey][]int, len(agents))
 	for i, a := range agents {
 		if a.Name == "" {
 			return fmt.Errorf("agent[%d]: name is required", i)
@@ -4270,7 +4418,15 @@ func ValidateAgents(agents []Agent) error {
 		if !validAgentName.MatchString(a.Name) {
 			return fmt.Errorf("agent %q: name must match [a-zA-Z0-9][a-zA-Z0-9_-]* (no spaces, slashes, or dots)", a.Name)
 		}
-		key := agentKey{dir: a.Dir, name: a.Name}
+		layoutKey := agentKey{dir: a.Dir, name: a.Name}
+		for _, priorIdx := range layoutSeen[layoutKey] {
+			if _, _, ok := orderV1V2(agents[priorIdx], a); ok {
+				return formatDuplicateAgentError(agents[priorIdx], a)
+			}
+		}
+		layoutSeen[layoutKey] = append(layoutSeen[layoutKey], i)
+
+		key := validationAgentKey{dir: a.Dir, binding: a.BindingName, name: a.Name}
 		if priorIdx, dup := seen[key]; dup {
 			return formatDuplicateAgentError(agents[priorIdx], a)
 		}
@@ -4599,7 +4755,7 @@ func DefaultCity(name string) City {
 
 func defaultInstallAgentHooksForProvider(provider string) []string {
 	switch strings.TrimSpace(provider) {
-	case "kiro", "opencode":
+	case "kiro", "opencode", "groq", "kimi":
 		return []string{strings.TrimSpace(provider)}
 	default:
 		return nil

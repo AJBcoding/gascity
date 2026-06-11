@@ -9,12 +9,12 @@ func TestBuiltinProviders(t *testing.T) {
 	providers := BuiltinProviders()
 	order := BuiltinProviderOrder()
 
-	// Must have exactly 13 built-in providers.
-	if len(providers) != 13 {
-		t.Fatalf("len(BuiltinProviders()) = %d, want 13", len(providers))
+	// Must have exactly 16 built-in providers.
+	if len(providers) != 16 {
+		t.Fatalf("len(BuiltinProviders()) = %d, want 16", len(providers))
 	}
-	if len(order) != 13 {
-		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 13", len(order))
+	if len(order) != 16 {
+		t.Fatalf("len(BuiltinProviderOrder()) = %d, want 16", len(order))
 	}
 
 	// Every entry in order must exist in providers.
@@ -188,8 +188,8 @@ func TestBuiltinProvidersKimi(t *testing.T) {
 	if !derefBool(p.SupportsACP) {
 		t.Error("SupportsACP = false, want true")
 	}
-	if derefBool(p.SupportsHooks) {
-		t.Error("SupportsHooks = true, want false until Kimi hook installer exists")
+	if !derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = false, want true")
 	}
 	if p.ResumeFlag != "--session" {
 		t.Errorf("ResumeFlag = %q, want --session", p.ResumeFlag)
@@ -332,6 +332,9 @@ func TestBuiltinProvidersKiro(t *testing.T) {
 	if !derefBool(p.SupportsHooks) {
 		t.Error("SupportsHooks = false, want true")
 	}
+	if p.AcceptStartupDialogs == nil || *p.AcceptStartupDialogs {
+		t.Errorf("AcceptStartupDialogs = %v, want false (kiro launches --trust-all-tools, shows no startup dialogs)", p.AcceptStartupDialogs)
+	}
 }
 
 // TestBuiltinProvidersOpenCodePromptModeRegression guards against switching
@@ -404,6 +407,142 @@ func TestBuiltinProvidersSessionIDFlag(t *testing.T) {
 		if got := providers[name].SessionIDFlag; got != "" {
 			t.Errorf("%s SessionIDFlag = %q, want empty (no documented start-with-id flag)", name, got)
 		}
+	}
+}
+
+func TestBuiltinProvidersCerebrasOpenCodePreset(t *testing.T) {
+	p := BuiltinProviders()["cerebras"]
+	if p.Command != "opencode" {
+		t.Errorf("Command = %q, want %q", p.Command, "opencode")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if !derefBool(p.SupportsHooks) {
+		t.Fatal("SupportsHooks = false, want true")
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"acp"}) {
+		t.Fatalf("ACPArgs = %v, want [acp]", p.ACPArgs)
+	}
+	if p.OptionDefaults["model"] != "cerebras/gpt-oss-120b" {
+		t.Fatalf("OptionDefaults[model] = %q, want cerebras/gpt-oss-120b", p.OptionDefaults["model"])
+	}
+
+	rp := specToResolved("cerebras", &p)
+	if got := rp.ProviderSessionCreateTransport(); got != "acp" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want acp", got)
+	}
+	if got, want := rp.ResolveDefaultArgs(), []string{"--model", "cerebras/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
+	}
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "cerebras/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
+	}
+
+	launch, err := BuildProviderLaunchCommand("", rp, nil, "acp")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	if want := "opencode acp --model cerebras/gpt-oss-120b"; launch.Command != want {
+		t.Fatalf("Command = %q, want %q", launch.Command, want)
+	}
+}
+
+func TestBuiltinProvidersGroqOpenCodePreset(t *testing.T) {
+	p := BuiltinProviders()["groq"]
+	if p.Command != "opencode" {
+		t.Errorf("Command = %q, want %q", p.Command, "opencode")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if !derefBool(p.SupportsACP) {
+		t.Fatal("SupportsACP = false, want true")
+	}
+	if !derefBool(p.SupportsHooks) {
+		t.Fatal("SupportsHooks = false, want true")
+	}
+	if !reflect.DeepEqual(p.ACPArgs, []string{"acp"}) {
+		t.Fatalf("ACPArgs = %v, want [acp]", p.ACPArgs)
+	}
+	if p.OptionDefaults["model"] != "groq/openai/gpt-oss-120b" {
+		t.Fatalf("OptionDefaults[model] = %q, want groq/openai/gpt-oss-120b", p.OptionDefaults["model"])
+	}
+
+	rp := specToResolved("groq", &p)
+	if got := rp.ProviderSessionCreateTransport(); got != "acp" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want acp", got)
+	}
+	if got, want := rp.ResolveDefaultArgs(), []string{"--model", "groq/openai/gpt-oss-120b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
+	}
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "groq/openai/gpt-oss-20b"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
+	}
+
+	launch, err := BuildProviderLaunchCommand("", rp, nil, "acp")
+	if err != nil {
+		t.Fatalf("BuildProviderLaunchCommand: %v", err)
+	}
+	if want := "opencode acp --model groq/openai/gpt-oss-120b"; launch.Command != want {
+		t.Fatalf("Command = %q, want %q", launch.Command, want)
+	}
+}
+
+func TestBuiltinProvidersGrokPreset(t *testing.T) {
+	p := BuiltinProviders()["grok"]
+	if p.Command != "grok" {
+		t.Errorf("Command = %q, want %q", p.Command, "grok")
+	}
+	if p.PromptMode != "none" {
+		t.Errorf("PromptMode = %q, want %q", p.PromptMode, "none")
+	}
+	if p.InstructionsFile != "AGENTS.md" {
+		t.Errorf("InstructionsFile = %q, want %q", p.InstructionsFile, "AGENTS.md")
+	}
+	if derefBool(p.SupportsACP) {
+		t.Error("SupportsACP = true, want false")
+	}
+	if derefBool(p.SupportsHooks) {
+		t.Error("SupportsHooks = true, want false")
+	}
+	if got, want := p.PermissionModes["unrestricted"], "--permission-mode bypassPermissions"; got != want {
+		t.Errorf("PermissionModes[unrestricted] = %q, want %q", got, want)
+	}
+	if p.OptionDefaults["permission_mode"] != "unrestricted" {
+		t.Errorf("OptionDefaults[permission_mode] = %q, want unrestricted", p.OptionDefaults["permission_mode"])
+	}
+	if p.ResumeFlag != "--resume" {
+		t.Errorf("ResumeFlag = %q, want %q", p.ResumeFlag, "--resume")
+	}
+	if p.TitleModel != "grok-composer-2.5-fast" {
+		t.Errorf("TitleModel = %q, want %q", p.TitleModel, "grok-composer-2.5-fast")
+	}
+	if p.ReadyDelayMs != 12000 {
+		t.Errorf("ReadyDelayMs = %d, want 12000", p.ReadyDelayMs)
+	}
+
+	rp := specToResolved("grok", &p)
+	if got := rp.ProviderSessionCreateTransport(); got != "" {
+		t.Fatalf("ProviderSessionCreateTransport() = %q, want \"\" (no ACP)", got)
+	}
+	if p.OptionDefaults["model"] != "grok-composer-2.5-fast" {
+		t.Errorf("OptionDefaults[model] = %q, want grok-composer-2.5-fast", p.OptionDefaults["model"])
+	}
+	if got, want := rp.ResolveDefaultArgs(), []string{"--permission-mode", "bypassPermissions", "--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ResolveDefaultArgs() = %v, want %v", got, want)
+	}
+	if got, want := rp.TitleModelFlagArgs(), []string{"--model", "grok-composer-2.5-fast"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("TitleModelFlagArgs() = %v, want %v", got, want)
 	}
 }
 

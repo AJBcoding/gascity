@@ -524,15 +524,31 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 		// Preserve legacy probe metadata during startup normalization so old
 		// scopes can still boot and migrate deliberately. New init paths still
 		// reject this reserved name when it is not already pinned in metadata.
-		return ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+		if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+			return err
+		}
+	} else if err := enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase); err != nil {
+		return err
 	}
-	return enforceCanonicalScopeMetadataForInit(fsys.OSFS{}, dir, doltDatabase)
+	// Opt-in proxied-server overlay (no-op/revert when the city does not opt in
+	// or bd lacks support). cfg load failure falls back to server mode (safe).
+	cfg, _ := loadCityConfig(cityPath, io.Discard)
+	return applyProxiedServerScopeOverlay(fsys.OSFS{}, cityPath, dir, proxiedServerScopeActive(cfg))
 }
 
 // initAndHookDir is the atomic unit of bead store initialization:
 // init the directory, then install event hooks. The ordering matters
 // because init (bd init) may recreate .beads/ and wipe existing hooks.
 func initAndHookDir(cityPath, dir, prefix string) error {
+	// Honor [beads] event_hooks=false: skip installing the bd write hooks
+	// (on_create/on_update/on_close). Those hooks fork a full `gc event emit`
+	// per bead write — a real CPU/connection-churn source under load — and a
+	// city that opts out of them must not have them silently reinstalled on
+	// every reconcile. Default (unset) stays true. Load failure → default true.
+	installHooks := true
+	if cfg, err := loadCityConfig(cityPath, io.Discard); err == nil {
+		installHooks = cfg.Beads.EventHooksEnabled()
+	}
 	// Check MySQL first: scopeUsesPostgresBackendForInit calls
 	// contract.LoadMetadataState, which rejects unknown backends including
 	// "mysql" with an error. The mysql check is a cheap direct read that
@@ -542,16 +558,20 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	// — gc has no managed dolt runtime to spawn for them, so we just install
 	// hooks and exit.
 	if scopeUsesMySQLBackendForInit(dir) || cityUsesMySQLBackend(cityPath) {
-		if err := installBeadHooks(dir, cityPath); err != nil {
-			return fmt.Errorf("install hooks at %s: %w", dir, err)
+		if installHooks {
+			if err := installBeadHooks(dir, cityPath); err != nil {
+				return fmt.Errorf("install hooks at %s: %w", dir, err)
+			}
 		}
 		return nil
 	}
 	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
 		return err
 	} else if usesPostgres {
-		if err := installBeadHooks(dir, cityPath); err != nil {
-			return fmt.Errorf("install hooks at %s: %w", dir, err)
+		if installHooks {
+			if err := installBeadHooks(dir, cityPath); err != nil {
+				return fmt.Errorf("install hooks at %s: %w", dir, err)
+			}
 		}
 		return nil
 	}
@@ -587,8 +607,10 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 	}
 	// Non-fatal: hooks are convenience (event forwarding), not critical.
-	if err := installBeadHooks(dir, cityPath); err != nil {
-		return fmt.Errorf("install hooks at %s: %w", dir, err)
+	if installHooks {
+		if err := installBeadHooks(dir, cityPath); err != nil {
+			return fmt.Errorf("install hooks at %s: %w", dir, err)
+		}
 	}
 	return nil
 }
@@ -1643,6 +1665,8 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		} else if !usesPostgres && !scopeUsesMySQLBackendForInit(cityPath) {
 			if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cityPath, defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))); err != nil {
 				return fmt.Errorf("canonicalizing city metadata: %w", err)
+			} else if err := applyProxiedServerScopeOverlay(fsys.OSFS{}, cityPath, cityPath, proxiedServerScopeActive(cfg)); err != nil {
+				return fmt.Errorf("applying proxied overlay to city: %w", err)
 			}
 		}
 	}
@@ -1655,6 +1679,8 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		} else if !usesPostgres && !scopeUsesMySQLBackendForInit(cfg.Rigs[i].Path) {
 			if err := ensureCanonicalScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())); err != nil {
 				return fmt.Errorf("canonicalizing rig %q metadata: %w", cfg.Rigs[i].Name, err)
+			} else if err := applyProxiedServerScopeOverlay(fsys.OSFS{}, cityPath, cfg.Rigs[i].Path, proxiedServerScopeActive(cfg)); err != nil {
+				return fmt.Errorf("applying proxied overlay to rig %q: %w", cfg.Rigs[i].Name, err)
 			}
 		}
 	}

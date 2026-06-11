@@ -981,6 +981,94 @@ func TestDoSlingSuspendedAgentWarns(t *testing.T) {
 	}
 }
 
+func TestDoSlingSuspendedRigWarns(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("my-42")
+	result, err := DoSling(testOpts(a, "my-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "myrig" {
+		t.Errorf("SuspendedRig = %q, want %q", result.SuspendedRig, "myrig")
+	}
+	if result.AgentSuspended {
+		t.Error("expected AgentSuspended=false: only the rig is suspended, not the agent")
+	}
+}
+
+func TestDoSlingSuspendedRigForce(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("my-42")
+	opts := testOpts(a, "my-42")
+	opts.Force = true
+	result, err := DoSling(opts, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "" {
+		t.Errorf("SuspendedRig = %q, want empty with --force", result.SuspendedRig)
+	}
+}
+
+func TestDoSlingLiveRigNoSuspendedRigWarning(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "myrig"}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	deps.Store = seededStore("my-42")
+	result, err := DoSling(testOpts(a, "my-42"), deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.SuspendedRig != "" {
+		t.Errorf("SuspendedRig = %q, want empty for live rig", result.SuspendedRig)
+	}
+}
+
+func TestDoSlingSuspendedRigWarnsEvenOnFailure(t *testing.T) {
+	// Mirrors TestDoSlingSuspendedAgentWarnsEvenOnFailure: the warning flag
+	// must survive a routing failure so the CLI can still display it.
+	runner := newFakeRunner()
+	runner.on("bd update", fmt.Errorf("runner failed"))
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test"},
+		Rigs:      []config.Rig{{Name: "myrig", Suspended: true}},
+	}
+	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	deps.Store = seededStore("my-1")
+	result, err := DoSling(testOpts(a, "my-1"), deps, nil)
+
+	if err == nil {
+		t.Fatal("expected runner error")
+	}
+	if result.SuspendedRig != "myrig" {
+		t.Errorf("SuspendedRig = %q, want %q even when routing fails", result.SuspendedRig, "myrig")
+	}
+}
+
 func TestDoSlingRunnerError(t *testing.T) {
 	runner := newFakeRunner()
 	runner.on("bd update", fmt.Errorf("runner failed"))
@@ -1017,6 +1105,89 @@ func TestDoSlingFormulaToAgent(t *testing.T) {
 	}
 	if result.BeadID == "" {
 		t.Error("expected non-empty BeadID (wisp root)")
+	}
+}
+
+func TestDoSlingFormulaToPoolRejectsLegacyMoleculeRoot(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(3)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	_, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "code-review",
+		IsFormula:     true,
+	}, deps, nil)
+	if err == nil {
+		t.Fatal("DoSling error = nil, want legacy molecule-root pool rejection")
+	}
+	if !strings.Contains(err.Error(), "root is a molecule container") {
+		t.Fatalf("DoSling error = %q, want Ready-visible root guidance", err.Error())
+	}
+}
+
+func TestDoSlingFormulaToPoolAllowsRootOnlyReadySurface(t *testing.T) {
+	formulaDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(formulaDir, "root-only.toml"), []byte(`
+formula = "root-only"
+version = 1
+phase = "vapor"
+
+[[steps]]
+id = "work"
+title = "Work"
+`), 0o644); err != nil {
+		t.Fatalf("write root-only formula: %v", err)
+	}
+
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		FormulaLayers: config.FormulaLayers{City: []string{formulaDir}},
+	}
+	a := config.Agent{Name: "agent-a", MaxActiveSessions: intPtr(3)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "root-only",
+		IsFormula:     true,
+	}, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	if result.Method != "formula" {
+		t.Errorf("Method = %q, want formula", result.Method)
+	}
+	if result.BeadID == "" {
+		t.Fatal("expected non-empty root-only wisp ID")
+	}
+}
+
+func TestDoSlingFormulaToSingleSessionAgentSkipsPoolDemand(t *testing.T) {
+	runner := newFakeRunner()
+	sp := runtime.NewFake()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+	a := config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}
+
+	deps := testDeps(cfg, sp, runner.run)
+	result, err := DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: "code-review",
+		IsFormula:     true,
+	}, deps, nil)
+	if err != nil {
+		t.Fatalf("DoSling error: %v", err)
+	}
+	root, err := deps.Store.Get(result.BeadID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", result.BeadID, err)
+	}
+	if got, ok := root.Metadata["gc.pool_demand"]; ok {
+		t.Errorf("wisp root gc.pool_demand = %q, want absent", got)
 	}
 }
 

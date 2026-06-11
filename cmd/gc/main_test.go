@@ -453,7 +453,11 @@ func TestFindCity(t *testing.T) {
 	t.Run("not_found", func(t *testing.T) {
 		// Use an explicit /tmp-rooted dir so the upward walk cannot
 		// accidentally hit a real .gc/ directory on the host (e.g.
-		// a running city under $HOME).
+		// a running city under $HOME). Skip when /tmp/.gc already
+		// exists (running city in /tmp would make findCity succeed).
+		if _, err := os.Stat("/tmp/.gc"); err == nil {
+			t.Skip("machine has /tmp/.gc — running city in /tmp would cause a false positive")
+		}
 		dir, err := os.MkdirTemp("/tmp", "gc-test-notfound-*")
 		if err != nil {
 			t.Fatal(err)
@@ -2749,10 +2753,12 @@ func TestDoInitWritesExpectedTOML(t *testing.T) {
 		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
 	}
 
-	// city.toml keeps only the runtime-local [workspace] (empty in the
-	// default mayor-only path). workspace.name lives in .gc/site.toml.
+	// city.toml keeps the runtime-local [workspace] with the explicit
+	// builtin pack includes (core + bd for the default bd provider).
+	// workspace.name lives in .gc/site.toml.
 	got := string(f.Files[filepath.Join("/bright-lights", "city.toml")])
 	want := `[workspace]
+includes = [".gc/system/packs/core", ".gc/system/packs/bd"]
 
 [daemon]
 formula_v2 = true
@@ -3456,8 +3462,10 @@ func TestDoInitWithGastownTemplate(t *testing.T) {
 	if cfg.Workspace.Provider != "claude" {
 		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "claude")
 	}
-	if len(cfg.Workspace.LegacyIncludes()) != 0 {
-		t.Errorf("Workspace.Includes = %v, want empty", cfg.Workspace.LegacyIncludes())
+	wantIncludes := []string{".gc/system/packs/core", ".gc/system/packs/bd"}
+	if got := cfg.Workspace.LegacyIncludes(); len(got) != len(wantIncludes) ||
+		got[0] != wantIncludes[0] || got[1] != wantIncludes[1] {
+		t.Errorf("Workspace.Includes = %v, want %v (explicit builtin pack includes)", got, wantIncludes)
 	}
 	if len(cfg.Workspace.LegacyDefaultRigIncludes()) != 0 {
 		t.Errorf("Workspace.DefaultRigIncludes = %v, want empty", cfg.Workspace.LegacyDefaultRigIncludes())
@@ -3611,6 +3619,35 @@ func TestDoInitWithKiroProviderInstallsWorkspaceHooks(t *testing.T) {
 	}
 }
 
+func TestDoInitWithKimiProviderInstallsWorkspaceHooks(t *testing.T) {
+	f := fsys.NewFake()
+	wiz := wizardConfig{
+		configName: "minimal",
+		provider:   "kimi",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := doInit(f, "/kimi-city", wiz, "", &stdout, &stderr, false)
+	if code != 0 {
+		t.Fatalf("doInit = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	data := f.Files[filepath.Join("/kimi-city", "city.toml")]
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing written config: %v", err)
+	}
+	if cfg.Workspace.Provider != "kimi" {
+		t.Errorf("Workspace.Provider = %q, want %q", cfg.Workspace.Provider, "kimi")
+	}
+	if len(cfg.Workspace.InstallAgentHooks) != 1 || cfg.Workspace.InstallAgentHooks[0] != "kimi" {
+		t.Errorf("Workspace.InstallAgentHooks = %v, want [kimi]", cfg.Workspace.InstallAgentHooks)
+	}
+	if !strings.Contains(string(data), "install_agent_hooks") {
+		t.Errorf("city.toml missing install_agent_hooks:\n%s", data)
+	}
+}
+
 func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
 	f := fsys.NewFake()
 	wiz := wizardConfig{
@@ -3640,6 +3677,34 @@ func TestDoInitWithClaudeProviderLeavesWorkspaceHooksEmpty(t *testing.T) {
 func TestInitWizardConfigRejectsUnknownProvider(t *testing.T) {
 	if _, err := initWizardConfig("not-a-provider", ""); err == nil {
 		t.Fatal("expected error for unknown provider")
+	}
+}
+
+func TestCmdInitProviderAcceptsAntigravity(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_DOLT", "skip")
+	configureIsolatedRuntimeEnv(t)
+
+	cityPath := filepath.Join(t.TempDir(), "antigravity-city")
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"init", "--provider", "antigravity", "--skip-provider-readiness", cityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run init --provider antigravity = %d; stderr=%q stdout=%q", code, stderr.String(), stdout.String())
+	}
+
+	data, err := os.ReadFile(filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("parsing city.toml: %v", err)
+	}
+	if cfg.Workspace.Provider != "antigravity" {
+		t.Errorf("Workspace.Provider = %q, want antigravity", cfg.Workspace.Provider)
+	}
+	if _, ok := cfg.Providers["antigravity"]; !ok {
+		t.Fatalf("Providers = %v, want explicit antigravity alias", cfg.Providers)
 	}
 }
 
@@ -3861,9 +3926,11 @@ scale_check = "echo 3"
 	if cfg.ResolvedWorkspaceName != "bright-lights" {
 		t.Errorf("ResolvedWorkspaceName = %q, want %q (should be overridden)", cfg.ResolvedWorkspaceName, "bright-lights")
 	}
+	// The builtin core pack ships no agents (the former maintenance
+	// fallback dog is gone), so only the two authored agents are explicit.
 	explicit := explicitAgents(cfg.Agents)
-	if len(explicit) != 3 {
-		t.Fatalf("len(explicitAgents) = %d, want 3", len(explicit))
+	if len(explicit) != 2 {
+		t.Fatalf("len(explicitAgents) = %d, want 2", len(explicit))
 	}
 	explicitByName := make(map[string]config.Agent, len(explicit))
 	for _, agent := range explicit {
@@ -3877,10 +3944,6 @@ scale_check = "echo 3"
 	if !ok {
 		t.Fatalf("explicitAgents missing worker: %+v", explicit)
 	}
-	dog, ok := explicitByName["dog"]
-	if !ok {
-		t.Fatalf("explicitAgents missing builtin maintenance dog agent: %+v", explicit)
-	}
 	if worker.MaxActiveSessions == nil {
 		t.Fatal("worker.MaxActiveSessions is nil, want non-nil")
 	}
@@ -3889,9 +3952,6 @@ scale_check = "echo 3"
 	}
 	if !strings.HasSuffix(mayor.PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md")) {
 		t.Errorf("mayor.PromptTemplate = %q, want suffix %q", mayor.PromptTemplate, filepath.Join("agents", "mayor", "prompt.template.md"))
-	}
-	if !strings.HasSuffix(dog.PromptTemplate, filepath.Join(".gc", "system", "packs", "maintenance", "agents", "dog", "prompt.template.md")) {
-		t.Errorf("dog.PromptTemplate = %q, want maintenance dog prompt", dog.PromptTemplate)
 	}
 
 	packData, err := os.ReadFile(filepath.Join(cityPath, "pack.toml"))
@@ -6858,23 +6918,17 @@ max = -1
 		t.Fatalf("doPrime = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
-	if !strings.Contains(out, "gc hook") {
-		t.Fatalf("graph-worker prompt missing gc hook routed-queue lookup:\n%s", out)
+	if !strings.Contains(out, "gc hook --claim --drain-ack --json") {
+		t.Fatalf("graph-worker prompt missing gc hook claim startup protocol:\n%s", out)
 	}
-	if !strings.Contains(out, "bd update <id> --claim") {
-		t.Fatalf("graph-worker prompt missing atomic claim instruction:\n%s", out)
+	if !strings.Contains(out, "`gc hook --claim` handles `gc.continuation_group` for you") {
+		t.Fatalf("graph-worker prompt missing centralized continuation-group claim instruction:\n%s", out)
 	}
-	if !strings.Contains(out, "Do not start work with `bd update --status in_progress`") {
-		t.Fatalf("graph-worker prompt missing guard against unassigned in_progress work:\n%s", out)
+	if !strings.Contains(out, "continuation_assigned") {
+		t.Fatalf("graph-worker prompt missing continuation-assignment result guidance:\n%s", out)
 	}
-	if !strings.Contains(out, `ROOT_ID=$(bd show <id> --json | jq -r '.[0].metadata["gc.root_bead_id"] // empty')`) {
-		t.Fatalf("graph-worker prompt missing continuation-group root lookup:\n%s", out)
-	}
-	if !strings.Contains(out, `--metadata-field gc.root_bead_id=$ROOT_ID`) {
-		t.Fatalf("graph-worker prompt continuation-group sibling claim is not root-scoped:\n%s", out)
-	}
-	if !strings.Contains(out, `if [ -n "$GROUP" ] && [ -n "$ROOT_ID" ]; then`) {
-		t.Fatalf("graph-worker prompt should require group and root before preassigning siblings:\n%s", out)
+	if strings.Contains(out, "bd update <id> --claim") || strings.Contains(out, `ROOT_ID=$(bd show <id> --json`) {
+		t.Fatalf("graph-worker prompt still contains duplicated shell claim protocol:\n%s", out)
 	}
 }
 
@@ -7112,6 +7166,183 @@ prompt_template = "prompts/probe.md"
 	}
 	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "omp-provider-session" {
 		t.Fatalf("session_key = %q, want generic provider session id", got)
+	}
+}
+
+func TestDoPrimeCodexHookPersistsProviderSessionKeyFromHookStdin(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "codex", `[providers.codex]
+base = "builtin:codex"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "019ea3bd-ebb6-7530-a8b5-48b6c43e9153",
+		"transcript_path": "/home/ubuntu/.aimux/codex/codex7/sessions/2026/06/07/rollout-2026-06-07T20-19-53-019ea3bd-ebb6-7530-a8b5-48b6c43e9153.jsonl",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "019ea3bd-ebb6-7530-a8b5-48b6c43e9153" {
+		t.Fatalf("session_key = %q, want Codex provider session id from hook stdin", got)
+	}
+}
+
+func TestDoPrimeHookIgnoresProviderSessionKeyFromHookStdinForNonCodex(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "claude", `[providers.claude]
+base = "builtin:claude"`)
+	setPrimeHookStdinJSON(t, map[string]string{
+		"session_id":      "claude-provider-session",
+		"hook_event_name": "SessionStart",
+		"source":          "startup",
+	})
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
+		t.Fatalf("session_key = %q, want empty for non-Codex hook stdin session id", got)
+	}
+}
+
+func TestDoPrimeHookWarnsWhenRequiredProviderSessionKeyMissing(t *testing.T) {
+	dir, sessionID := setupPrimeHookProviderSessionKeyTest(t, "kimi", `[providers.kimi]
+base = "builtin:kimi"`)
+	t.Setenv("GC_PROVIDER_SESSION_ID_REQUIRED", "kimi")
+
+	var stdout, stderr bytes.Buffer
+	code := doPrimeWithMode(nil, &stdout, &stderr, true, false)
+	if code != 0 {
+		t.Fatalf("doPrimeWithMode = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "probe prompt") {
+		t.Fatalf("stdout = %q, want probe prompt", stdout.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "gc prime --hook: provider session key not persisted") ||
+		!strings.Contains(got, "GC_PROVIDER_SESSION_ID") ||
+		!strings.Contains(got, "kimi") {
+		t.Fatalf("stderr = %q, want missing provider session id diagnostic", got)
+	}
+
+	updatedStore, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := updatedStore.Get(sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(updated.Metadata["session_key"]); got != "" {
+		t.Fatalf("session_key = %q, want empty when provider id is missing", got)
+	}
+}
+
+func setupPrimeHookProviderSessionKeyTest(t *testing.T, provider, providerConfig string) (string, string) {
+	t.Helper()
+
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_PROVIDER_SESSION_ID", "")
+	t.Setenv("GEMINI_SESSION_ID", "")
+
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	promptsDir := filepath.Join(dir, "prompts")
+	if err := os.MkdirAll(promptsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(promptsDir, "probe.md"), []byte("probe prompt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toml := fmt.Sprintf(`[workspace]
+name = "test-city"
+provider = %q
+
+%s
+
+[[agent]]
+name = "probe"
+prompt_template = "prompts/probe.md"
+`, provider, providerConfig)
+	if err := os.WriteFile(filepath.Join(dir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openCityStoreAt(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionBead, err := store.Create(beads.Bead{
+		Title: "probe",
+		Type:  "task",
+		Labels: []string{
+			"gc:session",
+			"template:probe",
+		},
+		Metadata: map[string]string{
+			"template":     "probe",
+			"provider":     provider,
+			"session_name": "probe",
+			"state":        "active",
+			"work_dir":     dir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	orig, _ := os.Getwd()
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_AGENT", "probe")
+	t.Setenv("GC_SESSION_ID", sessionBead.ID)
+
+	return dir, sessionBead.ID
+}
+
+func setPrimeHookStdinJSON(t *testing.T, payload map[string]string) {
+	t.Helper()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldPrimeStdin := primeStdin
+	primeStdin = func() *os.File { return reader }
+	t.Cleanup(func() {
+		primeStdin = oldPrimeStdin
+		_ = reader.Close()
+	})
+	if err := json.NewEncoder(writer).Encode(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
 	}
 }
 

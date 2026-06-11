@@ -270,11 +270,11 @@ func runWizard(stdin io.Reader, stdout io.Writer) wizardConfig {
 // var since we don't echo it). Returns an empty initMysqlOptions when dolt
 // is chosen — the regular gc init pipeline handles dolt natively.
 func promptWizardBackend(br *bufio.Reader, stdout io.Writer) initMysqlOptions {
-	fmt.Fprintln(stdout, "")                                               //nolint:errcheck
-	fmt.Fprintln(stdout, "Choose beads backend:")                          //nolint:errcheck
-	fmt.Fprintln(stdout, "  1. managed dolt — local, git-versioned (default)")  //nolint:errcheck
+	fmt.Fprintln(stdout, "")                                                        //nolint:errcheck
+	fmt.Fprintln(stdout, "Choose beads backend:")                                   //nolint:errcheck
+	fmt.Fprintln(stdout, "  1. managed dolt — local, git-versioned (default)")      //nolint:errcheck
 	fmt.Fprintln(stdout, "  2. mysql        — external server, shared across rigs") //nolint:errcheck
-	fmt.Fprintf(stdout, "Backend [1]: ")                                   //nolint:errcheck
+	fmt.Fprintf(stdout, "Backend [1]: ")                                            //nolint:errcheck
 
 	choice := readLine(br)
 	switch choice {
@@ -402,6 +402,7 @@ the password is read from --mysql-password or $GC_MYSQL_PASSWORD.`,
   gc init --default-provider codex --bootstrap-profile k8s-cell /city
   gc init --name my-city
   gc init --from ~/elan --name elan /city
+  gc init --file ./my-city.toml ~/bright-lights
   gc init --file examples/gastown.toml ~/bright-lights
   gc init --file city.toml --preserve-existing .
   gc init --provider claude --backend mysql --mysql-database mycity_beads ~/my-city`,
@@ -1218,6 +1219,13 @@ func cmdInitFromTOMLFileWithOptions(fs fsys.FS, tomlSrc, cityPath, nameOverride 
 	rewriteInitPromptTemplates(cfg)
 	packCfg, cityCfg := splitInitConfig(cityName, cfg)
 	applyInitPackTemplateExtras(&packCfg, templatePack)
+	// Builtin packs compose only through explicit includes: write the
+	// canonical city-relative paths for this city's providers into
+	// city.toml (mirrors doInit; gc doctor --fix repairs them later).
+	cityCfg.Workspace.SetLegacyIncludes(appendUniqueStrings(
+		cityCfg.Workspace.LegacyIncludes(),
+		builtinIncludesForInit(cityCfg.Beads.Provider)...,
+	))
 	var rigSiteBindings []config.Rig
 	if hasInitRigSiteBindings(cityCfg.Rigs) {
 		rigSiteBindings = append([]config.Rig(nil), cityCfg.Rigs...)
@@ -1408,6 +1416,15 @@ func doInit(fs fsys.FS, cityPath string, wiz wizardConfig, nameOverride string, 
 	// pack.toml. The built-in templates currently only need the prompt
 	// scaffold plus the pack-owned named session.
 	packCfg.Agents = nil
+	// Builtin packs compose only through explicit includes: write the
+	// canonical city-relative paths for this city's providers into
+	// city.toml. gc doctor --fix repairs them if they go missing. These are
+	// deployment-local (.gc paths), so they belong in city.toml, not in the
+	// portable pack.toml.
+	cityCfg.Workspace.SetLegacyIncludes(appendUniqueStrings(
+		cityCfg.Workspace.LegacyIncludes(),
+		builtinIncludesForInit(cityCfg.Beads.Provider)...,
+	))
 	content, err := cityCfg.Marshal()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc init: %v\n", err) //nolint:errcheck // best-effort stderr

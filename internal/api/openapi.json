@@ -159,6 +159,15 @@
               "null"
             ]
           },
+          "Args": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "Attach": {
             "type": [
               "boolean",
@@ -497,6 +506,7 @@
           "PromptTemplate",
           "Session",
           "Provider",
+          "Args",
           "StartCommand",
           "Lifecycle",
           "Nudge",
@@ -841,6 +851,9 @@
           },
           "id": {
             "type": "string"
+          },
+          "is_blocked": {
+            "type": "boolean"
           },
           "issue_type": {
             "type": "string"
@@ -2206,6 +2219,9 @@
             "$ref": "#/components/schemas/SessionResetStalledPayload"
           },
           {
+            "$ref": "#/components/schemas/SessionStrandedPayload"
+          },
+          {
             "$ref": "#/components/schemas/SessionSubmitSucceededPayload"
           },
           {
@@ -2222,6 +2238,9 @@
           },
           {
             "$ref": "#/components/schemas/SupervisorFSPressureSkippedTickPayload"
+          },
+          {
+            "$ref": "#/components/schemas/SupervisorRequestPayload"
           },
           {
             "$ref": "#/components/schemas/SupervisorShutdownPayload"
@@ -5890,6 +5909,12 @@
               "boolean",
               "null"
             ]
+          },
+          "SuspendedOnStart": {
+            "type": [
+              "boolean",
+              "null"
+            ]
           }
         },
         "required": [
@@ -5898,6 +5923,7 @@
           "Prefix",
           "DefaultBranch",
           "Suspended",
+          "SuspendedOnStart",
           "FormulaVars"
         ],
         "type": "object"
@@ -6568,6 +6594,37 @@
           "created_at",
           "attached",
           "running"
+        ],
+        "type": "object"
+      },
+      "SessionStrandedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "session_id": {
+            "description": "Canonical session bead ID for the stranded pool session (also the envelope Subject).",
+            "type": "string"
+          },
+          "session_name": {
+            "description": "Runtime session name from the session bead metadata, when set.",
+            "type": "string"
+          },
+          "template": {
+            "description": "Pool template name when known at the emission site.",
+            "type": "string"
+          },
+          "work_bead_ids": {
+            "description": "IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "session_id"
         ],
         "type": "object"
       },
@@ -7586,6 +7643,65 @@
         ],
         "type": "object"
       },
+      "SupervisorRequestPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "duration_ms": {
+            "description": "Handler duration in milliseconds.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "host": {
+            "description": "Canonical Host header without port.",
+            "type": "string"
+          },
+          "method": {
+            "description": "HTTP method.",
+            "type": "string"
+          },
+          "origin_allowed": {
+            "description": "Whether the Origin header, if present, matched CORS policy.",
+            "type": "boolean"
+          },
+          "path": {
+            "description": "Request path with query string omitted and length bounded.",
+            "type": "string"
+          },
+          "phase": {
+            "description": "Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only.",
+            "enum": [
+              "start",
+              "complete"
+            ],
+            "type": "string"
+          },
+          "remote_addr_class": {
+            "description": "Network class of the remote address, not the raw address.",
+            "enum": [
+              "loopback",
+              "private",
+              "public",
+              "unknown"
+            ],
+            "type": "string"
+          },
+          "status": {
+            "description": "HTTP response status code. Start-phase records use 0 before the final response status is known.",
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "method",
+          "path",
+          "status",
+          "duration_ms",
+          "remote_addr_class",
+          "origin_allowed",
+          "phase"
+        ],
+        "type": "object"
+      },
       "SupervisorShutdownPayload": {
         "additionalProperties": false,
         "properties": {
@@ -7772,6 +7888,7 @@
             "session.woke": "#/components/schemas/TypedEventStreamEnvelopeSessionWoke",
             "session.work_query_failed": "#/components/schemas/TypedEventStreamEnvelopeSessionWorkQueryFailed",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
+            "supervisor.request": "#/components/schemas/TypedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
@@ -7960,6 +8077,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorRequest"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeSupervisorShutdownRequested"
@@ -8636,6 +8756,7 @@
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
                 "supervisor.shutdown_requested",
+                "supervisor.request",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -10357,7 +10478,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionStrandedPayload"
           },
           "seq": {
             "format": "int64",
@@ -10641,6 +10762,48 @@
         "title": "TypedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeSupervisorRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorRequestPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.request",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope supervisor.request",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeSupervisorShutdownRequested": {
         "additionalProperties": false,
         "properties": {
@@ -10790,6 +10953,7 @@
             "session.woke": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWoke",
             "session.work_query_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeSessionWorkQueryFailed",
             "supervisor.fs_pressure.skipped_tick": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick",
+            "supervisor.request": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorRequest",
             "supervisor.shutdown_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
@@ -10978,6 +11142,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorRequest"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested"
@@ -11713,6 +11880,7 @@
                 "project.identity.stamped",
                 "supervisor.fs_pressure.skipped_tick",
                 "supervisor.shutdown_requested",
+                "supervisor.request",
                 "extmsg.bound",
                 "extmsg.unbound",
                 "extmsg.group_created",
@@ -13598,7 +13766,7 @@
             "type": "string"
           },
           "payload": {
-            "$ref": "#/components/schemas/NoPayload"
+            "$ref": "#/components/schemas/SessionStrandedPayload"
           },
           "seq": {
             "format": "int64",
@@ -13905,6 +14073,52 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope supervisor.fs_pressure.skipped_tick",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeSupervisorRequest": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SupervisorRequestPayload"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "supervisor.request",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope supervisor.request",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested": {
@@ -26094,6 +26308,16 @@
             "schema": {
               "description": "How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.",
               "type": "string"
+            }
+          },
+          {
+            "description": "When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.",
+            "explode": false,
+            "in": "query",
+            "name": "lite",
+            "schema": {
+              "description": "When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.",
+              "type": "boolean"
             }
           }
         ],

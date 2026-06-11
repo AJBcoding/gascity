@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -678,6 +679,73 @@ func TestReconcileSessionBeads_DrainAckKeepsBeadOpen(t *testing.T) {
 	}
 	if got.Metadata["pending_create_claim"] != "" {
 		t.Fatalf("pending_create_claim = %q, want cleared after drain-ack", got.Metadata["pending_create_claim"])
+	}
+}
+
+// TestReconcileSessionBeads_DrainAckConsumesRestartRequested covers the
+// chained reset → drain-ack sequence from #2574: `gc session reset` sets
+// restart_requested=true on the bead, the agent acknowledges the drain, and
+// the drain-ack finalize must consume the flag. If the flag survives in the
+// store, a later cache-reconcile re-emission resurrects it and the controller
+// honors it as a fresh restart request — a phantom second restart that
+// rotates session_key and destroys resume continuity.
+func TestReconcileSessionBeads_DrainAckConsumesRestartRequested(t *testing.T) {
+	env := newReconcilerTestEnv()
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker", SleepAfterIdle: config.SessionSleepOff}},
+	}
+	env.addDesired("worker", "worker", true)
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, map[string]string{
+		"restart_requested": "true",
+		"session_key":       "original-key",
+	})
+	if err := env.sp.SetMeta("worker", "GC_SESSION_ID", session.ID); err != nil {
+		t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+	}
+
+	dops := newFakeDrainOps()
+	if err := dops.setDrainAck("worker"); err != nil {
+		t.Fatalf("setDrainAck: %v", err)
+	}
+
+	woken := reconcileSessionBeads(
+		context.Background(),
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		dops,
+		nil,
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+	)
+	if woken != 0 {
+		t.Fatalf("woken = %d, want 0", woken)
+	}
+	got := env.reconcileStopPendingToTerminal(t, env.sp, session, dops, map[string]bool{"worker": true})
+	if got.Metadata["state"] != "drained" {
+		t.Fatalf("state = %q, want drained", got.Metadata["state"])
+	}
+	if got.Metadata["restart_requested"] != "" {
+		t.Fatalf("restart_requested = %q, want consumed by drain-ack finalize", got.Metadata["restart_requested"])
+	}
+	if got.Metadata["session_key"] != "original-key" {
+		t.Fatalf("session_key = %q, want preserved for resume continuity", got.Metadata["session_key"])
 	}
 }
 
@@ -1643,6 +1711,50 @@ func (c *capturingRecorder) strandedEvents() []events.Event {
 		}
 	}
 	return out
+}
+
+// session.stranded must carry a typed payload with the stranded work
+// bead IDs and session identity, not just the human-readable Message —
+// machine consumers (pack-level recovery subscribers) act on the
+// payload, not on message text. Regression test for ga-kmoj9c.
+func TestEmitSessionStrandedDiagnostic_CarriesTypedPayload(t *testing.T) {
+	store := beads.NewMemStore()
+	session, work := createDetachedStrandedWork(t, store, "")
+
+	if sample, ok := events.LookupPayload(events.SessionStranded); !ok {
+		t.Fatal("no payload registered for session.stranded")
+	} else if _, typed := sample.(api.SessionStrandedPayload); !typed {
+		t.Fatalf("registered session.stranded payload = %T, want api.SessionStrandedPayload", sample)
+	}
+
+	rec := emitStrandedDiagnosticForTest(t, store, &session)
+	stranded := rec.strandedEvents()
+	if len(stranded) != 1 {
+		t.Fatalf("session.stranded events = %d, want 1; events: %+v", len(stranded), rec.events)
+	}
+	e := stranded[0]
+	if !strings.Contains(e.Message, work.ID) {
+		t.Fatalf("session.stranded message = %q, want operator text still listing work bead %q", e.Message, work.ID)
+	}
+	if len(e.Payload) == 0 {
+		t.Fatal("session.stranded payload is empty, want typed api.SessionStrandedPayload")
+	}
+	var payload api.SessionStrandedPayload
+	if err := json.Unmarshal(e.Payload, &payload); err != nil {
+		t.Fatalf("decoding session.stranded payload: %v", err)
+	}
+	if payload.SessionID != session.ID {
+		t.Fatalf("payload.SessionID = %q, want %q", payload.SessionID, session.ID)
+	}
+	if payload.SessionName != "worker-mc-dead" {
+		t.Fatalf("payload.SessionName = %q, want %q", payload.SessionName, "worker-mc-dead")
+	}
+	if payload.Template != "worker" {
+		t.Fatalf("payload.Template = %q, want %q", payload.Template, "worker")
+	}
+	if len(payload.WorkBeadIDs) != 1 || payload.WorkBeadIDs[0] != work.ID {
+		t.Fatalf("payload.WorkBeadIDs = %v, want [%q]", payload.WorkBeadIDs, work.ID)
+	}
 }
 
 func TestEmitSessionStrandedDiagnostic_DetachedProbeAliveSuppressesEvent(t *testing.T) {

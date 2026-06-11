@@ -660,6 +660,68 @@ name = "mayor"
 	}
 }
 
+func TestBeadsProxiedGateAccessors(t *testing.T) {
+	// Default (nil) => gate off, pool size default 4 (byte-identical legacy).
+	var zero BeadsConfig
+	if zero.ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = true for nil, want false")
+	}
+	if got := zero.ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault() = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+
+	tru, fls := true, false
+	if !(BeadsConfig{Proxied: &tru}).ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = false for proxied=true")
+	}
+	if (BeadsConfig{Proxied: &fls}).ProxiedEnabled() {
+		t.Error("ProxiedEnabled() = true for proxied=false")
+	}
+
+	n6, n0, neg := 6, 0, -3
+	if got := (BeadsConfig{ProxyPoolSize: &n6}).ProxyPoolSizeOrDefault(); got != 6 {
+		t.Errorf("ProxyPoolSizeOrDefault(6) = %d, want 6", got)
+	}
+	// Non-positive sizes fall back to the default rather than producing an
+	// unusable pool.
+	if got := (BeadsConfig{ProxyPoolSize: &n0}).ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault(0) = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+	if got := (BeadsConfig{ProxyPoolSize: &neg}).ProxyPoolSizeOrDefault(); got != defaultBeadsProxyPoolSize {
+		t.Errorf("ProxyPoolSizeOrDefault(-3) = %d, want %d", got, defaultBeadsProxyPoolSize)
+	}
+}
+
+func TestParseBeadsProxiedSection(t *testing.T) {
+	cfg, err := Parse([]byte("[workspace]\nname = \"t\"\n\n[beads]\nproxied = true\nproxy_pool_size = 8\nproxy_idle_timeout = \"15m\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if !cfg.Beads.ProxiedEnabled() {
+		t.Error("proxied not parsed as true")
+	}
+	if got := cfg.Beads.ProxyPoolSizeOrDefault(); got != 8 {
+		t.Errorf("proxy_pool_size = %d, want 8", got)
+	}
+	if got := cfg.Beads.ProxyIdleTimeoutOrDefault(); got != "15m" {
+		t.Errorf("proxy_idle_timeout = %q, want 15m", got)
+	}
+}
+
+func TestBeadsProxyIdleTimeoutAccessor(t *testing.T) {
+	if got := (BeadsConfig{}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("default = %q, want %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	blank := "  "
+	if got := (BeadsConfig{ProxyIdleTimeout: &blank}).ProxyIdleTimeoutOrDefault(); got != defaultBeadsProxyIdleTimeout {
+		t.Errorf("blank = %q, want default %q", got, defaultBeadsProxyIdleTimeout)
+	}
+	v := "5m"
+	if got := (BeadsConfig{ProxyIdleTimeout: &v}).ProxyIdleTimeoutOrDefault(); got != "5m" {
+		t.Errorf("set = %q, want 5m", got)
+	}
+}
+
 func TestMarshalOmitsEmptyBeadsSection(t *testing.T) {
 	c := DefaultCity("test")
 	data, err := c.Marshal()
@@ -4808,6 +4870,30 @@ func TestValidateAgentsSameNameDifferentDir(t *testing.T) {
 	}
 }
 
+func TestValidateAgentsSameNameDifferentBinding(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", SourceDir: "packs/maintenance"},
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
+	}
+	if err := ValidateAgents(agents); err != nil {
+		t.Errorf("ValidateAgents: unexpected error for qualified same-name agents: %v", err)
+	}
+}
+
+func TestValidateAgentsSameNameSameBinding(t *testing.T) {
+	agents := []Agent{
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/bd/dolt"},
+		{Name: "dog", BindingName: "dolt", SourceDir: "packs/other-dolt"},
+	}
+	err := ValidateAgents(agents)
+	if err == nil {
+		t.Fatal("expected error for duplicate binding-qualified name")
+	}
+	if !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("error = %q, want 'duplicate'", err)
+	}
+}
+
 func TestValidateAgentsSameNameSameDir(t *testing.T) {
 	agents := []Agent{
 		{Name: "polecat", Dir: "frontend"},
@@ -5026,6 +5112,92 @@ func TestMaxSessionAgeOmittedWhenEmpty(t *testing.T) {
 	}
 	if strings.Contains(string(data), "max_session_age") {
 		t.Errorf("TOML output should omit max_session_age when empty, got:\n%s", data)
+	}
+}
+
+// --- ChatSessionsConfig tests ---
+
+func TestChatSessionsIdleTimeoutDurationEmpty(t *testing.T) {
+	c := ChatSessionsConfig{}
+	if got := c.IdleTimeoutDuration(); got != 0 {
+		t.Errorf("IdleTimeoutDuration() = %v, want 0", got)
+	}
+}
+
+func TestChatSessionsIdleTimeoutDurationValid(t *testing.T) {
+	c := ChatSessionsConfig{IdleTimeout: "30m"}
+	if got := c.IdleTimeoutDuration(); got != 30*time.Minute {
+		t.Errorf("IdleTimeoutDuration() = %v, want 30m", got)
+	}
+}
+
+func TestChatSessionsIdleTimeoutDurationInvalid(t *testing.T) {
+	c := ChatSessionsConfig{IdleTimeout: "not-a-duration"}
+	if got := c.IdleTimeoutDuration(); got != 0 {
+		t.Errorf("IdleTimeoutDuration() = %v, want 0 for invalid", got)
+	}
+}
+
+func TestGracePeriodDurationDefault(t *testing.T) {
+	c := ChatSessionsConfig{}
+	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
+		t.Errorf("GracePeriodDuration() = %v, want %v", got, DefaultManualGracePeriod)
+	}
+}
+
+func TestGracePeriodDurationExplicitZero(t *testing.T) {
+	for _, val := range []string{"0", "0s"} {
+		c := ChatSessionsConfig{GracePeriod: val}
+		if got := c.GracePeriodDuration(); got != 0 {
+			t.Errorf("GracePeriodDuration(%q) = %v, want 0", val, got)
+		}
+	}
+}
+
+func TestGracePeriodDurationValid(t *testing.T) {
+	c := ChatSessionsConfig{GracePeriod: "5m"}
+	if got := c.GracePeriodDuration(); got != 5*time.Minute {
+		t.Errorf("GracePeriodDuration() = %v, want 5m", got)
+	}
+}
+
+func TestGracePeriodDurationInvalid(t *testing.T) {
+	c := ChatSessionsConfig{GracePeriod: "bogus"}
+	if got := c.GracePeriodDuration(); got != DefaultManualGracePeriod {
+		t.Errorf("GracePeriodDuration() = %v, want %v for invalid", got, DefaultManualGracePeriod)
+	}
+}
+
+func TestGracePeriodRoundTrip(t *testing.T) {
+	c := City{
+		Workspace:    Workspace{Name: "test"},
+		Agents:       []Agent{{Name: "mayor"}},
+		ChatSessions: ChatSessionsConfig{GracePeriod: "15m"},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	got, err := Parse(data)
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got.ChatSessions.GracePeriod != "15m" {
+		t.Errorf("GracePeriod after round-trip = %q, want %q", got.ChatSessions.GracePeriod, "15m")
+	}
+}
+
+func TestGracePeriodOmittedWhenEmpty(t *testing.T) {
+	c := City{
+		Workspace: Workspace{Name: "test"},
+		Agents:    []Agent{{Name: "mayor"}},
+	}
+	data, err := c.Marshal()
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "grace_period") {
+		t.Errorf("TOML output should omit grace_period when empty, got:\n%s", data)
 	}
 }
 
@@ -7656,5 +7828,49 @@ func TestPackDirsForRig(t *testing.T) {
 	want = []string{"/city/packs/a", "/shared/packs/common"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("PackDirsForRig(missing) = %v, want %v", got, want)
+	}
+}
+
+func TestDefaultInstallAgentHooksForProvider(t *testing.T) {
+	cases := []struct {
+		provider string
+		want     []string
+	}{
+		{"opencode", []string{"opencode"}},
+		{"kiro", []string{"kiro"}},
+		{"groq", []string{"groq"}},
+		{"kimi", []string{"kimi"}},
+		{"claude", nil},
+	}
+	for _, tc := range cases {
+		got := defaultInstallAgentHooksForProvider(tc.provider)
+		if !reflect.DeepEqual(got, tc.want) {
+			t.Errorf("defaultInstallAgentHooksForProvider(%q) = %v, want %v", tc.provider, got, tc.want)
+		}
+	}
+}
+
+func TestCityWithProvidersInstallsKimiHooksByDefault(t *testing.T) {
+	tests := []struct {
+		name string
+		city City
+	}{
+		{
+			name: "wizard",
+			city: WizardCityWithProviders("test-city", "kimi", []string{"kimi"}),
+		},
+		{
+			name: "gastown",
+			city: GastownCityWithProviders("test-city", "kimi", []string{"kimi"}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.city.Workspace.InstallAgentHooks
+			want := []string{"kimi"}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("Workspace.InstallAgentHooks = %v, want %v", got, want)
+			}
+		})
 	}
 }

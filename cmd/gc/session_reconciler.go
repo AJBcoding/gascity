@@ -219,9 +219,12 @@ func queueDrainAckAsyncStop(cityPath string, store beads.Store, sp runtime.Provi
 		// closes it on a subsequent tick. Poke the controller so finalize +
 		// pool respawn runs on the next event-driven tick instead of waiting up
 		// to a full patrol interval (ga-ryhnhd). Mirrors the drain-ack CLI poke.
-		if perr := drainAckAsyncStopPokeController(cityPath); perr != nil {
-			fmt.Fprintf(stderr, "session reconciler: async drain-ack stop %s: poke failed: %v\n", name, perr) //nolint:errcheck
-		}
+		// Poke is best-effort: a failure is not logged because the goroutine may
+		// outlive its reconcile invocation and write to stderr concurrently with
+		// the caller's subsequent writes on the same writer (data race on
+		// non-goroutine-safe buffers). The controller reconciles on the next
+		// patrol tick regardless.
+		_ = drainAckAsyncStopPokeController(cityPath)
 	}()
 }
 
@@ -347,6 +350,16 @@ func finalizeDrainAckStoppedSession(
 	batch := sessionpkg.AcknowledgeDrainPatch(session.Metadata["wake_mode"] == "fresh")
 	if hasAssignedWork {
 		batch = sessionpkg.CompleteDrainPatch(clk.Now().UTC(), "idle", session.Metadata["wake_mode"] == "fresh")
+	}
+	// A drain-ack that completes a restart-request cycle (gc session reset →
+	// agent drain-ack) must also consume restart_requested. The drain-ack
+	// branch handles the stop and continues before the restart-requested
+	// branch runs, so nothing else clears the flag; if it survives in the
+	// store, a later cache-reconcile re-emission resurrects it and the
+	// controller honors it as a fresh restart request — a phantom second
+	// restart that rotates session_key and destroys resume continuity (#2574).
+	if session.Metadata["restart_requested"] == "true" {
+		batch["restart_requested"] = ""
 	}
 	if err := store.SetMetadataBatch(session.ID, batch); err != nil {
 		fmt.Fprintf(stderr, "session reconciler: finalizing drain-ack stopped %s: %v\n", name, err) //nolint:errcheck
@@ -1586,6 +1599,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						exempt = true
 					}
 				}
+				// Min-floor idle workers are legitimately unclaimed: they hold no
+				// bead because they are waiting for routed work to arrive, not
+				// because they parked on an error. Exempt them before the
+				// I/O-bound claim and provider-health checks so those queries
+				// are skipped entirely for floor workers every reconcile tick.
+				if !exempt && cfg != nil {
+					if cfgAgent := findAgentByTemplate(cfg, tp.TemplateName); cfgAgent != nil {
+						minFloor := cfgAgent.EffectiveMinActiveSessions()
+						if minFloor > 0 {
+							openInPool := 0
+							for j := range ordered {
+								if ordered[j].Status != "closed" && normalizedSessionTemplate(ordered[j], cfg) == tp.TemplateName {
+									openInPool++
+								}
+							}
+							if isMinFloorIdleWorker(minFloor, openInPool) {
+								exempt = true
+								if trace != nil {
+									trace.recordDecision(string(TraceSiteReconcilerProgressStallExempt), tp.TemplateName, name, "min_floor_idle_worker", "exempt", traceRecordPayload{
+										"pool_min":  minFloor,
+										"pool_open": openInPool,
+									}, nil, "")
+								}
+							}
+						}
+					}
+				}
 				holdsClaim := false
 				if !exempt {
 					has, err := sessionHasInProgressAssignedWorkForConfig(store, rigStores, *session, cfg)
@@ -2188,7 +2228,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	// Use ComputeAwakeSet for the wake/sleep decision.
 	phaseStart = time.Now()
 	awakeInput := buildAwakeInputFromReconciler(
-		cfg, ordered, poolDesired, namedSessionDemand, workSet, readyWaitSet,
+		cfg, cityPath, ordered, poolDesired, namedSessionDemand, workSet, readyWaitSet,
 		assignedWorkBeads, wakeTargets, sp, clk.Now(),
 	)
 	awakeDecisions := ComputeAwakeSet(awakeInput)
@@ -2783,6 +2823,7 @@ func emitSessionStrandedDiagnostic(
 		Actor:   "gc",
 		Subject: session.ID,
 		Message: formatStrandedMessage(template, session.Metadata["session_name"], ids),
+		Payload: api.SessionStrandedPayloadJSON(session.ID, session.Metadata["session_name"], template, ids),
 	})
 	// Set the in-memory marker first so a SetMetadata failure below
 	// can't cause the next tick (still seeing this same *Bead value or
@@ -3677,6 +3718,75 @@ func resolveTaskWorkDir(store beads.Store, assignees ...string) string {
 		}
 	}
 	return ""
+}
+
+const dispatchOptionMetadataPrefix = "opt_"
+
+func dispatchOptionMetadataKey(key string) string {
+	return dispatchOptionMetadataPrefix + key
+}
+
+// resolveTaskOptionOverrides returns provider option choices requested by the
+// newest in-progress work bead assigned to the candidate's identifiers. Work
+// beads use the same opt_<OptionsSchema key> metadata convention as session
+// beads, so a provider can consume opt_model, opt_effort, or future schema
+// options without a new gc.* field. Values are validated against the resolved
+// provider OptionsSchema and invalid values are skipped.
+func resolveTaskOptionOverrides(store beads.Store, rp *config.ResolvedProvider, assignees ...string) map[string]string {
+	if store == nil || rp == nil || len(rp.OptionsSchema) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(assignees))
+	for _, assignee := range assignees {
+		assignee = strings.TrimSpace(assignee)
+		if assignee == "" || seen[assignee] {
+			continue
+		}
+		seen[assignee] = true
+		assigned, err := store.List(beads.ListQuery{
+			Assignee: assignee,
+			Status:   "in_progress",
+			Live:     true,
+			TierMode: beads.TierBoth,
+			Sort:     beads.SortCreatedDesc,
+		})
+		if err != nil {
+			continue
+		}
+		for _, b := range assigned {
+			overrides, sawOptions := workBeadOptionOverrides(b, rp)
+			if sawOptions {
+				return overrides
+			}
+		}
+	}
+	return nil
+}
+
+func workBeadOptionOverrides(b beads.Bead, rp *config.ResolvedProvider) (map[string]string, bool) {
+	if rp == nil {
+		return nil, false
+	}
+	overrides := make(map[string]string)
+	sawOptions := false
+	for _, opt := range rp.OptionsSchema {
+		metadataKey := dispatchOptionMetadataKey(opt.Key)
+		raw, ok := b.Metadata[metadataKey]
+		if !ok {
+			continue
+		}
+		sawOptions = true
+		value := strings.TrimSpace(raw)
+		if value == "" {
+			continue
+		}
+		if _, err := config.ResolveExplicitOptions(rp.OptionsSchema, map[string]string{opt.Key: value}); err != nil {
+			log.Printf("work %s: ignoring %s=%q: %v", b.ID, metadataKey, value, err)
+			continue
+		}
+		overrides[opt.Key] = value
+	}
+	return overrides, sawOptions
 }
 
 type assignedTaskWorkDir struct {

@@ -897,11 +897,10 @@ func tryReloadConfig(tomlPath, lockedWorkspaceName, cityRoot string) (*reloadRes
 		return nil, fmt.Errorf("fetching packs: %w", err)
 	}
 
-	allIncludes, err := cityConfigIncludesWithBuiltinPacks(cityRoot, extraConfigFiles...)
-	if err != nil {
+	if err := ensureBuiltinPacksForConfigLoad(fsys.OSFS{}, tomlPath, resolveLoadCityConfigWarningWriter()); err != nil {
 		return nil, err
 	}
-	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, allIncludes...)
+	newCfg, prov, err := config.LoadWithIncludes(fsys.OSFS{}, tomlPath, extraConfigFiles...)
 	if err != nil {
 		return nil, fmt.Errorf("parsing city.toml: %w", err)
 	}
@@ -1335,6 +1334,7 @@ func runController(
 		// async POST /v0/city, so leave the initializer nil and let the
 		// handler return 501 for create/unregister routes.
 		apiMux := api.NewSupervisorMux(&singleCityStateResolver{state: cs}, nil, readOnly, "controller", commit, time.Now())
+		apiMux.WithAnyHostAllowed()
 		addr := net.JoinHostPort(bind, strconv.Itoa(cfg.API.Port))
 		apiLis, apiErr := net.Listen("tcp", addr)
 		if apiErr != nil {

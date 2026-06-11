@@ -37,7 +37,12 @@ import (
 
 const pollInterval = 100 * time.Millisecond
 
-var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "kimi", "opencode", "pi", "antigravity"}
+// grok's TUI treats Escape as "clear input"/mode-toggle, so synthesizing an
+// Escape between the pasted prompt and the submit Enter (the default for
+// non-listed providers) prevents the Enter from submitting — the worker then
+// idles at grok's welcome screen forever. Skip the pre-Enter Escape for grok
+// (like the other send-keys-driven TUIs). See ga-3xu / grok-engagement follow-up.
+var providersSkippingEscapeBeforeEnter = []string{"claude", "codex", "copilot", "gemini", "grok", "kimi", "opencode", "pi", "antigravity"}
 
 // Config holds configurable timeouts and intervals for the tmux provider.
 // All fields have sensible defaults matching the original hardcoded values.
@@ -1120,6 +1125,24 @@ func (t *Tmux) ListSessionIDs() (map[string]string, error) {
 	return result, nil
 }
 
+// cancelCopyModeIfParked exits copy-mode on the target session's active pane
+// before key delivery. The ga-c4w WheelUpPane binding parks an interactive
+// pane in copy-mode on wheel-up; tmux then routes subsequent send-keys into
+// copy-mode and the controller's keystrokes (nudges, prompts, mail, the 1/2/3
+// interaction responses) are silently dropped. Probing #{pane_in_mode} and
+// canceling only when parked keeps the happy path untouched (no spurious
+// cancel) and is a no-op for headless agent panes, which stay mouse-off and
+// are never wheel-parked. Probe and cancel errors are deliberately swallowed:
+// a copy-mode guard must never abort delivery on a pane that simply is not in
+// a mode.
+func (t *Tmux) cancelCopyModeIfParked(session string) {
+	inMode, err := t.run("display-message", "-t", session, "-p", "#{pane_in_mode}")
+	if err != nil || strings.TrimSpace(inMode) != "1" {
+		return
+	}
+	_, _ = t.run("send-keys", "-t", session, "-X", "cancel")
+}
+
 // SendKeys sends keystrokes to a session and presses Enter.
 // Always sends Enter as a separate command for reliability.
 // Uses a debounce delay between paste and Enter to ensure paste completes.
@@ -1131,6 +1154,10 @@ func (t *Tmux) SendKeys(session, keys string) error {
 // The debounceMs parameter controls how long to wait after paste before sending Enter.
 // This prevents race conditions where Enter arrives before paste is processed.
 func (t *Tmux) SendKeysDebounced(session, keys string, debounceMs int) error {
+	// A human may have scrolled this pane into copy-mode (the ga-c4w wheel
+	// binding); exit it first so the keystrokes reach the program instead of
+	// being swallowed by copy-mode.
+	t.cancelCopyModeIfParked(session)
 	// Record this poke (and the genuine activity just before it) so that
 	// GetSessionActivity can later discount our own keystroke echo for an
 	// agent that never actually responds. See discountPokeActivity.
@@ -1622,6 +1649,14 @@ func (t *Tmux) NudgeSession(session, message string) error {
 	if agentPane, err := t.FindAgentPane(session); err == nil && agentPane != "" {
 		target = agentPane
 	}
+
+	// Wake a detached pane BEFORE the first send. A fully-detached pool TUI
+	// (e.g. grok, never observed by a client) may not be servicing its event
+	// loop, so the initial paste is silently dropped at the application layer
+	// even though tmux delivers the bytes (no error). SIGWINCH kicks the
+	// render/input loop so the paste is actually consumed. The post-send wake
+	// below remains for the submit Enter.
+	t.WakePaneIfDetached(session)
 
 	// 1. Send text in literal mode with retry on transient errors
 	if err := t.sendKeysLiteralWithRetry(target, message, t.cfg.NudgeReadyTimeout); err != nil {
@@ -2628,7 +2663,29 @@ func matchesPromptPrefix(line, readyPromptPrefix string) bool {
 	trimmed = strings.ReplaceAll(trimmed, "\u00a0", " ")
 	normalizedPrefix := strings.ReplaceAll(readyPromptPrefix, "\u00a0", " ")
 	prefix := strings.TrimSpace(normalizedPrefix)
-	return strings.HasPrefix(trimmed, normalizedPrefix) || (prefix != "" && trimmed == prefix)
+	// Some TUIs (e.g. grok) render the input line inside a box border, so the
+	// captured line is "│ ❯ …" rather than "❯ …". Test a border-stripped variant
+	// too so the prompt glyph after the border is detected — otherwise readiness
+	// and idle detection never match and queued prompt delivery is never released.
+	for _, cand := range []string{trimmed, stripLeadingBoxBorder(trimmed)} {
+		if strings.HasPrefix(cand, normalizedPrefix) || (prefix != "" && cand == prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripLeadingBoxBorder removes a leading vertical box-drawing character
+// (│ U+2502 / ┃ U+2503) plus surrounding spaces from a line, so prompt detection
+// can see a prompt glyph that a TUI renders inside a bordered input box (grok).
+// Returns the input unchanged when there is no such border.
+func stripLeadingBoxBorder(s string) string {
+	s = strings.TrimLeft(s, " \t")
+	r := []rune(s)
+	if len(r) > 0 && (r[0] == '│' || r[0] == '┃') {
+		return strings.TrimLeft(string(r[1:]), " \t")
+	}
+	return s
 }
 
 // WaitForRuntimeReady polls until the agent runtime's ready prompt appears in

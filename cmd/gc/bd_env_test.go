@@ -185,6 +185,37 @@ prefix = "mc"
 	}
 }
 
+func TestBdStoreForCityEnablesSkipLabelsFromBD105Compatibility(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "Metro City"
+
+[beads]
+bd_compatibility = "bd-1.0.5"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := bdStoreForCity(cityDir, cityDir)
+	if !store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForCity did not enable bd list --skip-labels for bd-1.0.5 compatibility")
+	}
+}
+
+func TestBdStoreForCityLeavesSkipLabelsDisabledByDefault(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
+name = "Metro City"
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := bdStoreForCity(cityDir, cityDir)
+	if store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForCity enabled bd list --skip-labels without bd-1.0.5 compatibility")
+	}
+}
+
 func TestBdStoreForRigResolvesIDPrefixFromScopeConfig(t *testing.T) {
 	cityDir := t.TempDir()
 	rigDir := filepath.Join(cityDir, "rigs", "repo")
@@ -199,6 +230,23 @@ func TestBdStoreForRigResolvesIDPrefixFromScopeConfig(t *testing.T) {
 	store := bdStoreForRig(rigDir, cityDir, cfg)
 	if got := store.IDPrefix(); got != "repo" {
 		t.Fatalf("IDPrefix() = %q, want repo", got)
+	}
+}
+
+func TestBdStoreForRigEnablesSkipLabelsFromBD105Compatibility(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "rigs", "repo")
+	if err := os.MkdirAll(rigDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{
+		Beads: config.BeadsConfig{BDCompatibility: config.BeadsBDCompatibility105},
+		Rigs:  []config.Rig{{Name: "repo", Path: "rigs/repo", Prefix: "ga"}},
+	}
+
+	store := bdStoreForRig(rigDir, cityDir, cfg)
+	if !store.ListSkipLabelsEnabled() {
+		t.Fatal("bdStoreForRig did not enable bd list --skip-labels for bd-1.0.5 compatibility")
 	}
 }
 
@@ -356,6 +404,96 @@ func TestRecoverManagedBDCommandDisablesCLIRemoteSync(t *testing.T) {
 	}
 	if got := values["BEADS_DOLT_SYNC_CLI_REMOTES"]; got != "false" {
 		t.Fatalf("BEADS_DOLT_SYNC_CLI_REMOTES = %q, want false", got)
+	}
+}
+
+// The auto-backup opt-out tests mirror the CLI-remote-sync opt-out tests
+// above. They guard against recurrence of the 2026-06-08 town-wide Dolt
+// wedge (ga-0eq), whose root cause was bd's PersistentPostRun auto-backup
+// (the hardcoded "backup_export" Dolt remote) stuck-looping and saturating
+// the commit path. gc-managed bd invocations must force BD_BACKUP_ENABLED
+// off at every env-projection site, overriding any ambient/config value so
+// a fresh or drifted rig scope cannot re-enable it.
+
+func TestBdRuntimeEnvDisablesAutoBackup(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_BACKUP_ENABLED", "true")
+
+	env := mustBdRuntimeEnv(t, t.TempDir())
+	if got := env["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := env["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
+func TestCityRuntimeProcessEnvDisablesAutoBackup(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_BACKUP_ENABLED", "true")
+
+	values := envEntriesMap(mustCityRuntimeProcessEnv(t, t.TempDir()))
+	if got := values["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := values["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
+func TestSessionBackendEnvDisablesAutoBackup(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_BACKUP_ENABLED", "true")
+
+	env := mustSessionBackendEnv(t, t.TempDir(), "", nil)
+	if got := env["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := env["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
+	}
+}
+
+func TestRecoverManagedBDCommandDisablesAutoBackup(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_BACKUP_ENABLED", "true")
+
+	cityPath := t.TempDir()
+	envFile := filepath.Join(cityPath, "recover-env.txt")
+	scriptPath := gcBeadsBdScriptPath(cityPath)
+	if err := os.MkdirAll(filepath.Dir(scriptPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"printf 'BD_BACKUP_ENABLED=%s\\n' \"$BD_BACKUP_ENABLED\" > \"" + envFile + "\"\n" +
+		"printf 'BEADS_BACKUP_ENABLED=%s\\n' \"$BEADS_BACKUP_ENABLED\" >> \"" + envFile + "\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := recoverManagedBDCommand(cityPath); err != nil {
+		t.Fatalf("recoverManagedBDCommand() error = %v", err)
+	}
+	data, err := os.ReadFile(envFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := map[string]string{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if ok {
+			values[key] = value
+		}
+	}
+	if got := values["BD_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BD_BACKUP_ENABLED = %q, want false", got)
+	}
+	if got := values["BEADS_BACKUP_ENABLED"]; got != "false" {
+		t.Fatalf("BEADS_BACKUP_ENABLED = %q, want false", got)
 	}
 }
 
@@ -757,6 +895,61 @@ dolt.auto-start: false
 		t.Fatalf("resolvedRuntimeCityDoltTarget() error = nil with ok=%v target=%+v, want not-owned recovery error", ok, target)
 	}
 	requireErrorContains(t, err, "managed dolt lifecycle is not owned")
+}
+
+func TestResolvedRuntimeCityDoltTargetFallsBackToResolvablePortWhenPublishWriteFails(t *testing.T) {
+	// Regression test for ga-crh00: when publishManagedDoltRuntimeStateFromState
+	// cannot write dolt-state.json (e.g., write permission failure), the function
+	// must still return the port via the currentResolvableManagedDoltPort fallback
+	// rather than surfacing the publish error.
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_DOLT", "skip")
+	_ = os.Unsetenv("GC_DOLT_HOST")
+	_ = os.Unsetenv("GC_DOLT_PORT")
+	_ = os.Unsetenv("GC_DOLT_USER")
+	_ = os.Unsetenv("GC_DOLT_PASSWORD")
+
+	cityPath := t.TempDir()
+	writeMinimalCityToml(t, cityPath)
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "config.yaml"), []byte(`issue_prefix: demo
+gc.endpoint_origin: managed_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	port := writeReachableProviderManagedDoltState(t, cityPath)
+
+	// Make the dolt state dir read-only to force publishManagedDoltRuntimeStateFromState
+	// to fail — it cannot write dolt-state.json to the read-only directory.
+	doltStateDir := filepath.Join(cityPath, ".gc", "runtime", "packs", "dolt")
+	if err := os.Chmod(doltStateDir, 0o555); err != nil {
+		t.Fatalf("chmod state dir read-only: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = os.Chmod(doltStateDir, 0o755)
+	})
+
+	target, ok, err := resolvedRuntimeCityDoltTarget(cityPath, true)
+	if err != nil {
+		t.Fatalf("resolvedRuntimeCityDoltTarget() error = %v, want fallback to resolvable port", err)
+	}
+	if !ok {
+		t.Fatalf("resolvedRuntimeCityDoltTarget() ok = false, want fallback target")
+	}
+	if target.Port != strconv.Itoa(port) {
+		t.Fatalf("resolvedRuntimeCityDoltTarget() port = %q, want %d", target.Port, port)
+	}
+	if target.Host != defaultManagedDoltHost {
+		t.Fatalf("resolvedRuntimeCityDoltTarget() host = %q, want %q", target.Host, defaultManagedDoltHost)
+	}
+	if _, err := os.Stat(managedDoltStatePath(cityPath)); !os.IsNotExist(err) {
+		t.Fatalf("published state should remain absent when write was blocked, stat err = %v", err)
+	}
 }
 
 func TestResolvedRuntimeCityDoltTargetDoesNotMaskInvalidCanonicalConfigWithProviderState(t *testing.T) {
@@ -4849,6 +5042,11 @@ func TestProjectedKeysCoverage(t *testing.T) {
 	for _, key := range bdCLIRemoteSyncOptOutEnvKeys {
 		if !projectedKeyStripped(key) {
 			t.Errorf("bdCLIRemoteSyncOptOutEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
+		}
+	}
+	for _, key := range bdAutoBackupOptOutEnvKeys {
+		if !projectedKeyStripped(key) {
+			t.Errorf("bdAutoBackupOptOutEnvKeys[%q] is not in mergeRuntimeEnv strip list - symmetry broken", key)
 		}
 	}
 }

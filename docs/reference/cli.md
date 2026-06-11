@@ -257,7 +257,9 @@ in the arguments.
 All arguments after "gc bd" are forwarded to bd unchanged, except the
 gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
 "update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
-so long-running workers can signal liveness to the dashboard.
+so long-running workers can signal liveness to the dashboard, and
+"release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an
+in-progress assignment only when the bead still has that assignee.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -275,6 +277,7 @@ gc bd --rig my-project list
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+  gc bd release-if-current my-project-abc worker-1
 ```
 
 ## gc beads
@@ -1609,6 +1612,7 @@ Finds routed work using the agent's work_query config.
 
 Without --inject: prints normalized ready-only output, exits 0 if work exists, 1 if empty.
 With --inject: silent legacy Stop-hook compatibility; skips the work query and always exits 0.
+With --claim: runs the standard startup claim protocol for one work item.
 
 		The agent is determined from $GC_AGENT or a positional argument.
 
@@ -1618,7 +1622,10 @@ gc hook [agent] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--claim` | bool |  | atomically claim one routed work item for the current session |
+| `--drain-ack` | bool |  | with --claim, acknowledge runtime drain when no work is available |
 | `--inject` | bool |  | silent legacy Stop-hook compatibility; skip work query and exit 0 |
+| `--json` | bool |  | with --claim, emit a JSON protocol result |
 
 ## gc import
 
@@ -1759,7 +1766,7 @@ gc init
   gc init --default-provider codex --bootstrap-profile k8s-cell /city
   gc init --name my-city
   gc init --from ~/elan --name elan /city
-  gc init --file examples/gastown.toml ~/bright-lights
+  gc init --file ./my-city.toml ~/bright-lights
   gc init --file city.toml --preserve-existing .
 ```
 
@@ -2160,6 +2167,7 @@ gc order
 | [gc order list](#gc-order-list) | List available orders |
 | [gc order run](#gc-order-run) | Execute an order manually |
 | [gc order show](#gc-order-show) | Show details of an order |
+| [gc order sweep-nudge-mail](#gc-order-sweep-nudge-mail) | Close stale delivered nudge beads and read mail beads |
 | [gc order sweep-tracking](#gc-order-sweep-tracking) | Close stale and prune closed order-tracking beads |
 
 ## gc order check
@@ -2243,6 +2251,28 @@ gc order show <name> [flags]
 | `--json` | bool |  | emit JSON |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
 
+## gc order sweep-nudge-mail
+
+Close stale delivered nudge beads and read mail beads.
+
+Nudge beads that are past --nudge-ttl and not in the live nudge queue are
+closed. Read mail beads past --mail-ttl are closed. A budget cap of 50 closes
+per invocation prevents runaway sweeps under load.
+
+Use --dry-run to log what would be closed without making any changes.
+The controller watchdog also runs this sweep automatically every 5 minutes.
+
+```
+gc order sweep-nudge-mail [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | log what would be closed; make no changes |
+| `--mail-ttl` | duration | `1h0m0s` | min age before a read mail bead is GC'd |
+| `--nudge-ttl` | duration | `10m0s` | min age before a delivered nudge bead is GC'd |
+| `--quiet` | bool |  | suppress success output |
+
 ## gc order sweep-tracking
 
 Close stale open order-tracking beads and prune expired closed history.
@@ -2287,6 +2317,7 @@ gc pack
 | [gc pack fetch](#gc-pack-fetch) | Clone missing and update existing remote packs |
 | [gc pack list](#gc-pack-list) | Show remote pack sources and cache status |
 | [gc pack registry](#gc-pack-registry) | Manage pack registries |
+| [gc pack release](#gc-pack-release) | Author pack registry release metadata |
 
 ## gc pack fetch
 
@@ -2405,6 +2436,80 @@ gc pack registry show <pack-name> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL result |
 | `--refresh` | bool |  | refresh catalogs before showing |
+
+## gc pack release
+
+Author pack registry release metadata, including canonical pack content hashes.
+
+```
+gc pack release
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc pack release hash](#gc-pack-release-hash) | Compute a pack release content hash |
+| [gc pack release stamp](#gc-pack-release-stamp) | Stamp a registry release entry with a computed content hash |
+| [gc pack release validate](#gc-pack-release-validate) | Validate registry release content hashes |
+| [gc pack release verify](#gc-pack-release-verify) | Verify a pack release content hash |
+
+## gc pack release hash
+
+Compute a pack release content hash
+
+```
+gc pack release hash <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--commit` | string |  | git commit or ref to hash |
+| `--path` | string |  | pack path inside the source repository |
+
+## gc pack release stamp
+
+Stamp a registry release entry with a computed content hash
+
+```
+gc pack release stamp <registry.toml> <pack-name> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--commit` | string |  | git commit or ref to hash and record |
+| `--description` | string |  | release description |
+| `--pack-description` | string |  | pack description; required when creating a new [[pack]] |
+| `--path` | string |  | pack path inside the source repository |
+| `--ref` | string |  | release ref to record |
+| `--replace` | bool |  | replace an existing release with the same version |
+| `--source` | string |  | pack source; required when creating a new [[pack]] |
+| `--version` | string |  | release version to stamp |
+
+## gc pack release validate
+
+Validate registry release content hashes
+
+```
+gc pack release validate <registry.toml> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--include-withdrawn` | bool |  | also validate withdrawn releases |
+| `--pack` | string |  | validate only one registry pack |
+
+## gc pack release verify
+
+Verify a pack release content hash
+
+```
+gc pack release verify <source> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--commit` | string |  | git commit or ref to verify |
+| `--hash` | string |  | expected sha256:&lt;64hex&gt; content hash |
+| `--path` | string |  | pack path inside the source repository |
 
 ## gc prime
 
@@ -2606,7 +2711,9 @@ gc restart [path] [flags]
 
 ## gc resume
 
-Resume a suspended city by clearing workspace.suspended in city.toml.
+Resume a suspended city by recording an explicit "resumed" preference
+in .gc/runtime/suspension-state.json. The override sticks across city
+restarts even when [workspace] declares suspended_on_start = true.
 
 Restores normal operation: the reconciler will spawn agents again and
 gc hook/prime will return work. Use "gc agent resume" to resume
@@ -2665,7 +2772,9 @@ The rig's agents won't spawn until explicitly resumed with "gc rig resume".
 
 Use --adopt to register a directory that already has a fully initialized
 .beads/ directory (must include both metadata.json and config.yaml).
-Skips beads init; the git repo check remains informational.
+For managed-Dolt rigs, runs an idempotent config sync (registers types.custom
+and other config into the DB, never destructively reinitializes). The git repo
+check remains informational.
 
 ```
 gc rig add <path> [flags]
@@ -2744,7 +2853,9 @@ gc rig restart [name]
 
 ## gc rig resume
 
-Resume a suspended rig by clearing suspended in city.toml.
+Resume a suspended rig by recording an explicit "resumed" preference
+in .gc/runtime/suspension-state.json. The override sticks across city restarts
+even when the rig declares suspended_on_start = true.
 
 The reconciler will start the rig's agents on its next tick.
 
@@ -2810,11 +2921,15 @@ gc rig status [name] [flags]
 
 ## gc rig suspend
 
-Suspend a rig by setting suspended=true in city.toml.
+Suspend a rig by recording the suspension in the runtime state file
+(.gc/runtime/suspension-state.json).
 
 All agents scoped to the suspended rig are effectively suspended —
 the reconciler skips them and gc hook returns empty. The rig's beads
 database remains accessible. Use "gc rig resume" to restore.
+
+Suspension state is stored in the runtime directory, not city.toml,
+so it is local to this machine and does not need to be committed.
 
 ```
 gc rig suspend [name] [flags]
@@ -3695,7 +3810,9 @@ gc supervisor uninstall
 
 ## gc suspend
 
-Suspends the city by setting workspace.suspended = true in city.toml.
+Suspends the city by recording an explicit "suspended" preference
+in .gc/runtime/suspension-state.json (per-clone runtime state, not
+committed).
 
 This inherits downward — when the city is suspended, all agents are
 effectively suspended regardless of their individual suspended fields.

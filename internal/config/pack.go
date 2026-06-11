@@ -4,12 +4,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	iofs "io/fs"
 	"log"
 	"path/filepath"
 	"slices"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -456,9 +458,6 @@ func expandPacks(cfg *City, fs fsys.FS, cityRoot string, rigFormulaDirs map[stri
 			cfg.RigOverlayDirs[rig.Name] = rigOverlayDirs
 		}
 
-		// Resolve fallback agents before collision detection.
-		rigAgents = resolveFallbackAgents(rigAgents)
-
 		// Check for duplicate agent names across packs for this rig.
 		if err := checkPackAgentCollisions(rigAgents, rig.Name); err != nil {
 			return err
@@ -823,18 +822,13 @@ func expandCityPacks(cfg *City, fs fsys.FS, cityRoot string, opts LoadOptions) (
 		}
 	}
 
-	// Resolve fallback agents before collision detection.
-	allAgents = resolveFallbackAgents(allAgents)
-
 	// Check for duplicate agent names across city packs.
 	if err := checkPackAgentCollisions(allAgents, ""); err != nil {
 		return nil, nil, nil, err
 	}
 
 	// City pack agents go at the front (before user-defined agents).
-	// Run fallback dedup again on the combined set so system pack
-	// fallback agents yield to inline city-level agents.
-	cfg.Agents = resolveFallbackAgents(append(allAgents, cfg.Agents...))
+	cfg.Agents = append(allAgents, cfg.Agents...)
 	cfg.NamedSessions = append(allNamedSessions, cfg.NamedSessions...)
 
 	// Detect shadow conflicts: city-local agents masking imported agents.
@@ -937,79 +931,6 @@ func ComputeFormulaLayers(cityTopoFormulas []string, cityLocalFormulas string, r
 	}
 
 	return fl
-}
-
-// resolveFallbackAgents resolves fallback agent collisions. When agents
-// from different SourceDirs share a name:
-//   - One fallback + one non-fallback: non-fallback wins, fallback removed
-//   - Both fallback: first loaded wins (depth-first include order)
-//   - Neither fallback: left for checkPackAgentCollisions to error
-//
-// Agents from the same SourceDir are never in conflict (they're duplicates
-// within one pack, handled elsewhere). Order is preserved.
-func resolveFallbackAgents(agents []Agent) []Agent {
-	// Build per-name groups from distinct SourceDirs.
-	type entry struct {
-		idx      int
-		fallback bool
-		srcDir   string
-	}
-	groups := make(map[string][]entry)
-	for i, a := range agents {
-		// Use QualifiedName so agents with different bindings
-		// (e.g., "gs.mayor" and "maint.mayor") don't collide.
-		groups[a.QualifiedName()] = append(groups[a.QualifiedName()], entry{i, a.Fallback, a.SourceDir})
-	}
-
-	// Determine which indices to remove.
-	remove := make(map[int]bool)
-	for _, entries := range groups {
-		// Only care about names from multiple sources.
-		// Empty SourceDir means city-level (inline) — count it as a
-		// distinct source so system pack fallbacks yield to inline agents.
-		dirs := make(map[string]bool)
-		for _, e := range entries {
-			dirs[e.srcDir] = true // "" is a valid key (city-level)
-		}
-		if len(dirs) < 2 {
-			continue
-		}
-
-		// Separate fallback vs non-fallback entries.
-		var fb, nonfb []entry
-		for _, e := range entries {
-			if e.fallback {
-				fb = append(fb, e)
-			} else {
-				nonfb = append(nonfb, e)
-			}
-		}
-
-		if len(nonfb) > 0 && len(fb) > 0 {
-			// Non-fallback wins: remove all fallback entries.
-			for _, e := range fb {
-				remove[e.idx] = true
-			}
-		} else if len(nonfb) == 0 && len(fb) > 1 {
-			// All fallback: keep first, remove rest.
-			for _, e := range fb[1:] {
-				remove[e.idx] = true
-			}
-		}
-		// Both non-fallback: leave alone for collision detection.
-	}
-
-	if len(remove) == 0 {
-		return agents
-	}
-
-	result := make([]Agent, 0, len(agents)-len(remove))
-	for i, a := range agents {
-		if !remove[i] {
-			result = append(result, a)
-		}
-	}
-	return result
 }
 
 // checkPackAgentCollisions detects duplicate agent names within
@@ -2635,6 +2556,9 @@ func applyAgentOverride(a *Agent, ov *AgentOverride) {
 	if ov.Provider != nil {
 		a.Provider = *ov.Provider
 	}
+	if ov.Args != nil {
+		a.Args = append([]string(nil), (*ov.Args)...)
+	}
 	if ov.StartCommand != nil {
 		a.StartCommand = *ov.StartCommand
 	}
@@ -2787,10 +2711,66 @@ func PackContentHash(fs fsys.FS, topoDir string) string {
 // pack directory, recursively descending into subdirectories. File
 // paths are sorted for determinism and include the relative path from
 // topoDir.
+// packContentHashCache memoizes PackContentHashRecursive across calls. The
+// revision-snapshot capture (revision.go) hashes the full content of every pack
+// tree referenced by the city and every rig on every reconcile tick; with many
+// rigs sharing the same packs this re-reads and re-SHA256s the same trees many
+// times per tick and again every patrol, even though packs almost never change
+// between ticks. This was the dominant supervisor CPU cost once the dolt
+// connection churn was eliminated (gastownhall/gascity#1978 follow-up).
+//
+// The cache keys the content hash by absolute pack dir plus a cheap stat
+// fingerprint (per-file size+mtime, no content reads). An unchanged tree is
+// content-hashed once and reused — both for repeats within a single tick and
+// across ticks. Invalidation follows standard build-cache semantics: any file
+// add/remove, size change, or mtime bump (every normal edit and git checkout)
+// changes the fingerprint and forces a re-hash. The only blind spot is an edit
+// that preserves both size and mtime, which pack tooling does not do.
+var packContentHashCache sync.Map // absDir(string) -> packContentHashEntry
+
+type packContentHashEntry struct {
+	fingerprint uint64
+	hash        string
+}
+
+// ResetPackContentHashCache clears the memoized pack content hashes. Tests that
+// mutate a pack tree in place under a path a previous test already hashed call
+// this to avoid cross-test cache bleed.
+func ResetPackContentHashCache() {
+	packContentHashCache.Range(func(k, _ any) bool {
+		packContentHashCache.Delete(k)
+		return true
+	})
+}
+
+// PackContentHashRecursive returns a stable content hash of every file under
+// topoDir (ignoring runtime dirs). Results are memoized per directory and gated
+// by a cheap stat fingerprint, so an unchanged tree is hashed once and reused
+// across calls and reconcile ticks; see packContentHashCache.
 func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 	var paths []string
 	collectFiles(fs, topoDir, "", &paths)
 	sort.Strings(paths)
+
+	absDir, err := filepath.Abs(topoDir)
+	if err != nil {
+		absDir = topoDir
+	}
+
+	// Cheap stat fingerprint (no content reads) gates the full content hash.
+	fp := fnv.New64a()
+	for _, relPath := range paths {
+		fmt.Fprintf(fp, "%s\x00", relPath) //nolint:errcheck // hash.Write never errors
+		if info, statErr := fs.Stat(filepath.Join(topoDir, relPath)); statErr == nil {
+			fmt.Fprintf(fp, "%d\x00%d\x00", info.Size(), info.ModTime().UnixNano()) //nolint:errcheck
+		}
+	}
+	fpSum := fp.Sum64()
+	if v, ok := packContentHashCache.Load(absDir); ok {
+		if entry := v.(packContentHashEntry); entry.fingerprint == fpSum {
+			return entry.hash
+		}
+	}
 
 	h := sha256.New()
 	for _, relPath := range paths {
@@ -2803,7 +2783,9 @@ func PackContentHashRecursive(fs fsys.FS, topoDir string) string {
 		h.Write(data)            //nolint:errcheck // hash.Write never errors
 		h.Write([]byte{0})       //nolint:errcheck // hash.Write never errors
 	}
-	return fmt.Sprintf("%x", h.Sum(nil))
+	result := fmt.Sprintf("%x", h.Sum(nil))
+	packContentHashCache.Store(absDir, packContentHashEntry{fingerprint: fpSum, hash: result})
+	return result
 }
 
 // collectFiles recursively collects file paths relative to base.

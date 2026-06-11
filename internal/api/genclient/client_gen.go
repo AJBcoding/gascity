@@ -83,16 +83,16 @@ func (e ConversationKind) Valid() bool {
 
 // Defines values for EventRotateArchiveCompressionStatus.
 const (
-	Complete EventRotateArchiveCompressionStatus = "complete"
-	Pending  EventRotateArchiveCompressionStatus = "pending"
+	EventRotateArchiveCompressionStatusComplete EventRotateArchiveCompressionStatus = "complete"
+	EventRotateArchiveCompressionStatusPending  EventRotateArchiveCompressionStatus = "pending"
 )
 
 // Valid indicates whether the value is a known member of the EventRotateArchiveCompressionStatus enum.
 func (e EventRotateArchiveCompressionStatus) Valid() bool {
 	switch e {
-	case Complete:
+	case EventRotateArchiveCompressionStatusComplete:
 		return true
-	case Pending:
+	case EventRotateArchiveCompressionStatusPending:
 		return true
 	default:
 		return false
@@ -147,21 +147,63 @@ func (e SubmitIntent) Valid() bool {
 	}
 }
 
+// Defines values for SupervisorRequestPayloadPhase.
+const (
+	SupervisorRequestPayloadPhaseComplete SupervisorRequestPayloadPhase = "complete"
+	SupervisorRequestPayloadPhaseStart    SupervisorRequestPayloadPhase = "start"
+)
+
+// Valid indicates whether the value is a known member of the SupervisorRequestPayloadPhase enum.
+func (e SupervisorRequestPayloadPhase) Valid() bool {
+	switch e {
+	case SupervisorRequestPayloadPhaseComplete:
+		return true
+	case SupervisorRequestPayloadPhaseStart:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SupervisorRequestPayloadRemoteAddrClass.
+const (
+	SupervisorRequestPayloadRemoteAddrClassLoopback SupervisorRequestPayloadRemoteAddrClass = "loopback"
+	SupervisorRequestPayloadRemoteAddrClassPrivate  SupervisorRequestPayloadRemoteAddrClass = "private"
+	SupervisorRequestPayloadRemoteAddrClassPublic   SupervisorRequestPayloadRemoteAddrClass = "public"
+	SupervisorRequestPayloadRemoteAddrClassUnknown  SupervisorRequestPayloadRemoteAddrClass = "unknown"
+)
+
+// Valid indicates whether the value is a known member of the SupervisorRequestPayloadRemoteAddrClass enum.
+func (e SupervisorRequestPayloadRemoteAddrClass) Valid() bool {
+	switch e {
+	case SupervisorRequestPayloadRemoteAddrClassLoopback:
+		return true
+	case SupervisorRequestPayloadRemoteAddrClassPrivate:
+		return true
+	case SupervisorRequestPayloadRemoteAddrClassPublic:
+		return true
+	case SupervisorRequestPayloadRemoteAddrClassUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SupervisorShutdownPayloadMode.
 const (
-	Destructive      SupervisorShutdownPayloadMode = "destructive"
-	PreserveSessions SupervisorShutdownPayloadMode = "preserve_sessions"
-	Unknown          SupervisorShutdownPayloadMode = "unknown"
+	SupervisorShutdownPayloadModeDestructive      SupervisorShutdownPayloadMode = "destructive"
+	SupervisorShutdownPayloadModePreserveSessions SupervisorShutdownPayloadMode = "preserve_sessions"
+	SupervisorShutdownPayloadModeUnknown          SupervisorShutdownPayloadMode = "unknown"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorShutdownPayloadMode enum.
 func (e SupervisorShutdownPayloadMode) Valid() bool {
 	switch e {
-	case Destructive:
+	case SupervisorShutdownPayloadModeDestructive:
 		return true
-	case PreserveSessions:
+	case SupervisorShutdownPayloadModePreserveSessions:
 		return true
-	case Unknown:
+	case SupervisorShutdownPayloadModeUnknown:
 		return true
 	default:
 		return false
@@ -348,6 +390,7 @@ type AgentOutputResponse struct {
 // AgentPatch defines model for AgentPatch.
 type AgentPatch struct {
 	AppendFragments         *[]string         `json:"AppendFragments"`
+	Args                    *[]string         `json:"Args"`
 	Attach                  *bool             `json:"Attach"`
 	DefaultSlingFormula     *string           `json:"DefaultSlingFormula"`
 	DependsOn               *[]string         `json:"DependsOn"`
@@ -527,6 +570,7 @@ type Bead struct {
 	Ephemeral    *bool              `json:"ephemeral,omitempty"`
 	From         *string            `json:"from,omitempty"`
 	Id           string             `json:"id"`
+	IsBlocked    *bool              `json:"is_blocked,omitempty"`
 	IssueType    string             `json:"issue_type"`
 	Labels       *[]string          `json:"labels,omitempty"`
 	Metadata     *map[string]string `json:"metadata,omitempty"`
@@ -2375,12 +2419,13 @@ type RigCreatedOutputBody struct {
 
 // RigPatch defines model for RigPatch.
 type RigPatch struct {
-	DefaultBranch *string           `json:"DefaultBranch"`
-	FormulaVars   map[string]string `json:"FormulaVars"`
-	Name          string            `json:"Name"`
-	Path          *string           `json:"Path"`
-	Prefix        *string           `json:"Prefix"`
-	Suspended     *bool             `json:"Suspended"`
+	DefaultBranch    *string           `json:"DefaultBranch"`
+	FormulaVars      map[string]string `json:"FormulaVars"`
+	Name             string            `json:"Name"`
+	Path             *string           `json:"Path"`
+	Prefix           *string           `json:"Prefix"`
+	Suspended        *bool             `json:"Suspended"`
+	SuspendedOnStart *bool             `json:"SuspendedOnStart"`
 }
 
 // RigPatchSetInputBody defines model for RigPatchSetInputBody.
@@ -2664,6 +2709,21 @@ type SessionResponse struct {
 	SubmissionCapabilities *SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
+}
+
+// SessionStrandedPayload defines model for SessionStrandedPayload.
+type SessionStrandedPayload struct {
+	// SessionId Canonical session bead ID for the stranded pool session (also the envelope Subject).
+	SessionId string `json:"session_id"`
+
+	// SessionName Runtime session name from the session bead metadata, when set.
+	SessionName *string `json:"session_name,omitempty"`
+
+	// Template Pool template name when known at the emission site.
+	Template *string `json:"template,omitempty"`
+
+	// WorkBeadIds IDs of the open/in-progress work beads still assigned to the session. Never truncated, unlike the envelope Message. Empty when the work-collection query failed at emission time.
+	WorkBeadIds *[]string `json:"work_bead_ids,omitempty"`
 }
 
 // SessionStreamCommonEvent Non-message events emitted on the session SSE stream: activity transitions, pending interactions, and keepalive heartbeats. The concrete variant is identified by the SSE event name.
@@ -3096,6 +3156,39 @@ type SupervisorHealthOutputBody struct {
 	// Version Supervisor version.
 	Version string `json:"version"`
 }
+
+// SupervisorRequestPayload defines model for SupervisorRequestPayload.
+type SupervisorRequestPayload struct {
+	// DurationMs Handler duration in milliseconds.
+	DurationMs int64 `json:"duration_ms"`
+
+	// Host Canonical Host header without port.
+	Host *string `json:"host,omitempty"`
+
+	// Method HTTP method.
+	Method string `json:"method"`
+
+	// OriginAllowed Whether the Origin header, if present, matched CORS policy.
+	OriginAllowed bool `json:"origin_allowed"`
+
+	// Path Request path with query string omitted and length bounded.
+	Path string `json:"path"`
+
+	// Phase Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only.
+	Phase SupervisorRequestPayloadPhase `json:"phase"`
+
+	// RemoteAddrClass Network class of the remote address, not the raw address.
+	RemoteAddrClass SupervisorRequestPayloadRemoteAddrClass `json:"remote_addr_class"`
+
+	// Status HTTP response status code. Start-phase records use 0 before the final response status is known.
+	Status int64 `json:"status"`
+}
+
+// SupervisorRequestPayloadPhase Audit phase. Long-lived event streams emit a start record immediately after Host validation, then a complete record when the handler returns. Non-stream requests emit complete only.
+type SupervisorRequestPayloadPhase string
+
+// SupervisorRequestPayloadRemoteAddrClass Network class of the remote address, not the raw address.
+type SupervisorRequestPayloadRemoteAddrClass string
 
 // SupervisorShutdownPayload defines model for SupervisorShutdownPayload.
 type SupervisorShutdownPayload struct {
@@ -3818,7 +3911,7 @@ type TypedEventStreamEnvelopeSessionStopped struct {
 type TypedEventStreamEnvelopeSessionStranded struct {
 	Actor    string                   `json:"actor"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionStrandedPayload   `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -3896,6 +3989,18 @@ type TypedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
 	Ts       time.Time                              `json:"ts"`
 	Type     string                                 `json:"type"`
 	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeSupervisorRequest defines model for TypedEventStreamEnvelopeSupervisorRequest.
+type TypedEventStreamEnvelopeSupervisorRequest struct {
+	Actor    string                   `json:"actor"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  SupervisorRequestPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeSupervisorShutdownRequested defines model for TypedEventStreamEnvelopeSupervisorShutdownRequested.
@@ -4647,7 +4752,7 @@ type TypedTaggedEventStreamEnvelopeSessionStranded struct {
 	Actor    string                   `json:"actor"`
 	City     string                   `json:"city"`
 	Message  *string                  `json:"message,omitempty"`
-	Payload  NoPayload                `json:"payload"`
+	Payload  SessionStrandedPayload   `json:"payload"`
 	Seq      int64                    `json:"seq"`
 	Subject  *string                  `json:"subject,omitempty"`
 	Ts       time.Time                `json:"ts"`
@@ -4731,6 +4836,19 @@ type TypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick struct {
 	Ts       time.Time                              `json:"ts"`
 	Type     string                                 `json:"type"`
 	Workflow *WorkflowEventProjection               `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeSupervisorRequest defines model for TypedTaggedEventStreamEnvelopeSupervisorRequest.
+type TypedTaggedEventStreamEnvelopeSupervisorRequest struct {
+	Actor    string                   `json:"actor"`
+	City     string                   `json:"city"`
+	Message  *string                  `json:"message,omitempty"`
+	Payload  SupervisorRequestPayload `json:"payload"`
+	Seq      int64                    `json:"seq"`
+	Subject  *string                  `json:"subject,omitempty"`
+	Ts       time.Time                `json:"ts"`
+	Type     string                   `json:"type"`
+	Workflow *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested defines model for TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested.
@@ -5792,6 +5910,9 @@ type GetV0CityByCityNameStatusParams struct {
 
 	// Wait How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m.
 	Wait *string `form:"wait,omitempty" json:"wait,omitempty"`
+
+	// Lite When true, omit the expensive store-health, session-count, and work-count blocks for low-cost dashboard polls.
+	Lite *bool `form:"lite,omitempty" json:"lite,omitempty"`
 }
 
 // PostV0CityByCityNameUnregisterParams defines parameters for PostV0CityByCityNameUnregister.
@@ -6561,6 +6682,32 @@ func (t *EventPayload) MergeSessionResetStalledPayload(v SessionResetStalledPayl
 	return err
 }
 
+// AsSessionStrandedPayload returns the union data inside the EventPayload as a SessionStrandedPayload
+func (t EventPayload) AsSessionStrandedPayload() (SessionStrandedPayload, error) {
+	var body SessionStrandedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSessionStrandedPayload overwrites any union data inside the EventPayload as the provided SessionStrandedPayload
+func (t *EventPayload) FromSessionStrandedPayload(v SessionStrandedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSessionStrandedPayload performs a merge with any union data inside the EventPayload, using the provided SessionStrandedPayload
+func (t *EventPayload) MergeSessionStrandedPayload(v SessionStrandedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsSessionSubmitSucceededPayload returns the union data inside the EventPayload as a SessionSubmitSucceededPayload
 func (t EventPayload) AsSessionSubmitSucceededPayload() (SessionSubmitSucceededPayload, error) {
 	var body SessionSubmitSucceededPayload
@@ -6707,6 +6854,32 @@ func (t *EventPayload) FromSupervisorFSPressureSkippedTickPayload(v SupervisorFS
 
 // MergeSupervisorFSPressureSkippedTickPayload performs a merge with any union data inside the EventPayload, using the provided SupervisorFSPressureSkippedTickPayload
 func (t *EventPayload) MergeSupervisorFSPressureSkippedTickPayload(v SupervisorFSPressureSkippedTickPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsSupervisorRequestPayload returns the union data inside the EventPayload as a SupervisorRequestPayload
+func (t EventPayload) AsSupervisorRequestPayload() (SupervisorRequestPayload, error) {
+	var body SupervisorRequestPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromSupervisorRequestPayload overwrites any union data inside the EventPayload as the provided SupervisorRequestPayload
+func (t *EventPayload) FromSupervisorRequestPayload(v SupervisorRequestPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeSupervisorRequestPayload performs a merge with any union data inside the EventPayload, using the provided SupervisorRequestPayload
+func (t *EventPayload) MergeSupervisorRequestPayload(v SupervisorRequestPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -8601,6 +8774,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorFsPres
 	return err
 }
 
+// AsTypedEventStreamEnvelopeSupervisorRequest returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorRequest
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorRequest() (TypedEventStreamEnvelopeSupervisorRequest, error) {
+	var body TypedEventStreamEnvelopeSupervisorRequest
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeSupervisorRequest overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeSupervisorRequest
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeSupervisorRequest(v TypedEventStreamEnvelopeSupervisorRequest) error {
+	v.Type = "supervisor.request"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeSupervisorRequest performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeSupervisorRequest
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeSupervisorRequest(v TypedEventStreamEnvelopeSupervisorRequest) error {
+	v.Type = "supervisor.request"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSupervisorShutdownRequested returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSupervisorShutdownRequested
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSupervisorShutdownRequested() (TypedEventStreamEnvelopeSupervisorShutdownRequested, error) {
 	var body TypedEventStreamEnvelopeSupervisorShutdownRequested
@@ -8823,6 +9024,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeSessionWorkQueryFailed()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
+	case "supervisor.request":
+		return t.AsTypedEventStreamEnvelopeSupervisorRequest()
 	case "supervisor.shutdown_requested":
 		return t.AsTypedEventStreamEnvelopeSupervisorShutdownRequested()
 	case "worker.operation":
@@ -10550,6 +10753,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupe
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeSupervisorRequest returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorRequest
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorRequest() (TypedTaggedEventStreamEnvelopeSupervisorRequest, error) {
+	var body TypedTaggedEventStreamEnvelopeSupervisorRequest
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeSupervisorRequest overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeSupervisorRequest
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeSupervisorRequest(v TypedTaggedEventStreamEnvelopeSupervisorRequest) error {
+	v.Type = "supervisor.request"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeSupervisorRequest performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeSupervisorRequest
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeSupervisorRequest(v TypedTaggedEventStreamEnvelopeSupervisorRequest) error {
+	v.Type = "supervisor.request"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested() (TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested, error) {
 	var body TypedTaggedEventStreamEnvelopeSupervisorShutdownRequested
@@ -10772,6 +11003,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeSessionWorkQueryFailed()
 	case "supervisor.fs_pressure.skipped_tick":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorFsPressureSkippedTick()
+	case "supervisor.request":
+		return t.AsTypedTaggedEventStreamEnvelopeSupervisorRequest()
 	case "supervisor.shutdown_requested":
 		return t.AsTypedTaggedEventStreamEnvelopeSupervisorShutdownRequested()
 	case "worker.operation":
@@ -22592,6 +22825,22 @@ func NewGetV0CityByCityNameStatusRequest(server string, cityName string, params 
 		if params.Wait != nil {
 
 			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "wait", *params.Wait, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Lite != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "lite", *params.Lite, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
 				return nil, err
 			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
 				return nil, err
