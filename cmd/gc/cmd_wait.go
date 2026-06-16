@@ -1440,7 +1440,9 @@ func isTerminalNudgeState(state string) bool {
 }
 
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath), cityPath, nudgeIDs)
+	store := openNudgeBeadStore(cityPath)
+	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
+	return nudgequeue.WithdrawWaitNudges(store, cityPath, nudgeIDs)
 }
 
 func waitLifecycleEnabled() error {

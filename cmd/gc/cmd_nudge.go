@@ -414,6 +414,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 	deliveryStore := openNudgeBeadStore(target.cityPath)
+	defer closeBeadStoreHandle(deliveryStore) //nolint:errcheck // best-effort
 	items, rejected := splitQueuedNudgesForTarget(target, items)
 	if len(rejected) > 0 {
 		_ = recordQueuedNudgeFailureWithStore(target.cityPath, deliveryStore, queuedNudgeIDs(rejected), errNudgeSessionFenceMismatch, time.Now())
@@ -1056,8 +1057,13 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store beads.Store, sp ru
 		return false, err
 	}
 	deliveryStore := store
+	ownDeliveryStore := false
 	if deliveryStore == nil {
 		deliveryStore = openNudgeBeadStore(target.cityPath)
+		ownDeliveryStore = true
+	}
+	if ownDeliveryStore {
+		defer closeBeadStoreHandle(deliveryStore) //nolint:errcheck // best-effort
 	}
 	// Bookkeeping for fence-mismatched and blocked items is best-effort: a
 	// failure there must not abort delivery of the remaining claimable items.
