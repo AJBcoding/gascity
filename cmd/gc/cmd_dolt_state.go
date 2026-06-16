@@ -407,6 +407,21 @@ func newDoltStateCmd(stdout, stderr io.Writer) *cobra.Command {
 		Hidden: true,
 		Args:   cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
+			// MySQL-backed cities have no managed-dolt service to start; bd
+			// talks directly to an external MySQL server using params from
+			// .beads/metadata.json. Mirrors the gate in ensureBeadsProvider
+			// (beads_provider_lifecycle.go) so this cobra command — which is
+			// also reachable via `gc dolt-state start-managed` from shell
+			// helpers, doctor, and recovery paths — never spawns a Dolt
+			// server (or regenerates dolt-config.yaml with the -1 sentinel)
+			// for a mysql-backed city. Without this gate, regenerating the
+			// YAML emitted archive_level: -1, which Dolt rejects and which
+			// crash-looped supervisors on mysql-backed cities.
+			if cityUsesMySQLBackend(cityPath) {
+				fmt.Fprintln(stdout, "ready\tfalse")          //nolint:errcheck
+				fmt.Fprintln(stdout, "skipped\tmysql-backend") //nolint:errcheck
+				return nil
+			}
 			report, err := startManagedDoltProcess(cityPath, hostText, portText, userText, logLevel, time.Duration(timeoutMS)*time.Millisecond)
 			for _, line := range managedDoltStartFields(report) {
 				if _, writeErr := fmt.Fprintln(stdout, line); writeErr != nil {

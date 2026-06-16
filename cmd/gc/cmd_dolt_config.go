@@ -280,11 +280,23 @@ func resolveDoltAutocommit(cityPath string) bool {
 // env → cmd-line --archive-level flag value (which the bd script can populate
 // from GC_DOLT_ARCHIVE_LEVEL). city.toml [dolt] archive_level read by the
 // caller and threaded via cmdDefault.
+//
+// Negative cmdDefault values are clamped to 0 before they reach the YAML.
+// Some internal callers (startManagedDoltProcess, dolt_recover_managed) pass
+// -1 as a sentinel meaning "fall back to env/config", and when neither
+// GC_DOLT_AUTO_GC_ARCHIVE_LEVEL nor a city.toml [dolt] archive_level is set
+// the sentinel would otherwise be written verbatim. Dolt rejects negative
+// archive_level with "invalid value for archive-level: -1" and crash-loops
+// the SQL server, which has caused supervisor outages on mysql-backed
+// cities where this writer was reached via doctor / recovery side paths.
 func resolveDoltArchiveLevelForWriter(_ string, cmdDefault int) int {
 	if raw := strings.TrimSpace(os.Getenv("GC_DOLT_AUTO_GC_ARCHIVE_LEVEL")); raw != "" {
 		if n, err := strconv.Atoi(raw); err == nil && n >= 0 {
 			return n
 		}
+	}
+	if cmdDefault < 0 {
+		return 0
 	}
 	return cmdDefault
 }
