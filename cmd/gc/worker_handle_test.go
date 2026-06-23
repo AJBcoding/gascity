@@ -2360,10 +2360,26 @@ func TestWorkerSessionCreateHintsEnablesMouse(t *testing.T) {
 }
 
 // TestWorkerSessionCreateHintsExplicitOffWins locks az-6ev: an explicit per-agent
-// mouse_mode="off" disables mouse even on the unmanaged direct-start CLI seam.
+// mouse_mode="off" disables mouse even on the unmanaged direct-start CLI seam,
+// while unset/"on" keep the ga-c4w mouse-on default. This is the unmanaged-direct
+// half of the ga-xr5o0 mouse-mode gate, which az-6ev extends with a durable
+// per-agent opt-out.
 func TestWorkerSessionCreateHintsExplicitOffWins(t *testing.T) {
-	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"}, "off")
-	if hints.MouseOn {
-		t.Error("workerSessionCreateHints(.., \"off\").MouseOn = true, want false (explicit opt-out, az-6ev)")
+	tests := []struct {
+		name      string
+		mouseMode string
+		want      bool
+	}{
+		{name: "explicit off opts out", mouseMode: "off", want: false},
+		{name: "unset stays on", mouseMode: "", want: true},
+		{name: "explicit on stays on", mouseMode: "on", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"}, tt.mouseMode)
+			if got := hints.MouseOn; got != tt.want {
+				t.Errorf("workerSessionCreateHints(.., %q).MouseOn = %v, want %v (az-6ev)", tt.mouseMode, got, tt.want)
+			}
+		})
 	}
 }

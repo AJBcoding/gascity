@@ -624,6 +624,44 @@ func TestResolveWorkerSessionRuntimeResolvesMouseOnlyForInteractiveResume(t *tes
 	}
 }
 
+// TestResolveWorkerSessionRuntimeExplicitMouseOffSurvivesInteractiveResume locks
+// az-6ev on the API worker-factory resume seam: an agent that declares
+// mouse_mode="off" must resolve mouse-OFF even on an interactive
+// (session_origin=manual) resume, which the ga-c4w/ga-g7go default would otherwise
+// keep mouse-ON. This proves resolveSessionRuntimeWithMetadata threads the resolved
+// agent's MouseMode through to sessionResumeHints (the durable opt-out). It extends
+// the ga-xr5o0 mouse-mode gate.
+func TestResolveWorkerSessionRuntimeExplicitMouseOffSurvivesInteractiveResume(t *testing.T) {
+	fs := newSessionFakeState(t)
+	fs.cfg.Providers["test-agent"] = config.ProviderSpec{
+		Command:   "/bin/echo",
+		PathCheck: "true",
+	}
+	// The base fake agent is {Name: "worker", Dir: "myrig", Provider: "test-agent"};
+	// opt it out of mouse explicitly.
+	for i := range fs.cfg.Agents {
+		if fs.cfg.Agents[i].Dir == "myrig" && fs.cfg.Agents[i].Name == "worker" {
+			fs.cfg.Agents[i].MouseMode = "off"
+		}
+	}
+
+	srv := New(fs)
+	runtimeCfg, err := srv.resolveWorkerSessionRuntimeWithMetadata(session.Info{
+		Template: "myrig/worker",
+		Provider: "test-agent",
+		WorkDir:  t.TempDir(),
+	}, "", map[string]string{"agent_name": "myrig/worker", "session_origin": "manual"})
+	if err != nil {
+		t.Fatalf("resolveWorkerSessionRuntimeWithMetadata: %v", err)
+	}
+	if runtimeCfg == nil {
+		t.Fatal("resolveWorkerSessionRuntimeWithMetadata() = nil")
+	}
+	if runtimeCfg.Hints.MouseOn {
+		t.Error("Hints.MouseOn = true, want false (mouse_mode=off opt-out must survive interactive resume, az-6ev)")
+	}
+}
+
 func TestResolveWorkerSessionRuntimeUsesProviderACPDefaultWithoutTemplateSessionOverride(t *testing.T) {
 	supportsACP := true
 	fs := newSessionFakeState(t)

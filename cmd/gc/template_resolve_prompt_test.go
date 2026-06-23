@@ -603,6 +603,48 @@ func TestTemplateParamsToConfigInteractiveSessionEnablesMouse(t *testing.T) {
 	}
 }
 
+// TestTemplateParamsToConfigManualSessionMouseModeOff locks az-6ev: an explicit
+// per-agent mouse_mode="off" must beat the ga-c4w manual-origin force-on. The
+// force-on at templateParamsToConfig is gated on !Hints.MouseModeOff so a
+// deliberate opt-out wins, while the unset/"on" defaults are unchanged. This
+// extends the ga-xr5o0 mouse-mode gate (a durable per-agent opt-out without
+// regressing the out-of-the-box mouse-on default for unconfigured manual
+// sessions).
+func TestTemplateParamsToConfigManualSessionMouseModeOff(t *testing.T) {
+	tests := []struct {
+		name  string
+		hints agent.StartupHints
+		want  bool
+	}{
+		{
+			// mouse_mode="off": MouseModeOff set, MouseOn unset → explicit opt-out wins.
+			name:  "manual explicit off",
+			hints: agent.StartupHints{MouseOn: false, MouseModeOff: true},
+			want:  false,
+		},
+		{
+			// unset mouse_mode: neither flag set → ga-c4w manual force-on applies.
+			name:  "manual unset stays on",
+			hints: agent.StartupHints{MouseOn: false, MouseModeOff: false},
+			want:  true,
+		},
+		{
+			// mouse_mode="on": MouseOn set directly → on.
+			name:  "manual explicit on",
+			hints: agent.StartupHints{MouseOn: true, MouseModeOff: false},
+			want:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tp := TemplateParams{ManualSession: true, Hints: tt.hints}
+			if got := templateParamsToConfig(tp).MouseOn; got != tt.want {
+				t.Errorf("templateParamsToConfig(manual %+v).MouseOn = %v, want %v (az-6ev)", tt.hints, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveTemplateFlagModeRetainsPromptForStartupDelivery(t *testing.T) {
 	cityPath := t.TempDir()
 	fs := fsys.NewFake()

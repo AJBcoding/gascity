@@ -6842,6 +6842,55 @@ func TestAgentDefaultsProvider_ControlDispatcherSkipped(t *testing.T) {
 	t.Fatal("control-dispatcher agent not found")
 }
 
+// TestAgentDefaultsMouseMode_FansOutOnlyWhenUnset locks az-6ev's citywide
+// convenience knob: [agent_defaults] mouse_mode fills an agent that leaves
+// mouse_mode unset, but never overrides an agent that set its own value. This
+// mirrors the Provider default fan-out and extends the ga-xr5o0 mouse-mode gate
+// (a durable per-agent opt-out the city can default on).
+func TestAgentDefaultsMouseMode_FansOutOnlyWhenUnset(t *testing.T) {
+	cfg := &City{
+		Agents: []Agent{
+			{Name: "inherits"},                  // unset → takes the default
+			{Name: "explicit", MouseMode: "on"}, // explicit → keeps its own value
+		},
+		AgentDefaults: AgentDefaults{
+			MouseMode: "off",
+		},
+	}
+	ApplyAgentDefaults(cfg)
+
+	if got := cfg.Agents[0].MouseMode; got != "off" {
+		t.Errorf("unset agent MouseMode = %q, want off (default fans out)", got)
+	}
+	if got := cfg.Agents[1].MouseMode; got != "on" {
+		t.Errorf("explicit agent MouseMode = %q, want on (explicit value must win over default)", got)
+	}
+}
+
+// TestAgentDefaultsMouseMode_ControlDispatcherSkipped confirms the citywide
+// mouse_mode default does not bleed onto the control-dispatcher, matching the
+// Provider default's skip (control-dispatcher is headless/poll-safe).
+func TestAgentDefaultsMouseMode_ControlDispatcherSkipped(t *testing.T) {
+	cfg := &City{
+		Daemon: DaemonConfig{FormulaV2: true},
+		AgentDefaults: AgentDefaults{
+			MouseMode: "off",
+		},
+	}
+	InjectImplicitAgents(cfg)
+	ApplyAgentDefaults(cfg)
+
+	for _, a := range cfg.Agents {
+		if a.Name == ControlDispatcherAgentName {
+			if a.MouseMode != "" {
+				t.Fatalf("control-dispatcher MouseMode = %q, want empty (skipped)", a.MouseMode)
+			}
+			return
+		}
+	}
+	t.Fatal("control-dispatcher agent not found")
+}
+
 func TestAgentDefaultsProvider_BeatsWorkspaceProviderForExplicitAgent(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
