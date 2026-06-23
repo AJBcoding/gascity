@@ -379,6 +379,53 @@ func TestDoStartSession_SessionLiveMouseOnSkipsReassert(t *testing.T) {
 	}
 }
 
+// TestRunSessionLive_ReconcileReassertsMouseOff locks the reconcile half of
+// az-6ev: Provider.RunLive calls runSessionLive directly on every live drift,
+// so the opt-out (MouseOn=false) must re-assert mouse-off AFTER the theme's
+// session_live mouse-on, exactly like the create path does. This guards the
+// path doStartSession's create-time test does not cover.
+func TestRunSessionLive_ReconcileReassertsMouseOff(t *testing.T) {
+	ops := &fakeStartOps{}
+	cfg := runtime.Config{
+		SessionLive: []string{"tmux set-option -t test mouse on"},
+		// MouseOn defaults false: explicit per-agent mouse_mode="off".
+	}
+
+	runSessionLive(context.Background(), ops, "test", cfg, io.Discard, DefaultConfig().SetupTimeout)
+
+	liveIdx, lastDisable := -1, -1
+	for i, c := range ops.calls {
+		if c.method == "runSetupCommand" && c.command == "tmux set-option -t test mouse on" {
+			liveIdx = i
+		}
+		if c.method == "disableMouseAndActivity" {
+			lastDisable = i
+		}
+	}
+	if liveIdx < 0 {
+		t.Fatalf("session_live command never ran; calls = %v", ops.callMethods())
+	}
+	if lastDisable < liveIdx {
+		t.Fatalf("reconcile did not re-assert mouse-off after session_live; calls = %v", ops.callMethods())
+	}
+}
+
+// TestRunSessionLive_ReconcileMouseOnSkipsReassert confirms the reconcile path
+// never disables mouse for a default-on (copy-mode scrollback) session (ga-c4w).
+func TestRunSessionLive_ReconcileMouseOnSkipsReassert(t *testing.T) {
+	ops := &fakeStartOps{}
+	cfg := runtime.Config{
+		SessionLive: []string{"tmux set-option -t test mouse on"},
+		MouseOn:     true,
+	}
+
+	runSessionLive(context.Background(), ops, "test", cfg, io.Discard, DefaultConfig().SetupTimeout)
+
+	if containsMethod(ops.callMethods(), "disableMouseAndActivity") {
+		t.Fatalf("reconcile disabled mouse with MouseOn=true; calls = %v", ops.callMethods())
+	}
+}
+
 func TestEnsureInstanceTokenReturnsErrorWhenReaderFails(t *testing.T) {
 	oldReader := instanceTokenReader
 	instanceTokenReader = errReader{}
