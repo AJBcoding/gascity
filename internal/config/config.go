@@ -2852,6 +2852,11 @@ type AgentDefaults struct {
 	// WakeMode is the parsed/composed default wake mode ("resume" or
 	// "fresh"), but it is not yet auto-applied at runtime.
 	WakeMode string `toml:"wake_mode,omitempty" jsonschema:"enum=resume,enum=fresh"`
+	// MouseMode is the citywide default tmux mouse mode ("on" or "off") for
+	// agents that do not set their own mouse_mode. az-6ev: a convenience knob so
+	// an operator can opt a whole city out of tmux mouse mode in one place;
+	// per-agent mouse_mode still wins.
+	MouseMode string `toml:"mouse_mode,omitempty" jsonschema:"enum=on,enum=off"`
 	// DefaultSlingFormula is the default formula used for agents that inherit
 	// [agent_defaults]. Explicit agents only receive this value when
 	// agent_defaults.default_sling_formula is set; implicit multi-session
@@ -2891,6 +2896,9 @@ func mergeAgentDefaultsAliasPreferCanonical(dst *AgentDefaults, src AgentDefault
 	}
 	if !meta.IsDefined("agent_defaults", "wake_mode") {
 		dst.WakeMode = src.WakeMode
+	}
+	if !meta.IsDefined("agent_defaults", "mouse_mode") {
+		dst.MouseMode = src.MouseMode
 	}
 	if !meta.IsDefined("agent_defaults", "default_sling_formula") {
 		dst.DefaultSlingFormula = src.DefaultSlingFormula
@@ -4190,6 +4198,21 @@ func ApplyAgentDefaults(cfg *City) {
 			}
 		}
 	}
+
+	// az-6ev: fill the citywide mouse_mode default onto agents that set no
+	// explicit mouse_mode, mirroring the Provider unset-fill above (and skipping
+	// the control dispatcher). Per-agent mouse_mode always wins.
+	mouseMode := cfg.AgentDefaults.MouseMode
+	if mouseMode != "" {
+		for i := range cfg.Agents {
+			if cfg.Agents[i].Name == ControlDispatcherAgentName {
+				continue
+			}
+			if cfg.Agents[i].MouseMode == "" {
+				cfg.Agents[i].MouseMode = mouseMode
+			}
+		}
+	}
 }
 
 // applyAgentSharedAttachmentDefaults preserves legacy derived attachment-list
@@ -4283,6 +4306,12 @@ func mergeAgentDefaults(dst *AgentDefaults, src AgentDefaults, label string, pro
 			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.wake_mode redefined by %q", label))
 		}
 		dst.WakeMode = src.WakeMode
+	}
+	if src.MouseMode != "" {
+		if prov != nil && dst.MouseMode != "" && dst.MouseMode != src.MouseMode {
+			prov.Warnings = append(prov.Warnings, fmt.Sprintf("agent_defaults.mouse_mode redefined by %q", label))
+		}
+		dst.MouseMode = src.MouseMode
 	}
 	if src.DefaultSlingFormula != "" {
 		if prov != nil && dst.DefaultSlingFormula != "" && dst.DefaultSlingFormula != src.DefaultSlingFormula {

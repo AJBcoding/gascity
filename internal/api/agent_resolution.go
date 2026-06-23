@@ -32,6 +32,20 @@ func resolveSessionTemplateAgent(cfg *config.City, input string) (config.Agent, 
 	return config.Agent{}, false
 }
 
+// sessionTemplateMouseModeOff reports whether the agent template resolves to an
+// explicit mouse_mode="off" opt-out. az-6ev: threaded into sessionCreateHints so
+// the opt-out is durable on the API session-create seams.
+func (s *Server) sessionTemplateMouseModeOff(template string) bool {
+	cfg := s.state.Config()
+	if cfg == nil {
+		return false
+	}
+	if agentCfg, ok := resolveSessionTemplateAgent(cfg, template); ok {
+		return agentCfg.MouseMode == "off"
+	}
+	return false
+}
+
 func findUniqueAgentTemplateByBareName(cfg *config.City, input string) (config.Agent, bool) {
 	if strings.Contains(input, "/") {
 		return config.Agent{}, false

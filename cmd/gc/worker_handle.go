@@ -94,7 +94,7 @@ func workerSessionRuntimeResolverWithConfig(cityPath string, cfg *config.City) w
 	}
 }
 
-func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config {
+func workerSessionCreateHints(resolved *config.ResolvedProvider, mouseMode string) runtime.Config {
 	if resolved == nil {
 		return runtime.Config{}
 	}
@@ -110,8 +110,9 @@ func workerSessionCreateHints(resolved *config.ResolvedProvider) runtime.Config 
 		// mouse-on so the tmux wheel drives copy-mode scrollback. Pool/headless
 		// agents never reach this function — they resolve MouseOn via the
 		// reconciler's templateParamsToConfig (cfgAgent.MouseModeOn()=false), so
-		// this does not weaken controller-poll safety.
-		MouseOn: true,
+		// this does not weaken controller-poll safety. az-6ev: an explicit
+		// per-agent mouse_mode="off" still wins here so the opt-out is durable.
+		MouseOn: mouseMode != "off",
 	}
 }
 
@@ -219,6 +220,12 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 	if err != nil {
 		return nil, err
 	}
+	// az-6ev: thread the agent's explicit mouse_mode so a per-agent "off" opt-out
+	// is durable on this unmanaged direct-start seam.
+	mouseMode := ""
+	if agentCfg := findAgentByTemplate(cfg, template); agentCfg != nil {
+		mouseMode = agentCfg.MouseMode
+	}
 	sessionCfg, err := resolvedWorkerSessionConfigWithConfig(
 		cityPath,
 		command,
@@ -232,6 +239,7 @@ func newWorkerSessionHandleForResolvedRuntimeWithConfig(
 		resolved,
 		metadata,
 		mcpServers,
+		mouseMode,
 	)
 	if err != nil {
 		return nil, err
@@ -252,6 +260,7 @@ func resolvedWorkerSessionConfigWithConfig(
 	resolved *config.ResolvedProvider,
 	metadata map[string]string,
 	mcpServers []runtime.MCPServerConfig,
+	mouseMode string,
 ) (worker.ResolvedSessionConfig, error) {
 	if resolved == nil {
 		return worker.ResolvedSessionConfig{}, fmt.Errorf("resolved provider is required")
@@ -314,7 +323,7 @@ func resolvedWorkerSessionConfigWithConfig(
 				SessionIDFlag: resolved.SessionIDFlag,
 			},
 			Hints: func() runtime.Config {
-				hints := workerSessionCreateHints(resolved)
+				hints := workerSessionCreateHints(resolved, mouseMode)
 				hints.Env = sessionEnv
 				hints.MCPServers = mcpServers
 				return hints

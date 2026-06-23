@@ -1085,6 +1085,19 @@ func runSessionLive(ctx context.Context, ops startOps, name string, cfg runtime.
 			_, _ = fmt.Fprintf(stderr, "gc: session_live[%d] warning: %v\n", i, err)
 		}
 	}
+
+	// az-6ev: re-assert mouse-off AFTER session_live so an explicit per-agent
+	// mouse_mode="off" wins durably. Themes (e.g. gastown) set "mouse on" inside
+	// session_live, which runs at create and re-runs on every live reconcile; the
+	// early disableMouseAndActivity at create happens BEFORE session_live and is
+	// otherwise clobbered. Scoped to the session_live path (the only force-on
+	// seam after the early disable) and gated on !cfg.MouseOn so default mouse-on
+	// (copy-mode scrollback) sessions, including unconfigured manual ones, are
+	// never touched (ga-c4w). Runs on both the create path (runSessionLive call
+	// after the startup nudge) and every reconcile (Provider.RunLive).
+	if !cfg.MouseOn {
+		_ = ops.disableMouseAndActivity(name)
+	}
 }
 
 // runPreStart runs pre_start commands before session creation.

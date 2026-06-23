@@ -68,7 +68,7 @@ func (s *Server) sessionLogPaths() []string {
 	return worker.MergeSearchPaths(cfg.Daemon.ObservePaths)
 }
 
-func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig) runtime.Config {
+func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, mouseModeOff bool) runtime.Config {
 	return runtime.Config{
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
 		ReadyPromptPrefix:      resolved.ReadyPromptPrefix,
@@ -83,8 +83,9 @@ func sessionCreateHints(resolved *config.ResolvedProvider, sessionEnv map[string
 		// copy-mode scrollback. Agent-kind sessions can also flow through here,
 		// but they are CreateModeDeferred and re-resolved mouse-off by the
 		// reconciler, so this unconditional default never enables mouse on a
-		// polled agent (ga-c4w).
-		MouseOn:    true,
+		// polled agent (ga-c4w). az-6ev: an explicit per-agent mouse_mode="off"
+		// (mouseModeOff) still wins here so the opt-out is durable.
+		MouseOn:    !mouseModeOff,
 		Env:        sessionEnv,
 		MCPServers: mcpServers,
 	}
@@ -111,7 +112,7 @@ func legacySessionKind(metadata map[string]string) string {
 // never routes through template_resolve.go), so an unconditional MouseOn=true
 // leaked mouse-on onto resumed pool agents and broke ga-c4w's controller-poll
 // -safety invariant (regression ga-g7go).
-func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, interactive bool) runtime.Config {
+func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessionEnv map[string]string, mcpServers []runtime.MCPServerConfig, interactive bool, mouseModeOff bool) runtime.Config {
 	return runtime.Config{
 		WorkDir:                workDir,
 		Lifecycle:              runtime.Lifecycle(resolved.Lifecycle),
@@ -120,9 +121,11 @@ func sessionResumeHints(resolved *config.ResolvedProvider, workDir string, sessi
 		ProcessNames:           resolved.ProcessNames,
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   resolved.AcceptStartupDialogs,
-		MouseOn:                interactive,
-		Env:                    sessionEnv,
-		MCPServers:             mcpServers,
+		// az-6ev: an explicit per-agent mouse_mode="off" wins even on an
+		// interactive human-attached resume, so the opt-out survives suspend/resume.
+		MouseOn:    interactive && !mouseModeOff,
+		Env:        sessionEnv,
+		MCPServers: mcpServers,
 	}
 }
 
@@ -324,7 +327,7 @@ func (s *Server) resolveSessionTemplate(template string) (*config.ResolvedProvid
 func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, error) {
 	cmd := session.BuildResumeCommand(info)
 	metadata := s.sessionMetadata(info.ID)
-	resolved, workDir, transport, ambiguous := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	resolved, workDir, transport, ambiguous, mouseModeOff := s.resolveSessionRuntimeWithMetadata(info, metadata)
 	if resolved == nil {
 		return cmd, runtime.Config{WorkDir: info.WorkDir}, nil
 	}
@@ -353,7 +356,7 @@ func (s *Server) buildSessionResume(info session.Info) (string, runtime.Config, 
 	resolvedInfo.ResumeStyle = resolved.ResumeStyle
 	resolvedInfo.ResumeCommand = resumeCommand
 	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
-	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata)), nil
+	return session.BuildResumeCommand(resolvedInfo), sessionResumeHints(resolved, workDir, sessionEnv, mcpServers, sessionResumeInteractive(metadata), mouseModeOff), nil
 }
 
 func (s *Server) resolvedSessionRuntimeCommand(resolved *config.ResolvedProvider, transport, storedCommand string, metadata map[string]string) (string, error) {
@@ -449,7 +452,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 	if metadata == nil {
 		metadata = s.sessionMetadata(info.ID)
 	}
-	resolved, workDir, transport, ambiguous := s.resolveSessionRuntimeWithMetadata(info, metadata)
+	resolved, workDir, transport, ambiguous, mouseModeOff := s.resolveSessionRuntimeWithMetadata(info, metadata)
 	if resolved == nil {
 		return nil, nil
 	}
@@ -476,7 +479,7 @@ func (s *Server) resolveWorkerSessionRuntimeWithMetadata(info session.Info, _ st
 		WorkDir:    firstNonEmptyString(info.WorkDir, workDir),
 		Provider:   firstNonEmptyString(info.Provider, resolved.Name),
 		SessionEnv: sessionEnv,
-		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata)),
+		Hints:      sessionResumeHints(resolved, firstNonEmptyString(workDir, info.WorkDir), sessionEnv, mcpServers, sessionResumeInteractive(metadata), mouseModeOff),
 		Resume: session.ProviderResume{
 			ResumeFlag:    firstNonEmptyString(resolved.ResumeFlag, info.ResumeFlag),
 			ResumeStyle:   firstNonEmptyString(resolved.ResumeStyle, info.ResumeStyle),
@@ -607,16 +610,22 @@ func resolvedSessionTransport(info session.Info, resolved *config.ResolvedProvid
 	return ""
 }
 
-func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata map[string]string) (*config.ResolvedProvider, string, string, bool) {
+func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata map[string]string) (*config.ResolvedProvider, string, string, bool, bool) {
 	cfg := s.state.Config()
 	var (
 		resolved            *config.ResolvedProvider
 		workDir             string
 		configuredTransport string
+		// az-6ev: preserve the resolved agent's explicit mouse_mode="off" so the
+		// resume seam can keep the opt-out durable across suspend/resume.
+		mouseModeOff bool
 	)
 	if cfg != nil {
 		agentCfg, agentFound := resolveSessionTemplateAgent(cfg, info.Template)
 		sessionKind := legacySessionKind(metadata)
+		if agentFound {
+			mouseModeOff = agentCfg.MouseMode == "off"
+		}
 		if session.UseAgentTemplateForProviderResolution(sessionKind, metadata, info.Provider, agentCfg.Provider, agentFound) {
 			if agentFound {
 				candidate, err := config.ResolveProvider(&agentCfg, &cfg.Workspace, cfg.Providers, exec.LookPath)
@@ -641,7 +650,7 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 		}
 		candidate, err := s.resolveBareProvider(providerName)
 		if err != nil {
-			return nil, "", "", false
+			return nil, "", "", false, false
 		}
 		resolved = candidate
 		workDir = info.WorkDir
@@ -654,7 +663,7 @@ func (s *Server) resolveSessionRuntimeWithMetadata(info session.Info, metadata m
 	if transport == "" && s.startedConfigHashProvesACPTransport(info, metadata, resolved, workDir, configuredTransport, legacySessionKind(metadata)) {
 		transport = "acp"
 	}
-	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata)
+	return resolved, workDir, transport, transport == "" && legacyACPTransportAmbiguous(resolved, configuredTransport, info.Command, metadata), mouseModeOff
 }
 
 // resolveBareProvider resolves a provider by name without an agent template.

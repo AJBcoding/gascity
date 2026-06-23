@@ -459,6 +459,7 @@ func TestResolvedWorkerSessionConfigWithConfigSeedsCityAnchorsOnCreatePath(t *te
 		&config.ResolvedProvider{Name: "claude"},
 		map[string]string{"session_origin": "test"},
 		nil,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
@@ -505,6 +506,7 @@ func TestResolvedWorkerSessionConfigWithConfigIncludesProviderAuthPassthrough(t 
 		&config.ResolvedProvider{Name: "claude"},
 		map[string]string{"session_origin": "test"},
 		nil,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
@@ -1554,6 +1556,7 @@ func TestResolvedWorkerSessionConfigWithConfigFallsBackToResolvedProviderNameFor
 		},
 		map[string]string{"session_origin": "test"},
 		nil,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
@@ -1580,6 +1583,7 @@ func TestResolvedWorkerSessionConfigWithConfigFallsBackToProviderArgForCommand(t
 		&config.ResolvedProvider{},
 		nil,
 		nil,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
@@ -1616,6 +1620,7 @@ func TestResolvedWorkerSessionConfigWithConfigPersistsStoredMCPMetadata(t *testi
 			Command:   "/bin/mcp",
 			Args:      []string{"--stdio"},
 		}},
+		"",
 	)
 	if err != nil {
 		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
@@ -1647,6 +1652,7 @@ func TestResolvedWorkerSessionConfigWithConfigSkipsStoredMCPMetadataForTmuxTrans
 			"agent_name":     "myrig/worker-adhoc-123",
 		},
 		nil,
+		"",
 	)
 	if err != nil {
 		t.Fatalf("resolvedWorkerSessionConfigWithConfig: %v", err)
@@ -2347,8 +2353,17 @@ func TestWorkerSessionRuntimeResolverWithConfigFallsBackToPersistedProviderWhenC
 // via the reconciler's templateParamsToConfig (guarded by
 // TestResolveTemplateHeadlessAgentStaysMouseOff), so this stays poll-safe.
 func TestWorkerSessionCreateHintsEnablesMouse(t *testing.T) {
-	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"})
+	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"}, "")
 	if !hints.MouseOn {
 		t.Error("workerSessionCreateHints().MouseOn = false, want true (gc session new unmanaged-direct wheel→scrollback, ga-c4w)")
+	}
+}
+
+// TestWorkerSessionCreateHintsExplicitOffWins locks az-6ev: an explicit per-agent
+// mouse_mode="off" disables mouse even on the unmanaged direct-start CLI seam.
+func TestWorkerSessionCreateHintsExplicitOffWins(t *testing.T) {
+	hints := workerSessionCreateHints(&config.ResolvedProvider{Name: "stub"}, "off")
+	if hints.MouseOn {
+		t.Error("workerSessionCreateHints(.., \"off\").MouseOn = true, want false (explicit opt-out, az-6ev)")
 	}
 }

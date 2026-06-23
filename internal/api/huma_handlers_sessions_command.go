@@ -153,6 +153,7 @@ func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCrea
 			command,
 			workDir,
 			mcpServers,
+			s.sessionTemplateMouseModeOff(template),
 		)
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
@@ -322,7 +323,7 @@ func (s *Server) humaCreateProviderSession(_ context.Context, store beads.Store,
 	}
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionCreate)
-		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers)
+		resolvedCfg, cfgErr := resolvedSessionConfigForProvider(s.state.CityPath(), alias, "", template, title, transport, extraMeta, resolved, command, workDir, mcpServers, s.sessionTemplateMouseModeOff(template))
 		if cfgErr != nil {
 			s.emitSessionCreateFailed(reqID, "create_failed", cfgErr.Error())
 			return

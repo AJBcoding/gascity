@@ -15,6 +15,7 @@ var agentDefaultsCompatibilityOverlapKeys = []string{
 	"provider",
 	"model",
 	"wake_mode",
+	"mouse_mode",
 	"default_sling_formula",
 	"allow_overlay",
 	"allow_env_override",

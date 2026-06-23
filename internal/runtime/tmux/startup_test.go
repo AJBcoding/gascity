@@ -315,6 +315,70 @@ func TestDoStartSession_MouseOnSkipsDisable(t *testing.T) {
 	}
 }
 
+// TestDoStartSession_SessionLiveReassertsMouseOff locks az-6ev: when an agent
+// opts out (MouseOn=false) and a theme sets "mouse on" inside session_live, the
+// runtime re-asserts mouse-off AFTER running session_live so the opt-out is
+// durable on create and on every reconcile. The re-assert must be the LAST
+// disableMouseAndActivity call (after the session_live runSetupCommand) so it
+// wins over the theme.
+func TestDoStartSession_SessionLiveReassertsMouseOff(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+
+	cfg := runtime.Config{
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		SessionLive:  []string{"tmux set-option -t test mouse on"},
+		// MouseOn defaults false: explicit per-agent mouse_mode="off".
+	}
+
+	if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	methods := ops.callMethods()
+	liveIdx := -1
+	for i, c := range ops.calls {
+		if c.method == "runSetupCommand" && c.command == "tmux set-option -t test mouse on" {
+			liveIdx = i
+		}
+	}
+	if liveIdx < 0 {
+		t.Fatalf("session_live command never ran; calls = %v", methods)
+	}
+	// The final disableMouseAndActivity must come AFTER the session_live mouse-on.
+	lastDisable := -1
+	for i, c := range ops.calls {
+		if c.method == "disableMouseAndActivity" {
+			lastDisable = i
+		}
+	}
+	if lastDisable < liveIdx {
+		t.Fatalf("mouse-off not re-asserted after session_live; calls = %v", methods)
+	}
+}
+
+// TestDoStartSession_SessionLiveMouseOnSkipsReassert locks the ga-c4w guard: a
+// default mouse-on session (MouseOn=true) with session_live commands is NEVER
+// forced mouse-off, so copy-mode scrollback survives.
+func TestDoStartSession_SessionLiveMouseOnSkipsReassert(t *testing.T) {
+	ops := &fakeStartOps{hasSessionResult: true}
+
+	cfg := runtime.Config{
+		Command:      "claude",
+		ProcessNames: []string{"claude"},
+		SessionLive:  []string{"tmux set-option -t test mouse on"},
+		MouseOn:      true,
+	}
+
+	if err := doStartSession(context.Background(), ops, "test", cfg, DefaultConfig().SetupTimeout); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if containsMethod(ops.callMethods(), "disableMouseAndActivity") {
+		t.Fatalf("disableMouseAndActivity called with MouseOn=true; calls = %v", ops.callMethods())
+	}
+}
+
 func TestEnsureInstanceTokenReturnsErrorWhenReaderFails(t *testing.T) {
 	oldReader := instanceTokenReader
 	instanceTokenReader = errReader{}

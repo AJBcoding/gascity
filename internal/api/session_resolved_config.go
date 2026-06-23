@@ -15,6 +15,7 @@ func resolvedSessionConfigForProvider(
 	resolved *config.ResolvedProvider,
 	command, workDir string,
 	mcpServers []runtime.MCPServerConfig,
+	mouseModeOff bool,
 ) (worker.ResolvedSessionConfig, error) {
 	if resolved == nil {
 		return worker.ResolvedSessionConfig{}, fmt.Errorf("%w: resolved provider is required", worker.ErrHandleConfig)
@@ -55,7 +56,7 @@ func resolvedSessionConfigForProvider(
 				ResumeCommand: resolved.ResumeCommand,
 				SessionIDFlag: resolved.SessionIDFlag,
 			},
-			Hints: sessionCreateHints(resolved, sessionEnv, mcpServers),
+			Hints: sessionCreateHints(resolved, sessionEnv, mcpServers, mouseModeOff),
 		},
 	})
 }

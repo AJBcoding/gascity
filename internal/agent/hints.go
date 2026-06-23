@@ -16,6 +16,10 @@ type StartupHints struct {
 	AcceptStartupDialogs   *bool
 	// MouseOn reports whether tmux mouse mode should be preserved for this session.
 	MouseOn bool
+	// MouseModeOff signals an explicit per-agent mouse_mode="off". Unlike the
+	// absence of MouseOn (which is also the unset default), this distinguishes a
+	// deliberate opt-out so it can win over force-on seams (e.g. manual origin).
+	MouseModeOff bool
 	// Nudge is text typed into the session after the agent is ready.
 	// Used for CLI agents that don't accept command-line prompts.
 	Nudge string

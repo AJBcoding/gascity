@@ -585,6 +585,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		EmitsPermissionWarning: resolved.EmitsPermissionWarning,
 		AcceptStartupDialogs:   acceptStartupDialogs,
 		MouseOn:                cfgAgent.MouseModeOn(),
+		MouseModeOff:           cfgAgent.MouseMode == "off",
 		Nudge:                  nudge,
 		PreStart:               expandedPreStart,
 		SessionSetup:           expandedSetup,
@@ -801,7 +802,7 @@ func templateParamsToConfig(tp TemplateParams) runtime.Config {
 		// long-lived config-declared/named sessions would force a one-time drift
 		// restart — they follow their resolved Hints.MouseOn (mouse_mode) instead.
 		// Ephemeral pool agents are likewise mouse-off (controller-poll safety).
-		MouseOn:             tp.Hints.MouseOn || templateParamsSessionOrigin(tp) == "manual",
+		MouseOn:             tp.Hints.MouseOn || (!tp.Hints.MouseModeOff && templateParamsSessionOrigin(tp) == "manual"),
 		Nudge:               nudge,
 		PreStart:            tp.Hints.PreStart,
 		SessionSetup:        tp.Hints.SessionSetup,

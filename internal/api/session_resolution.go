@@ -333,7 +333,7 @@ func (s *Server) materializeNamedSessionWithContext(ctx context.Context, store b
 		}
 	}
 	sessionEnv := cityAnchoredSessionEnv(s.state.CityPath(), resolved.Env)
-	hints := sessionCreateHints(resolved, sessionEnv, mcpServers)
+	hints := sessionCreateHints(resolved, sessionEnv, mcpServers, spec.Agent.MouseMode == "off")
 	var info session.Info
 	err = session.WithCitySessionIdentifierLocks(s.state.CityPath(), []string{spec.Identity, spec.SessionName}, func() error {
 		if err := session.EnsureAliasAvailableWithConfigForOwner(store, s.state.Config(), spec.Identity, "", spec.Identity); err != nil {

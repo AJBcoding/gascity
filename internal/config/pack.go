@@ -1718,6 +1718,13 @@ func applyInheritedPackAgentDefaults(agents []Agent, defaults AgentDefaults) {
 		if defaults.DefaultSlingFormula != "" && agents[i].DefaultSlingFormula == nil && agents[i].InheritedDefaultSlingFormula == nil {
 			agents[i].InheritedDefaultSlingFormula = copyStringPtr(&defaults.DefaultSlingFormula)
 		}
+		// az-6ev: propagate a pack [agent_defaults] mouse_mode onto agents that
+		// set none. MouseMode is a plain scalar (no Inherited variant), so fill it
+		// directly; inside-out compose means the first writer wins and an explicit
+		// per-agent mouse_mode is never overwritten.
+		if defaults.MouseMode != "" && agents[i].MouseMode == "" {
+			agents[i].MouseMode = defaults.MouseMode
+		}
 		if len(defaults.AppendFragments) > 0 {
 			agents[i].InheritedAppendFragments = appendUnique(agents[i].InheritedAppendFragments, defaults.AppendFragments...)
 		}
