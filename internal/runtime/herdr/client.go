@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -432,18 +433,41 @@ func (c *client) socketPath() string {
 	return filepath.Join(home, ".config", "herdr", "sessions", c.session, "herdr.sock")
 }
 
-// serverRunning reports whether the session-server socket is present.
-func (c *client) serverRunning() bool {
-	fi, err := os.Stat(c.socketPath())
-	return err == nil && fi.Mode()&os.ModeSocket != 0
+// serverAlive reports whether the session-server is actually accepting
+// connections on its socket. A bare os.Stat is insufficient: a herdr server
+// that exits uncleanly leaves its socket inode behind — and herdr's own
+// `session stop` can't remove it, since that too needs a live server to reach —
+// so the stale socket answers connects with ECONNREFUSED. Presence != liveness;
+// dial to find out for real.
+func (c *client) serverAlive() bool {
+	conn, err := net.DialTimeout("unix", c.socketPath(), 500*time.Millisecond)
+	if err != nil {
+		return false
+	}
+	_ = conn.Close()
+	return true
+}
+
+// removeStaleSocket unlinks the socket inode when it exists but nothing live is
+// listening, so a freshly launched server can bind. Guard with serverAlive
+// first — only call once liveness has already returned false.
+func (c *client) removeStaleSocket() {
+	if fi, err := os.Stat(c.socketPath()); err == nil && fi.Mode()&os.ModeSocket != 0 {
+		_ = os.Remove(c.socketPath())
+	}
 }
 
 // startServer launches the headless herdr server for this session (detached)
-// and waits for its socket. Idempotent — no-op if already running.
+// and waits for it to accept connections. Idempotent — no-op if already live.
 func (c *client) startServer() error {
-	if c.serverRunning() {
+	if c.serverAlive() {
 		return nil
 	}
+	// A prior server may have died leaving a stale socket inode; serverAlive
+	// just confirmed nothing live owns it, so clear it before launch or herdr
+	// cannot bind — the exact failure that stranded provider swaps (agent list
+	// → ECONNREFUSED → swap aborted → pool polecats stuck start-pending).
+	c.removeStaleSocket()
 	devnull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
 		return fmt.Errorf("herdr server: open devnull: %w", err)
@@ -462,7 +486,7 @@ func (c *client) startServer() error {
 	}
 	_ = cmd.Process.Release() // detach; herdr owns the daemon lifetime
 	for i := 0; i < 40; i++ {
-		if c.serverRunning() {
+		if c.serverAlive() {
 			return nil
 		}
 		time.Sleep(250 * time.Millisecond)
