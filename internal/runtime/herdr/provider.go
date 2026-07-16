@@ -100,6 +100,18 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err != nil {
 		return fmt.Errorf("herdr: start %q: %w", name, err)
 	}
+	// Seed the metadata sidecar from cfg.Env NOW, before the (long) startup
+	// delivery below. tmux gets this for free — its GetMeta reads the tmux
+	// session environment, which new-session initializes from cfg.Env — but
+	// herdr's meta store is a sidecar populated only by SetMeta. The reconciler's
+	// pending-create ownership check (runningSessionMatchesPendingCreateInfo)
+	// reads GC_SESSION_ID / GC_INSTANCE_TOKEN via GetMeta on ticks that fire
+	// while Start is still waiting for the agent to idle; with an unseeded
+	// sidecar it misreads the fresh runtime as "live runtime belongs to another
+	// session" and reaps it seconds after a successful start.
+	if err := p.seedMetaFromEnv(name, cfg.Env); err != nil {
+		return fmt.Errorf("herdr: seed session metadata for %q: %w", name, err)
+	}
 	// herdr auto-spawns a stray shell pane when it creates a workspace/tab; close
 	// it so the tab holds only the agent.
 	if strayPane != "" && strayPane != info.PaneID {
@@ -216,8 +228,19 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	c := exec.CommandContext(ctx, "sh", "-c", cmd)
+	// cwd from GC_DIR when it exists; otherwise fall back to the city root —
+	// the same not-yet-created-workDir fallback effectiveWorkDir applies to the
+	// agent itself. A pool session's worktree is often created concurrently with
+	// (or by) pre_start, so chdir'ing into it unconditionally fails fast with
+	// "chdir ... no such file" on resume-path starts that run before the
+	// worktree lands. The injected pre_start commands carry their target as an
+	// explicit --workdir flag and do not depend on cwd.
 	if workDir := strings.TrimSpace(env["GC_DIR"]); workDir != "" {
-		c.Dir = workDir
+		if _, err := os.Stat(workDir); err == nil {
+			c.Dir = workDir
+		} else if p.c.cityRoot != "" {
+			c.Dir = p.c.cityRoot
+		}
 	}
 	c.Env = os.Environ()
 	for k, v := range env {
@@ -401,6 +424,21 @@ func (p *Provider) CopyTo(name, src, relDst string) error {
 }
 
 // ── metadata sidecar (herdr has no per-session KV) ───────────────────────────
+
+// seedMetaFromEnv initializes the session's metadata sidecar from cfg.Env,
+// mirroring tmux's contract where the session environment (seeded from cfg.Env
+// at creation) doubles as the GetMeta store. Ownership/identity keys like
+// GC_SESSION_ID and GC_INSTANCE_TOKEN must be readable via GetMeta from the
+// moment the runtime is alive. Later SetMeta calls override individual keys,
+// exactly as tmux setenv does.
+func (p *Provider) seedMetaFromEnv(name string, env map[string]string) error {
+	for k, v := range env {
+		if err := p.SetMeta(name, k, v); err != nil {
+			return fmt.Errorf("meta %q: %w", k, err)
+		}
+	}
+	return nil
+}
 
 // SetMeta writes a per-session metadata value to the sidecar store (herdr has
 // no per-session KV).

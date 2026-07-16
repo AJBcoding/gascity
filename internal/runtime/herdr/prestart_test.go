@@ -133,3 +133,25 @@ func TestNewDefaultsSetupTimeout(t *testing.T) {
 		t.Errorf("runPreStart with defaulted timeout = %v, want nil", err)
 	}
 }
+
+// A pre_start whose GC_DIR doesn't exist yet must not fail on chdir — the
+// worktree is often created concurrently with (or by) pre_start itself. The
+// command runs with cwd falling back to the city root instead.
+func TestRunPreStartToleratesMissingGCDir(t *testing.T) {
+	cityRoot := t.TempDir()
+	p := New("gctest-prestart-missing", t.TempDir(), cityRoot, 10*time.Second)
+	cfg := runtime.Config{
+		Env:      map[string]string{"GC_DIR": filepath.Join(cityRoot, "does", "not", "exist")},
+		PreStart: []string{"pwd > cwd.txt"},
+	}
+	if err := p.runPreStart(context.Background(), cfg); err != nil {
+		t.Fatalf("runPreStart with missing GC_DIR = %v, want nil (cwd fallback)", err)
+	}
+	got, err := os.ReadFile(filepath.Join(cityRoot, "cwd.txt"))
+	if err != nil {
+		t.Fatalf("expected fallback cwd = cityRoot: %v", err)
+	}
+	if !strings.HasSuffix(strings.TrimSpace(string(got)), strings.TrimPrefix(cityRoot, "/private")) {
+		t.Errorf("cwd = %q, want cityRoot %q", strings.TrimSpace(string(got)), cityRoot)
+	}
+}
