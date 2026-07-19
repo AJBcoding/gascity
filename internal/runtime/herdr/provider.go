@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
 	"github.com/gastownhall/gascity/internal/shellquote"
 )
 
@@ -109,6 +110,13 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// while Start is still waiting for the agent to idle; with an unseeded
 	// sidecar it misreads the fresh runtime as "live runtime belongs to another
 	// session" and reaps it seconds after a successful start.
+	//
+	// Seeding the whole env also persists GC_SESSION_ID, which ProcessAlive's
+	// session-scoped tree-walk widening reads (herdr does not capture the
+	// creation environment the way tmux does): process env survives reparenting
+	// (only ppid changes), so this is what lets the walk find the agent when it
+	// is no longer a descendant of the pane's shell/foreground PIDs. Stop clears
+	// the whole meta dir, so teardown is covered.
 	if err := p.seedMetaFromEnv(name, cfg.Env); err != nil {
 		return fmt.Errorf("herdr: seed session metadata for %q: %w", name, err)
 	}
@@ -315,6 +323,17 @@ func (p *Provider) Attach(name string) error {
 
 // ProcessAlive reports whether the agent's pane has a live foreground process,
 // optionally requiring one of processNames to be present.
+//
+// Foreground-process matching alone misses an agent that runs as a
+// descendant of a wrapper process rather than as the pane's foreground itself
+// — e.g. a mayor session launched under macOS `caffeinate` (a keep-awake
+// wrapper): caffeinate stays the pane's reported foreground for the agent's
+// entire lifetime, with the agent running underneath it as a child. That
+// foreground-only check reports Alive=false for a session that is very much
+// alive, which upstream (lifecycle_projection.go) reads as "runtime missing"
+// and drives an endless respawn loop. So: check the cheap foreground list
+// first, then fall back to a host process-table walk from the pane's shell
+// and foreground PIDs to catch a wanted name living deeper in the tree.
 func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 	ctx := context.Background()
 	pid, err := p.paneID(ctx, name)
@@ -335,7 +354,41 @@ func (p *Provider) ProcessAlive(name string, processNames []string) bool {
 			}
 		}
 	}
-	return false
+	sessionID, _ := p.GetMeta(name, "GC_SESSION_ID")
+	return processTreeAlive(shellPID, fg, processNames, strings.TrimSpace(sessionID))
+}
+
+// processTreeAlive is the descendant-walk fallback for ProcessAlive: it takes
+// a host-wide process snapshot and checks whether any process reachable from
+// the pane's shell PID or foreground PIDs matches one of processNames. When
+// sessionID is non-empty, every process in the snapshot carrying that
+// GC_SESSION_ID is also treated as a root — this widens the walk to find the
+// agent even when it has been reparented off the shell/foreground subtree,
+// since process env (unlike ppid) survives reparenting. Purely additive: it
+// never narrows the shell/foreground-rooted match, so a genuinely-dead agent
+// still reports false.
+var snapshotProcesses = proctable.SnapshotProcesses
+
+func processTreeAlive(shellPID int, fg []proc, processNames []string, sessionID string) bool {
+	records, err := snapshotProcesses()
+	if err != nil || len(records) == 0 {
+		return false
+	}
+	roots := make([]int, 0, len(fg)+1)
+	if shellPID != 0 {
+		roots = append(roots, shellPID)
+	}
+	for _, pr := range fg {
+		roots = append(roots, pr.PID)
+	}
+	if sessionID != "" {
+		for _, r := range records {
+			if r.SessionID == sessionID {
+				roots = append(roots, r.PID)
+			}
+		}
+	}
+	return proctable.DescendantAlive(records, roots, processNames)
 }
 
 // Nudge injects and submits text into a running agent's input.
