@@ -11,7 +11,7 @@ import (
 // (/var/folders/… on macOS) blows past the 104-byte unix-socket sun_path limit
 // once socketPath() appends .config/herdr/sessions/<name>/herdr.sock, so we root
 // under /tmp instead.
-func shortHome(t *testing.T) string {
+func shortHome(t *testing.T) {
 	t.Helper()
 	home, err := os.MkdirTemp("/tmp", "hdr")
 	if err != nil {
@@ -19,7 +19,6 @@ func shortHome(t *testing.T) string {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(home) })
 	t.Setenv("HOME", home)
-	return home
 }
 
 // A stale socket inode — left by a herdr server that exited uncleanly — must not
@@ -86,7 +85,7 @@ func TestServerAliveDetectsLiveServer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	go func() {
 		for {
 			conn, err := ln.Accept()

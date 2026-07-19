@@ -25,15 +25,17 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // client runs `herdr` CLI verbs against a named herdr session and decodes the
 // response envelope ({"id":…,"result":…} | {"id":…,"error":{code,message}}).
 type client struct {
-	session  string // herdr named session (shared per city)
-	bin      string // herdr binary (default "herdr")
-	cityRoot string // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
+	session  string     // herdr named session (shared per city)
+	bin      string     // herdr binary (default "herdr")
+	cityRoot string     // city root: the shared server's launch cwd, and the effectiveWorkDir fallback when a session's WorkDir doesn't exist yet (empty in city-less/standalone construction)
+	serverMu sync.Mutex // serializes startServer: serverAlive → removeStaleSocket → launch → readiness
 }
 
 func newClient(session, cityRoot string) *client {
@@ -460,6 +462,8 @@ func (c *client) removeStaleSocket() {
 // startServer launches the headless herdr server for this session (detached)
 // and waits for it to accept connections. Idempotent — no-op if already live.
 func (c *client) startServer() error {
+	c.serverMu.Lock()
+	defer c.serverMu.Unlock()
 	if c.serverAlive() {
 		return nil
 	}
