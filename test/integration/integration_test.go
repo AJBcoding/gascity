@@ -116,7 +116,7 @@ func TestMain(m *testing.M) {
 	// the lock, letting a concurrent sibling's sweep reclaim this still-
 	// active directory (ga-djbcqt). Cleanup below is explicit, not deferred:
 	// every exit path in this function calls os.Exit, which skips defers.
-	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp")
+	tmuxSocketParent, tmuxSentinel, tmuxParentErr := tmuxtest.NewSocketParentDir("/tmp", io.Discard)
 	tmuxSocketAliveSentinel = tmuxSentinel
 	tmuxSocketRoot := filepath.Join(tmpDir, "tmux")
 	if tmuxParentErr == nil {
