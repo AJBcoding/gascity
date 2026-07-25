@@ -1113,6 +1113,14 @@ func healthBeadsProviderContext(ctx context.Context, cityPath string, waitForSco
 	if cityUsesDoltliteBeadsBackend(cityPath) {
 		return nil
 	}
+	if scopeBackendIsExternalServer(cityPath, cityPath) {
+		// External server backends (postgres, mysql) have no gc-managed
+		// lifecycle to health-check or recover; the bundled bd lifecycle
+		// script's health op probes the managed Dolt server and would
+		// always fail here. Store reachability is covered by the doctor
+		// beads-store ping.
+		return nil
+	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
 		release, err := acquireProviderSemaphoreForOpContext(ctx, cityPath, "health")

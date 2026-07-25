@@ -4933,6 +4933,29 @@ esac
 	}
 }
 
+func TestHealthBeadsProviderSkipsProviderOpForMySQLCity(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"backend":"mysql","database":"beads.db","mysql_dsn":"root@tcp(127.0.0.1:3306)/","mysql_database":"anthony_beads"}`
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A dolt-centric lifecycle script whose health op always fails, standing
+	// in for the bundled bd pack script's dolt TCP check. An external-backend
+	// city has no managed lifecycle, so health must skip the script entirely.
+	script := filepath.Join(t.TempDir(), "gc-beads-bd")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\necho 'dolt server not reachable' >&2\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "exec:"+script)
+
+	if err := healthBeadsProvider(cityPath); err != nil {
+		t.Fatalf("healthBeadsProvider on mysql city = %v, want nil (no managed lifecycle to check)", err)
+	}
+}
+
 func TestHealthBeadsProviderWaitsForStorePingAfterRecovery(t *testing.T) {
 	cityPath := t.TempDir()
 	writeMinimalCityToml(t, cityPath)
