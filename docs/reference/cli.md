@@ -331,6 +331,7 @@ gc beads city
 |------------|-------------|
 | [gc beads city use-external](#gc-beads-city-use-external) | Set the city endpoint to an external Dolt server |
 | [gc beads city use-managed](#gc-beads-city-use-managed) | Set the city endpoint to GC-managed |
+| [gc beads city use-mysql](#gc-beads-city-use-mysql) | Point the city and its rigs at an external MySQL server |
 
 ## gc beads city use-external
 
@@ -359,6 +360,25 @@ gc beads city use-managed [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--dry-run` | bool |  | show the canonical changes without writing files |
+
+## gc beads city use-mysql
+
+Rewrite every bd-backed scope's metadata.json to the mysql backend.
+
+Each scope keeps its own database: an existing mysql_database (including the
+fork-era split-field shape, whose legacy mysql_host/port/user keys are
+scrubbed) or, failing that, the scope's dolt_database. The DSN is stored
+verbatim and passed through to bd; include no password (bd resolves
+BEADS_MYSQL_PASSWORD at runtime and never persists it).
+
+```
+gc beads city use-mysql [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | show the per-scope plan without writing files |
+| `--dsn` | string |  | MySQL DSN without database, e.g. "root@tcp(127.0.0.1:3306)/" |
 
 ## gc beads health
 
