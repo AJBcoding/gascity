@@ -1,0 +1,7 @@
+{
+  "database": "beads.db",
+  "backend": "mysql",
+  "mysql_dsn": "root@tcp(127.0.0.1:3306)/",
+  "mysql_database": "anthony_beads",
+  "dolt_database": "hq"
+}

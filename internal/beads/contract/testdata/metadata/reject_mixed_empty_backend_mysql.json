@@ -1,0 +1,5 @@
+{
+  "database": "beads",
+  "dolt_database": "hq",
+  "mysql_dsn": "root@tcp(127.0.0.1:3306)/"
+}

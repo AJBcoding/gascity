@@ -1,0 +1,7 @@
+{
+  "database": "beads.db",
+  "backend": "mysql",
+  "mysql_dsn": "root@tcp(127.0.0.1:3306)/",
+  "mysql_database": "anthony_beads",
+  "project_id": "c00d229c-42b8-419c-8df8-3e7db13ce0da"
+}
