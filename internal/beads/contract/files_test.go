@@ -1200,7 +1200,7 @@ func TestEnsureCanonicalMetadataPreservesUnknownKeysAndScrubsDeprecatedOnes(t *t
 	fs := fsys.OSFS{}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "metadata.json")
-	input := `{"backend":"legacy","database":"old","dolt_database":"legacydb","custom":"keep","dolt_host":"127.0.0.1","dolt_user":"legacy","dolt_password":"secret","dolt_server_host":"legacy.example.com","dolt_server_port":"3307","dolt_server_user":"legacy-user","dolt_port":"4406"}`
+	input := `{"backend":"legacy","database":"old","dolt_database":"legacydb","custom":"keep","dolt_host":"127.0.0.1","dolt_user":"legacy","dolt_password":"secret","dolt_server_host":"legacy.example.com","dolt_server_port":"3307","dolt_server_user":"legacy-user","dolt_port":"4406","mysql_host":"127.0.0.1","mysql_port":"3306","mysql_user":"root","mysql_password":"secret"}`
 	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -1229,7 +1229,7 @@ func TestEnsureCanonicalMetadataPreservesUnknownKeysAndScrubsDeprecatedOnes(t *t
 	if got := trimmedString(meta["custom"]); got != "keep" {
 		t.Fatalf("custom = %q, want %q", got, "keep")
 	}
-	for _, key := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port"} {
+	for _, key := range []string{"dolt_host", "dolt_user", "dolt_password", "dolt_server_host", "dolt_server_port", "dolt_server_user", "dolt_port", "mysql_host", "mysql_port", "mysql_user", "mysql_password"} {
 		if _, ok := meta[key]; ok {
 			t.Fatalf("metadata should not contain %q: %s", key, data)
 		}

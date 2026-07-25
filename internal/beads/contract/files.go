@@ -124,6 +124,13 @@ var deprecatedMetadataKeys = []string{
 	"dolt_server_port",
 	"dolt_server_user",
 	"dolt_port",
+	// Fork-era mysql metadata shape (zpriddy lineage). Upstream bd models
+	// the connection as mysql_dsn + mysql_database; the split host/port/user
+	// quartet is never read and a persisted password must be scrubbed.
+	"mysql_host",
+	"mysql_port",
+	"mysql_user",
+	"mysql_password",
 }
 
 var doltBackendKeys = []string{

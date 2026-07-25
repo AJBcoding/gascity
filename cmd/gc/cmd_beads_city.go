@@ -53,6 +53,7 @@ city to an external Dolt endpoint and rewrite inherited rig mirrors.`,
 	cmd.AddCommand(
 		newBeadsCityUseManagedCmd(stdout, stderr),
 		newBeadsCityUseExternalCmd(stdout, stderr),
+		newBeadsCityUseMySQLCmd(stdout, stderr),
 	)
 	return cmd
 }
