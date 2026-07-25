@@ -64,6 +64,73 @@ func TestPreflightRedactsPostgresDSN(t *testing.T) {
 	}
 }
 
+func TestPreflightBlocksNativeOnMetadataMySQL(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "mysql",
+		"mysql_dsn": "root@tcp(127.0.0.1:3306)/",
+		"mysql_database": "anthony_beads",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "mysql"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckOrder(t, result)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
+	assertCheckState(t, result, PreflightCheckBDContextAgreement, PreflightCheckPass)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckPass)
+	assertPreflightReadOnly(t, checker.FS.(*fsys.Fake))
+}
+
+func TestPreflightRedactsMySQLDSN(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "mysql",
+		"mysql_dsn": "operator:swordfish@tcp(db.example.com:3306)/",
+		"mysql_database": "anthony_beads",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "mysql"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	check := findPreflightCheck(t, result, PreflightCheckMetadataBackend)
+	if check.Details.MySQLDSNRedacted != "[REDACTED]" {
+		t.Fatalf("MySQLDSNRedacted = %q, want %q", check.Details.MySQLDSNRedacted, "[REDACTED]")
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatalf("MarshalJSON: %v", err)
+	}
+	if strings.Contains(string(data), "swordfish") {
+		t.Fatalf("serialized result leaked DSN secret: %s", data)
+	}
+}
+
+func TestPreflightMySQLIncompleteFieldsFailContractShape(t *testing.T) {
+	scope := "/city"
+	checker := testPreflightChecker(preflightMetadataJSON(`{
+		"backend": "mysql",
+		"mysql_dsn": "root@tcp(127.0.0.1:3306)/",
+		"project_id": "gc-local"
+	}`), PreflightBDContext{Backend: "mysql"}, "gc-local")
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	assertCheckState(t, result, PreflightCheckMetadataBackend, PreflightCheckFail)
+	assertCheckState(t, result, PreflightCheckContractShape, PreflightCheckFail)
+}
+
 func TestPreflightBlocksNativeOnContextDisagreement(t *testing.T) {
 	scope := "/city"
 	checker := testPreflightChecker(preflightMetadataJSON(`{

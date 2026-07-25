@@ -139,6 +139,8 @@ type PreflightDetails struct {
 	PostgresPort          string                 `json:"postgres_port,omitempty"`
 	PostgresUser          string                 `json:"postgres_user,omitempty"`
 	PostgresDatabase      string                 `json:"postgres_database,omitempty"`
+	MySQLDSNRedacted      string                 `json:"mysql_dsn_redacted,omitempty"`
+	MySQLDatabase         string                 `json:"mysql_database,omitempty"`
 	MetadataProjectID     string                 `json:"metadata_project_id,omitempty"`
 	DBProjectID           string                 `json:"db_project_id,omitempty"`
 	Expected              string                 `json:"expected,omitempty"`
@@ -151,6 +153,7 @@ type PreflightDetails struct {
 func (d PreflightDetails) Redacted() PreflightDetails {
 	d.PostgresDSNRedacted = redactPreflightDetail("postgres_dsn", d.PostgresDSNRedacted)
 	d.PostgresPassword = redactPreflightDetail("postgres_password", d.PostgresPassword)
+	d.MySQLDSNRedacted = redactPreflightDetail("mysql_dsn", d.MySQLDSNRedacted)
 	d.AuthToken = redactPreflightDetail("auth_token", d.AuthToken)
 	d.APIKey = redactPreflightDetail("api_key", d.APIKey)
 	if len(d.AdditionalDiagnostics) > 0 {
@@ -191,7 +194,7 @@ func redactPreflightDetail(key, value string) string {
 		return value
 	}
 	normalized := strings.ToLower(strings.TrimSpace(key))
-	if strings.Contains(normalized, "postgres_dsn") {
+	if strings.Contains(normalized, "postgres_dsn") || strings.Contains(normalized, "mysql_dsn") {
 		return redactPreflightDSN(value)
 	}
 	if preflightDetailKeyIsSensitive(normalized) {

@@ -141,6 +141,8 @@ func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) Prefl
 		HasSplitFields:      boolPtr(hasSplit),
 		PostgresDSNRedacted: metadata.PostgresDSN,
 		PostgresPassword:    metadata.PostgresPassword,
+		MySQLDSNRedacted:    metadata.MySQLDSN,
+		MySQLDatabase:       metadata.MySQLDatabase,
 	}
 	switch metadata.Backend {
 	case "dolt":
@@ -150,6 +152,8 @@ func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) Prefl
 			return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckWarn, "Metadata backend is postgres (postgres_dsn form)", details)
 		}
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is postgres; native store supports dolt only", details)
+	case "mysql":
+		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is mysql; native store supports dolt only", details)
 	case "":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is missing", details)
 	default:
@@ -314,6 +318,11 @@ func (c PreflightChecker) checkContractShape(metadata preflightMetadata) Preflig
 			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses split postgres shape", details)
 		}
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "postgres metadata split fields are incomplete", details)
+	case "mysql":
+		if metadata.hasCompleteMySQLFields() {
+			return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckPass, "Metadata uses mysql shape", details)
+		}
+		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "mysql metadata fields are incomplete (mysql_dsn, mysql_database)", details)
 	case "":
 		return NewPreflightCheckResult(PreflightCheckContractShape, PreflightCheckFail, "metadata backend is missing", details)
 	default:
@@ -361,6 +370,8 @@ type preflightMetadata struct {
 	PostgresPort     string `json:"postgres_port"`
 	PostgresUser     string `json:"postgres_user"`
 	PostgresDatabase string `json:"postgres_database"`
+	MySQLDSN         string `json:"mysql_dsn"`
+	MySQLDatabase    string `json:"mysql_database"`
 	ProjectID        string `json:"project_id"`
 }
 
@@ -374,6 +385,8 @@ func (m preflightMetadata) trimmed() preflightMetadata {
 	m.PostgresPort = strings.TrimSpace(m.PostgresPort)
 	m.PostgresUser = strings.TrimSpace(m.PostgresUser)
 	m.PostgresDatabase = strings.TrimSpace(m.PostgresDatabase)
+	m.MySQLDSN = strings.TrimSpace(m.MySQLDSN)
+	m.MySQLDatabase = strings.TrimSpace(m.MySQLDatabase)
 	m.ProjectID = strings.TrimSpace(m.ProjectID)
 	return m
 }
@@ -388,6 +401,10 @@ func (m preflightMetadata) hasPostgresSplitFields() bool {
 
 func (m preflightMetadata) hasCompletePostgresSplitFields() bool {
 	return m.PostgresHost != "" && m.PostgresPort != "" && m.PostgresUser != "" && m.PostgresDatabase != ""
+}
+
+func (m preflightMetadata) hasCompleteMySQLFields() bool {
+	return m.MySQLDSN != "" && m.MySQLDatabase != ""
 }
 
 func preflightVerdictForChecks(checks []PreflightCheckResult) PreflightVerdict {
