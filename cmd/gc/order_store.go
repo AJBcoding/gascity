@@ -284,7 +284,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 	if strings.TrimSpace(scopeRoot) == "" {
 		scopeRoot = cityPath
 	}
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+	if scopeBackendIsExternalServer(cityPath, scopeRoot) {
 		return
 	}
 	target, ok, err := canonicalScopeDoltTarget(cityPath, scopeRoot)
@@ -310,7 +310,7 @@ func applyOrderExecCanonicalDoltEnv(cityPath, scopeRoot string, env map[string]s
 }
 
 func applyOrderExecManagedDoltFallback(cityPath, scopeRoot string, env map[string]string, _ error) bool {
-	if scopeBackendIsPostgres(cityPath, scopeRoot) {
+	if scopeBackendIsExternalServer(cityPath, scopeRoot) {
 		return false
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")

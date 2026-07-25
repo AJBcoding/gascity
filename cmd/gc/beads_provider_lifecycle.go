@@ -431,9 +431,9 @@ func seedDeferredManagedBeads(cityPath, dir, prefix, doltDatabase string) {
 }
 
 func seedDeferredManagedBeadsErr(cityPath, dir, prefix, doltDatabase string) error {
-	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
+	if usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, dir); err != nil {
 		return err
-	} else if usesPostgres {
+	} else if usesExternal {
 		return nil
 	}
 	if state, ok, err := desiredScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
@@ -485,9 +485,9 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 	if !cityUsesBdStoreContract(cityPath) {
 		return nil
 	}
-	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
+	if usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, dir); err != nil {
 		return err
-	} else if usesPostgres {
+	} else if usesExternal {
 		return nil
 	}
 	if state, ok, err := desiredScopeDoltConfigStateForInit(cityPath, dir, prefix); err != nil {
@@ -515,9 +515,9 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 // wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
 // is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
-	if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, dir); err != nil {
+	if usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, dir); err != nil {
 		return err
-	} else if usesPostgres {
+	} else if usesExternal {
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
@@ -561,7 +561,7 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	return nil
 }
 
-func scopeUsesPostgresBackendForInit(cityPath, dir string) (bool, error) {
+func scopeUsesExternalServerBackendForInit(cityPath, dir string) (bool, error) {
 	if !cityUsesBdStoreContract(cityPath) {
 		return false, nil
 	}
@@ -574,15 +574,15 @@ func scopeUsesPostgresBackendForInit(cityPath, dir string) (bool, error) {
 		return false, err
 	}
 	if ok {
-		switch state.Backend {
-		case "postgres":
+		if isExternalServerBackend(state.Backend) {
 			return true, nil
-		case "dolt":
+		}
+		if state.Backend == "dolt" {
 			return false, nil
 		}
 	}
-	_, usesPostgres, err := postgresMetadataForScope(cityPath, dir)
-	return usesPostgres, err
+	_, usesExternal, err := externalBackendMetadataForScope(cityPath, dir)
+	return usesExternal, err
 }
 
 func allowLegacyDoltMetadataRepair(fs fsys.FS, path string, err error) bool {
@@ -778,10 +778,10 @@ func ensureBeadsProvider(cityPath string) error {
 // For exec providers, fires "stop". For file providers, always available.
 func shutdownBeadsProvider(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) && gcDoltSkip() {
-		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+		return clearManagedDoltRuntimeStateUnlessExternalBackend(cityPath)
 	}
 	if cityUsesDoltliteBeadsBackend(cityPath) {
-		return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+		return clearManagedDoltRuntimeStateUnlessExternalBackend(cityPath)
 	}
 	provider := beadsProvider(cityPath)
 	if strings.HasPrefix(provider, "exec:") {
@@ -791,7 +791,7 @@ func shutdownBeadsProvider(cityPath string) error {
 				return err
 			}
 			if !owned {
-				return clearManagedDoltRuntimeStateUnlessPostgres(cityPath)
+				return clearManagedDoltRuntimeStateUnlessExternalBackend(cityPath)
 			}
 		}
 		script := strings.TrimPrefix(provider, "exec:")
@@ -1542,7 +1542,7 @@ func ensureCanonicalScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase string, pr
 			if !allowLegacyDoltMetadataRepair(fs, path, err) {
 				return err
 			}
-		} else if ok && existing.Backend == "postgres" {
+		} else if ok && isExternalServerBackend(existing.Backend) {
 			return nil
 		}
 		if existing, ok, err := contract.ReadDoltDatabase(fs, path); err != nil {
@@ -1583,7 +1583,7 @@ func ensureCanonicalDoltliteScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase st
 			if !allowLegacyDoltMetadataRepair(fs, path, err) {
 				return err
 			}
-		} else if ok && existing.Backend == "postgres" {
+		} else if ok && isExternalServerBackend(existing.Backend) {
 			return nil
 		}
 		if existing, ok, err := contract.ReadDoltDatabase(fs, path); err != nil {
@@ -1636,9 +1636,9 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 	}
 	resolveRigPaths(cityPath, cfg.Rigs)
 	if scopeUsesManagedBdStoreContract(cityPath, cityPath) {
-		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath); err != nil {
+		if usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, cityPath); err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
-		} else if !usesPostgres {
+		} else if !usesExternal {
 			doltDatabase := defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
@@ -1653,9 +1653,9 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 		if !rigUsesManagedBdStoreContract(cityPath, cfg.Rigs[i]) {
 			continue
 		}
-		if usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cfg.Rigs[i].Path); err != nil {
+		if usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, cfg.Rigs[i].Path); err != nil {
 			return fmt.Errorf("classifying rig %q backend: %w", cfg.Rigs[i].Name, err)
-		} else if !usesPostgres {
+		} else if !usesExternal {
 			doltDatabase := defaultScopeDoltDatabase(cityPath, cfg.Rigs[i].Path, cfg.Rigs[i].EffectivePrefix())
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cfg.Rigs[i].Path, doltDatabase); err != nil {
@@ -1685,11 +1685,11 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
 	cityUsesPostgres := false
 	if cityUsesBd {
-		usesPostgres, err := scopeUsesPostgresBackendForInit(cityPath, cityPath)
+		usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, cityPath)
 		if err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
 		}
-		cityUsesPostgres = usesPostgres
+		cityUsesPostgres = usesExternal
 	}
 	anyRigUsesBd := false
 	for _, rig := range rigs {
