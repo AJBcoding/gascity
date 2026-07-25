@@ -83,7 +83,9 @@ func (c DoltConfig) DisableEventFlushEnabled() bool {
 // returned from LoadMetadataState the populated backend-specific fields are
 // guaranteed consistent with Backend — i.e. a state with Backend == "postgres"
 // always has every Postgres field non-empty and PostgresPort already verified
-// as a TCP-port-shaped string.
+// as a TCP-port-shaped string, and a state with Backend == "mysql" always has
+// MySQLDSN and MySQLDatabase non-empty (the DSN is treated as opaque; bd owns
+// its format and credential handling).
 type MetadataState struct {
 	Database         string `json:"database"`
 	Backend          string `json:"backend"`
@@ -93,6 +95,8 @@ type MetadataState struct {
 	PostgresPort     string `json:"postgres_port,omitempty"`
 	PostgresUser     string `json:"postgres_user,omitempty"`
 	PostgresDatabase string `json:"postgres_database,omitempty"`
+	MySQLDSN         string `json:"mysql_dsn,omitempty"`
+	MySQLDatabase    string `json:"mysql_database,omitempty"`
 }
 
 // MetadataParseError reports a failure to parse or validate metadata.json.
@@ -134,6 +138,11 @@ var postgresBackendKeys = []string{
 	"postgres_database",
 }
 
+var mysqlBackendKeys = []string{
+	"mysql_dsn",
+	"mysql_database",
+}
+
 // crossBackendKeysToScrub returns the on-disk metadata keys that should be
 // removed when canonicalising for the given backend. An empty backend
 // preserves all backend-specific keys (today's behavior for unknown-shape
@@ -141,11 +150,13 @@ var postgresBackendKeys = []string{
 func crossBackendKeysToScrub(backend string) []string {
 	switch backend {
 	case "dolt":
-		return postgresBackendKeys
+		return append(append([]string{}, postgresBackendKeys...), mysqlBackendKeys...)
 	case "doltlite":
-		return append([]string{"dolt_mode"}, postgresBackendKeys...)
+		return append(append([]string{"dolt_mode"}, postgresBackendKeys...), mysqlBackendKeys...)
 	case "postgres":
-		return doltBackendKeys
+		return append(append([]string{}, doltBackendKeys...), mysqlBackendKeys...)
+	case "mysql":
+		return append(append([]string{}, doltBackendKeys...), postgresBackendKeys...)
 	default:
 		return nil
 	}
@@ -345,7 +356,8 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 // Validation order is deterministic: the operator always sees the same
 // top-most message when several things are wrong. Order is JSON parse (E1) →
 // mixed-backend (E3) → unknown backend (E2) → postgres-required (E4) →
-// postgres-port-format (E5). An empty Backend is permitted at the parse
+// postgres-port-format (E5) → mysql-required (E4). An empty Backend is
+// permitted at the parse
 // layer; downstream consumers that need a backend must check
 // state.Backend != "" themselves.
 func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
@@ -370,20 +382,20 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 		}
 	}
 
-	if other, ok := mixedBackendField(state); ok {
+	if other, families, ok := mixedBackendField(state); ok {
 		return MetadataState{}, false, &MetadataParseError{
 			Path:   abs,
-			Reason: fmt.Sprintf("cannot mix dolt and postgres fields in a single scope (backend=%s but %s is also set)", state.Backend, other),
+			Reason: fmt.Sprintf("cannot mix %s and %s fields in a single scope (backend=%s but %s is also set)", families[0], families[1], state.Backend, other),
 		}
 	}
 
 	switch state.Backend {
-	case "", "dolt", "doltlite", "postgres":
+	case "", "dolt", "doltlite", "postgres", "mysql":
 		// allowed
 	default:
 		return MetadataState{}, false, &MetadataParseError{
 			Path:   abs,
-			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, doltlite, postgres)", state.Backend),
+			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, doltlite, postgres, mysql)", state.Backend),
 		}
 	}
 
@@ -403,20 +415,51 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 		}
 	}
 
+	if state.Backend == "mysql" {
+		if state.MySQLDSN == "" || state.MySQLDatabase == "" {
+			return MetadataState{}, false, &MetadataParseError{
+				Path:   abs,
+				Reason: "backend=mysql requires mysql_dsn, mysql_database (both must be non-empty)",
+			}
+		}
+	}
+
 	return state, true, nil
 }
 
-// mixedBackendField reports the first populated "other-backend" field name
-// (relative to state.Backend). For explicit backends, any populated field from
-// the opposite backend is mixed. For empty or unknown backends, mixed still
-// means both Dolt-shaped and Postgres-shaped fields are populated.
+// backendFieldFamilies is the declaration order of backend field families,
+// matching the JSON-key declaration order on MetadataState. Error messages
+// name families in this order regardless of which one state.Backend selects.
+var backendFieldFamilies = []string{"dolt", "postgres", "mysql"}
+
+// backendFamily maps a backend name to the field family whose keys it owns.
+// Returns "" for empty or unknown backends.
+func backendFamily(backend string) string {
+	switch backend {
+	case "dolt", "doltlite":
+		return "dolt"
+	case "postgres":
+		return "postgres"
+	case "mysql":
+		return "mysql"
+	default:
+		return ""
+	}
+}
+
+// mixedBackendField reports the first populated "other-family" field name
+// (relative to state.Backend) plus the two field families involved, named in
+// declaration order. For explicit backends, any populated field from another
+// backend's family is mixed. For empty or unknown backends, mixed means
+// fields from two or more families are populated.
 //
 // Field-iteration order is the JSON-key declaration order on MetadataState
 // (dolt_mode, dolt_database, postgres_host, postgres_port, postgres_user,
-// postgres_database). When state.Backend is empty or unknown and both backend
-// families appear, the first populated field across both backends wins (with
-// Dolt fields preferred per declaration order).
-func mixedBackendField(state MetadataState) (string, bool) {
+// postgres_database, mysql_dsn, mysql_database). When state.Backend is empty
+// or unknown and several families appear, the first populated field across
+// all families wins (Dolt preferred per declaration order) and the first two
+// populated families are reported.
+func mixedBackendField(state MetadataState) (string, [2]string, bool) {
 	type entry struct {
 		name    string
 		value   string
@@ -429,34 +472,53 @@ func mixedBackendField(state MetadataState) (string, bool) {
 		{"postgres_port", state.PostgresPort, "postgres"},
 		{"postgres_user", state.PostgresUser, "postgres"},
 		{"postgres_database", state.PostgresDatabase, "postgres"},
+		{"mysql_dsn", state.MySQLDSN, "mysql"},
+		{"mysql_database", state.MySQLDatabase, "mysql"},
 	}
-	var firstDolt, firstPostgres string
+	firstField := map[string]string{}
 	for _, f := range fields {
 		if f.value == "" {
 			continue
 		}
-		if f.backend == "dolt" && firstDolt == "" {
-			firstDolt = f.name
-		}
-		if f.backend == "postgres" && firstPostgres == "" {
-			firstPostgres = f.name
+		if firstField[f.backend] == "" {
+			firstField[f.backend] = f.name
 		}
 	}
-	switch state.Backend {
-	case "postgres":
-		if firstDolt != "" {
-			return firstDolt, true
+
+	orderedPair := func(a, b string) [2]string {
+		for _, fam := range backendFieldFamilies {
+			if fam == a {
+				return [2]string{a, b}
+			}
+			if fam == b {
+				return [2]string{b, a}
+			}
 		}
-	case "dolt", "doltlite":
-		if firstPostgres != "" {
-			return firstPostgres, true
+		return [2]string{a, b}
+	}
+
+	if own := backendFamily(state.Backend); own != "" {
+		for _, fam := range backendFieldFamilies {
+			if fam == own {
+				continue
+			}
+			if field := firstField[fam]; field != "" {
+				return field, orderedPair(own, fam), true
+			}
 		}
-	default:
-		if firstDolt != "" && firstPostgres != "" {
-			return firstDolt, true
+		return "", [2]string{}, false
+	}
+
+	var populated []string
+	for _, fam := range backendFieldFamilies {
+		if firstField[fam] != "" {
+			populated = append(populated, fam)
 		}
 	}
-	return "", false
+	if len(populated) >= 2 {
+		return firstField[populated[0]], [2]string{populated[0], populated[1]}, true
+	}
+	return "", [2]string{}, false
 }
 
 // EnsureCanonicalConfig rewrites config.yaml into canonical GC-managed form.
@@ -586,6 +648,8 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 		"postgres_port":     strings.TrimSpace(state.PostgresPort),
 		"postgres_user":     strings.TrimSpace(state.PostgresUser),
 		"postgres_database": strings.TrimSpace(state.PostgresDatabase),
+		"mysql_dsn":         strings.TrimSpace(state.MySQLDSN),
+		"mysql_database":    strings.TrimSpace(state.MySQLDatabase),
 	}
 	for key, want := range defaults {
 		if want == "" {

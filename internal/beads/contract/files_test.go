@@ -1239,6 +1239,95 @@ func TestEnsureCanonicalMetadataPreservesUnknownKeysAndScrubsDeprecatedOnes(t *t
 	}
 }
 
+func TestEnsureCanonicalMetadataWritesMySQLFieldsAndScrubsCrossBackendKeys(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"backend":"dolt","database":"dolt","dolt_mode":"server","dolt_database":"hq","postgres_host":"db.example.com","custom":"keep"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:      "beads.db",
+		Backend:       "mysql",
+		MySQLDSN:      "root@tcp(127.0.0.1:3306)/",
+		MySQLDatabase: "anthony_beads",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should report changes")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := trimmedString(meta["backend"]); got != "mysql" {
+		t.Fatalf("backend = %q, want %q", got, "mysql")
+	}
+	if got := trimmedString(meta["mysql_dsn"]); got != "root@tcp(127.0.0.1:3306)/" {
+		t.Fatalf("mysql_dsn = %q, want %q", got, "root@tcp(127.0.0.1:3306)/")
+	}
+	if got := trimmedString(meta["mysql_database"]); got != "anthony_beads" {
+		t.Fatalf("mysql_database = %q, want %q", got, "anthony_beads")
+	}
+	if got := trimmedString(meta["custom"]); got != "keep" {
+		t.Fatalf("custom = %q, want %q", got, "keep")
+	}
+	for _, key := range []string{"dolt_mode", "dolt_database", "postgres_host"} {
+		if _, ok := meta[key]; ok {
+			t.Fatalf("metadata should not contain cross-backend key %q: %s", key, data)
+		}
+	}
+}
+
+func TestEnsureCanonicalMetadataDoltScrubsMySQLKeys(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "metadata.json")
+	input := `{"backend":"mysql","database":"beads.db","mysql_dsn":"root@tcp(127.0.0.1:3306)/","mysql_database":"anthony_beads"}`
+	if err := fs.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	changed, err := EnsureCanonicalMetadata(fs, path, MetadataState{
+		Database:     "dolt",
+		Backend:      "dolt",
+		DoltMode:     "server",
+		DoltDatabase: "hq",
+	})
+	if err != nil {
+		t.Fatalf("EnsureCanonicalMetadata() error = %v", err)
+	}
+	if !changed {
+		t.Fatal("EnsureCanonicalMetadata() should report changes")
+	}
+
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	for _, key := range []string{"mysql_dsn", "mysql_database"} {
+		if _, ok := meta[key]; ok {
+			t.Fatalf("metadata should not contain cross-backend key %q: %s", key, data)
+		}
+	}
+	if got := trimmedString(meta["dolt_database"]); got != "hq" {
+		t.Fatalf("dolt_database = %q, want %q", got, "hq")
+	}
+}
+
 func TestEnsureCanonicalMetadataRegeneratesProjectIDFromL1(t *testing.T) {
 	fs := fsys.OSFS{}
 	scope := t.TempDir()
@@ -1517,6 +1606,26 @@ func TestLoadMetadataStateValidFixtures(t *testing.T) {
 			},
 		},
 		{
+			name:    "mysql round-trip",
+			fixture: "valid_mysql.json",
+			want: MetadataState{
+				Database:      "beads.db",
+				Backend:       "mysql",
+				MySQLDSN:      "root@tcp(127.0.0.1:3306)/",
+				MySQLDatabase: "anthony_beads",
+			},
+		},
+		{
+			name:    "mysql round-trip with unknown key",
+			fixture: "valid_mysql_with_unknown.json",
+			want: MetadataState{
+				Database:      "beads.db",
+				Backend:       "mysql",
+				MySQLDSN:      "root@tcp(127.0.0.1:3306)/",
+				MySQLDatabase: "anthony_beads",
+			},
+		},
+		{
 			name:    "empty backend permitted",
 			fixture: "valid_empty_backend.json",
 			want: MetadataState{
@@ -1556,7 +1665,7 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 		{
 			name:            "E2 unknown backend",
 			fixture:         "reject_unknown_backend.json",
-			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite, postgres)`,
+			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite, postgres, mysql)`,
 		},
 		{
 			name:            "E3 mixed backends fires before required-fields",
@@ -1584,6 +1693,31 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend= but dolt_database is also set)",
 		},
 		{
+			name:            "E3 rejects explicit dolt with mysql fields",
+			fixture:         "reject_dolt_with_mysql_field.json",
+			wantErrContains: "cannot mix dolt and mysql fields in a single scope (backend=dolt but mysql_dsn is also set)",
+		},
+		{
+			name:            "E3 rejects explicit mysql with dolt fields",
+			fixture:         "reject_mysql_with_dolt_field.json",
+			wantErrContains: "cannot mix dolt and mysql fields in a single scope (backend=mysql but dolt_database is also set)",
+		},
+		{
+			name:            "E3 rejects explicit mysql with postgres fields",
+			fixture:         "reject_mysql_with_postgres_field.json",
+			wantErrContains: "cannot mix postgres and mysql fields in a single scope (backend=mysql but postgres_host is also set)",
+		},
+		{
+			name:            "E3 rejects explicit postgres with mysql fields",
+			fixture:         "reject_postgres_with_mysql_field.json",
+			wantErrContains: "cannot mix postgres and mysql fields in a single scope (backend=postgres but mysql_database is also set)",
+		},
+		{
+			name:            "E3 surfaces dolt field first when backend is empty and mysql fields present",
+			fixture:         "reject_mixed_empty_backend_mysql.json",
+			wantErrContains: "cannot mix dolt and mysql fields in a single scope (backend= but dolt_database is also set)",
+		},
+		{
 			name:            "E4 postgres missing host",
 			fixture:         "reject_pg_missing_host.json",
 			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
@@ -1592,6 +1726,16 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			name:            "E4 postgres missing all fields",
 			fixture:         "reject_pg_missing_all.json",
 			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
+		},
+		{
+			name:            "E4 mysql missing dsn",
+			fixture:         "reject_mysql_missing_dsn.json",
+			wantErrContains: "backend=mysql requires mysql_dsn, mysql_database (both must be non-empty)",
+		},
+		{
+			name:            "E4 mysql missing all fields",
+			fixture:         "reject_mysql_missing_all.json",
+			wantErrContains: "backend=mysql requires mysql_dsn, mysql_database (both must be non-empty)",
 		},
 		{
 			name:            "E5 postgres_port non-numeric",

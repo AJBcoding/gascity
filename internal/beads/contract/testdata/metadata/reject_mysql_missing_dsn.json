@@ -1,0 +1,5 @@
+{
+  "database": "beads.db",
+  "backend": "mysql",
+  "mysql_database": "anthony_beads"
+}
