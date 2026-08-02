@@ -49,8 +49,10 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 
 	projection, err := s.fetchReadyProjection(ids)
 	if err != nil {
+		s.noteReadyProjectionFailure()
 		return items, err
 	}
+	s.noteReadyProjectionSuccess()
 	enriched := make([]Bead, len(items))
 	copy(enriched, items)
 	for i := range enriched {
@@ -85,6 +87,40 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 	s.readyProjectionEnabled = deps.CompareVersions(version, bdReadyProjectionMinVersion) >= 0
 	s.readyProjectionChecked = true
 	return s.readyProjectionEnabled, nil
+}
+
+// bdReadyProjectionMaxFailures bounds how many consecutive projection failures
+// are tolerated before the gate latches off for the rest of the process.
+const bdReadyProjectionMaxFailures = 3
+
+// noteReadyProjectionFailure records a failed projection fetch and latches the
+// gate off once failures are clearly structural rather than transient.
+//
+// The version gate cannot decide this on its own: `bd sql` runs "against the
+// underlying database (SQLite or Dolt)", so on a MySQL-backed city a bd new
+// enough to HAVE the subcommand still cannot serve it — embedded mode answers
+// "'bd sql' is not yet supported in embedded mode". Version-gating alone meant
+// every cache prime and reconcile tick shelled out, failed, and recorded a
+// problem forever (az-3ie). Latching after a few consecutive failures reports
+// the condition without repeating it for the life of the process, while a
+// one-off blip still recovers via noteReadyProjectionSuccess. The projection is
+// a cost optimisation, not a correctness gate, so losing it is safe: callers
+// already treat a disabled projection as the no-op it is.
+func (s *BdStore) noteReadyProjectionFailure() {
+	s.readyProjectionMu.Lock()
+	defer s.readyProjectionMu.Unlock()
+	s.readyProjectionFailures++
+	if s.readyProjectionFailures >= bdReadyProjectionMaxFailures {
+		s.readyProjectionEnabled = false
+	}
+}
+
+// noteReadyProjectionSuccess clears the consecutive-failure count so a transient
+// error never accumulates toward the latch across an otherwise healthy process.
+func (s *BdStore) noteReadyProjectionSuccess() {
+	s.readyProjectionMu.Lock()
+	defer s.readyProjectionMu.Unlock()
+	s.readyProjectionFailures = 0
 }
 
 func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {

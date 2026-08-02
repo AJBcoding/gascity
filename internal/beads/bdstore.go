@@ -299,9 +299,10 @@ type BdStore struct {
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
-	readyProjectionMu      sync.Mutex
-	readyProjectionChecked bool
-	readyProjectionEnabled bool
+	readyProjectionMu       sync.Mutex
+	readyProjectionChecked  bool
+	readyProjectionEnabled  bool
+	readyProjectionFailures int
 
 	// Conditional-write (ConditionalWriter) capability state, populated lazily on
 	// the first conditional write (bdstore_conditional.go). condWriteProbed/
