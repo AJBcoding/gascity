@@ -2106,6 +2106,167 @@ func TestRigBeadsCheck_ManagedInheritedMissingRuntimeStateFailsBeforePing(t *tes
 	}
 }
 
+// --- Non-Dolt backends must not demand a Dolt endpoint ---
+
+// nonDoltBackendCases enumerates the beads backends that store beads without a
+// Dolt server. Every one of them must report the Dolt endpoint as
+// not-applicable rather than failing on managed Dolt runtime state.
+var nonDoltBackendCases = []string{"mysql", "postgres", "doltlite"}
+
+func TestBeadsStoreCheck_NonDoltBackendSkipsDoltPreflight(t *testing.T) {
+	for _, backend := range nonDoltBackendCases {
+		t.Run(backend, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			t.Setenv("GC_BEADS_BACKEND", "")
+			dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+			fs := fsys.OSFS{}
+			// managed_city origin + no dolt-state.json: the exact shape that
+			// makes a Dolt city fail.
+			writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+			})
+			writeDoctorBackendMetadata(t, dir, backend)
+
+			pinged := false
+			spy := &spyPingStore{pingFunc: func() error {
+				pinged = true
+				return nil
+			}}
+			c := NewBeadsStoreCheck(dir, func(_ string) (beads.StoreOpenResult, error) {
+				return beads.StoreOpenResult{Store: spy}, nil
+			})
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusOK {
+				t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+			}
+			if !pinged {
+				t.Fatal("Ping should still run: the store itself is what this check verifies")
+			}
+		})
+	}
+}
+
+func TestDoltServerCheck_NonDoltBackendNotRequired(t *testing.T) {
+	for _, backend := range nonDoltBackendCases {
+		t.Run(backend, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			t.Setenv("GC_BEADS_BACKEND", "")
+			dir := setupCity(t, "[workspace]\nname = \"test\"\n")
+			fs := fsys.OSFS{}
+			writeDoctorCanonicalConfig(t, fs, dir, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+			})
+			writeDoctorBackendMetadata(t, dir, backend)
+
+			c := NewDoltServerCheck(dir, false)
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusOK {
+				t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+			}
+			if !strings.Contains(r.Message, "not required") {
+				t.Fatalf("message = %q, want not-applicable message", r.Message)
+			}
+			if !strings.Contains(r.Message, backend) {
+				t.Fatalf("message = %q, want the backend named", r.Message)
+			}
+		})
+	}
+}
+
+func TestRigBeadsCheck_NonDoltBackendSkipsDoltPreflight(t *testing.T) {
+	for _, backend := range nonDoltBackendCases {
+		t.Run(backend, func(t *testing.T) {
+			clearInheritedBeadsEnv(t)
+			t.Setenv("GC_BEADS_BACKEND", "")
+			cityDir := setupCity(t, "[workspace]\nname = \"test\"\n")
+			rigDir := filepath.Join(cityDir, "frontend")
+			if err := os.MkdirAll(rigDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			fs := fsys.OSFS{}
+			writeDoctorCanonicalConfig(t, fs, cityDir, contract.ConfigState{
+				IssuePrefix:    "gc",
+				EndpointOrigin: contract.EndpointOriginManagedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+			})
+			writeDoctorBackendMetadata(t, cityDir, backend)
+			writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+				IssuePrefix:    "fr",
+				EndpointOrigin: contract.EndpointOriginInheritedCity,
+				EndpointStatus: contract.EndpointStatusVerified,
+			})
+			writeDoctorBackendMetadata(t, rigDir, backend)
+
+			pinged := false
+			spy := &spyPingStore{pingFunc: func() error {
+				pinged = true
+				return nil
+			}}
+			c := NewRigBeadsCheck(cityDir, config.Rig{Name: "frontend", Path: rigDir}, func(_ string) (beads.Store, error) {
+				return spy, nil
+			})
+			r := c.Run(&CheckContext{})
+			if r.Status != StatusOK {
+				t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+			}
+			if !pinged {
+				t.Fatal("Ping should still run: the store itself is what this check verifies")
+			}
+		})
+	}
+}
+
+// TestDoltServerCheck_RigBackendOverridesCityBackend guards the per-scope read:
+// a Dolt rig inside a non-Dolt city must still have its endpoint checked.
+func TestDoltServerCheck_RigBackendOverridesCityBackend(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS_BACKEND", "")
+	cityDir := setupCity(t, "[workspace]\nname = \"test\"\n")
+	rigDir := filepath.Join(cityDir, "frontend")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fs := fsys.OSFS{}
+	writeDoctorBackendMetadata(t, cityDir, "mysql")
+	writeDoctorCanonicalConfig(t, fs, rigDir, contract.ConfigState{
+		IssuePrefix:    "fr",
+		EndpointOrigin: contract.EndpointOriginExplicit,
+		EndpointStatus: contract.EndpointStatusUnverified,
+		DoltHost:       "127.0.0.1",
+		DoltPort:       "4417",
+	})
+	writeDoctorCanonicalMetadata(t, fs, rigDir, "fr")
+
+	c := NewRigDoltServerCheck(cityDir, config.Rig{Name: "frontend", Path: rigDir}, false)
+	r := c.Run(&CheckContext{})
+	if r.Status != StatusError {
+		t.Fatalf("status = %d, want Error (dolt rig must still be checked); msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "dolt server not reachable") {
+		t.Fatalf("message = %q, want reachability error", r.Message)
+	}
+}
+
+// writeDoctorBackendMetadata writes .beads/metadata.json with the given
+// backend, in the raw shape bd itself writes. Backends outside the Dolt
+// contract's supported set (e.g. "mysql") cannot round-trip through
+// contract.LoadMetadataState, so the file is written directly.
+func writeDoctorBackendMetadata(t *testing.T, dir, backend string) {
+	t.Helper()
+	beadsDir := filepath.Join(dir, ".beads")
+	if err := os.MkdirAll(beadsDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	payload := fmt.Sprintf(`{"backend":%q,"database":"beads.db"}`, backend)
+	if err := os.WriteFile(filepath.Join(beadsDir, "metadata.json"), []byte(payload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 //nolint:unparam // helper keeps FS explicit in tests
 func writeDoctorCanonicalConfig(t *testing.T, fs fsys.FS, dir string, state contract.ConfigState) {
 	t.Helper()
