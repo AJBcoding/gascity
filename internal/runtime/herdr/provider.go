@@ -132,6 +132,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
+	p.bindPanePID(ctx, name, info.PaneID)
 	// Launch. herdr ≥0.7.5's `agent start` launches a supported agent kind's
 	// canonical executable into the shell pane and blocks until the TUI is
 	// detected (native claude-detection); commands that aren't a clean kind
@@ -190,6 +191,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
+	p.bindPanePID(ctx, name, info.PaneID)
 	// Deliver the agent's first turn. Two independent sources, mirroring tmux:
 	// a named always-awake Claude session carries its behavioral prime in
 	// cfg.PromptSuffix (PromptMode=arg); a pool/sling slot carries its claim
@@ -396,6 +398,10 @@ func (p *Provider) runSetupCommand(ctx context.Context, cmd string, env map[stri
 // earlier "sleep leak" was exactly this gap: name lost ⇒ pane never found ⇒
 // closePane never issued ⇒ panes piled up across witness sleep cycles.
 func (p *Provider) Stop(name string) error {
+	// Before the pane is resolved: that resolution runs through resolveBinding,
+	// which reports a confirmed-gone pane as a runtime death. An intentional
+	// teardown is not one.
+	p.markStopIntended(name)
 	ctx := context.Background()
 	pid, err := p.paneID(ctx, name)
 	if err == nil && pid != "" {
@@ -635,10 +641,33 @@ func (p *Provider) ObserveLiveness(name string, _ []string) runtime.Liveness {
 		// clears the stale binding; a transport failure clears nothing and
 		// falls through to not-running (as a failed name query already does).
 		if _, running, perr := resolveBinding(p.lookupOps(ctx, name)); perr == nil && running {
+			p.clearRuntimeDeath(name)
 			return runtime.Liveness{Running: true, Alive: true}
 		}
 	}
-	return livenessFromAgent(info, present, err)
+	lv := livenessFromAgent(info, present, err)
+	// Attribute mid-session runtime deaths at the moment the verdict is reached.
+	// herdr's log knows the pane and terminating signal but not the gc session;
+	// gc knows the session but neither pane nor status. This is the one place
+	// both are in hand, so record them here rather than leaving the join to be
+	// reconstructed by hand across two logs. Diagnostic only — it never changes
+	// the verdict.
+	switch {
+	case shouldRecordRuntimeDeath(lv):
+		if !p.runtimeDeathRecorded(name) {
+			// Read the screen off the resolved pane rather than via Peek, which
+			// would resolve it a second time.
+			pane, _ := p.paneID(ctx, name)
+			var screen string
+			if pane != "" {
+				screen, _ = p.c.paneRead(ctx, pane, "visible", runtimeDeathPeekLines)
+			}
+			p.recordRuntimeDeath(name, pane, info.AgentStatus, screen)
+		}
+	case lv.Alive:
+		p.clearRuntimeDeath(name)
+	}
+	return lv
 }
 
 // livenessFromAgent folds a herdr `agent get` result into a Liveness verdict.

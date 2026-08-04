@@ -38,6 +38,12 @@ const (
 	// exited-agent reap can distinguish a pane whose agent is still being
 	// launched (fresh binding) from one whose agent exited (old binding).
 	metaBoundAt = "GC_HERDR_BOUND_AT"
+	// metaBoundPID holds the pane child's pid, captured at bind time. It is the
+	// only identifier gascity holds that also appears in herdr's own log (both
+	// "pane child spawned" and "pane session terminated" carry pid=), so it is
+	// what joins a death record to its terminating signal. It cannot be read at
+	// death time — the pane is gone by then — hence capture on the way up.
+	metaBoundPID = "GC_HERDR_PANE_PID"
 )
 
 // bindingLaunchGrace is how long after binding a pane may sit at a bare
@@ -88,6 +94,10 @@ type paneLookupOps struct {
 	// clearBinding drops a binding whose pane herdr confirmed gone, so a
 	// recycled pane id can never resurrect a dead session.
 	clearBinding func()
+	// noteDeath reports a bound pane herdr confirmed gone — the runtime death
+	// transition, and the last moment the pane id is still known. Diagnostic
+	// only: it never affects the resolution verdict.
+	noteDeath func(paneID string)
 }
 
 // resolveBinding resolves a session name to its herdr pane id and a running
@@ -120,6 +130,13 @@ func resolveBinding(ops paneLookupOps) (paneID string, running bool, err error) 
 		return "", false, err
 	}
 	if !probe.Exists {
+		// The runtime died: this session had a bound pane and herdr confirms it
+		// is gone. Report it before clearBinding drops the pane id, which is
+		// the only handle that joins this session to the terminating signal in
+		// herdr's own log.
+		if ops.noteDeath != nil {
+			ops.noteDeath(pane)
+		}
 		ops.clearBinding()
 		return "", false, nil
 	}
@@ -155,6 +172,25 @@ func (p *Provider) bindPlacement(name string, info agentInfo, mode string) error
 		}
 	}
 	return nil
+}
+
+// bindPanePID captures the pane child's pid and persists it beside the rest of
+// the binding. Separate from bindPlacement because it is the one binding fact
+// herdr's `agent get` does not return — it costs a process-info round-trip, and
+// it must happen while the pane is alive: after the death this record exists to
+// document, process-info no longer answers for that pane.
+//
+// Best-effort. A missing pid degrades a death record to session+pane only; it
+// must never fail a Start.
+func (p *Provider) bindPanePID(ctx context.Context, name, paneID string) {
+	if strings.TrimSpace(paneID) == "" {
+		return
+	}
+	shellPID, _, err := p.c.processInfo(ctx, paneID)
+	if err != nil || shellPID == 0 {
+		return
+	}
+	_ = p.SetMeta(name, metaBoundPID, strconv.Itoa(shellPID))
 }
 
 // clearPaneBinding drops the persisted placement (not the whole sidecar — the
@@ -298,5 +334,16 @@ func (p *Provider) lookupOps(ctx context.Context, name string) paneLookupOps {
 		probePane:    func(paneID string) (paneProbe, error) { return p.probePane(ctx, paneID) },
 		reapPane:     func(paneID string) { _ = p.c.closePane(ctx, paneID) },
 		clearBinding: func() { p.clearPaneBinding(name) },
+		noteDeath: func(paneID string) {
+			// A teardown we initiated is not a death worth recording, and Stop
+			// resolves the pane through this same path — so an unsuppressed
+			// record here would fire on ordinary Stops too.
+			if p.stopIntended(name) {
+				return
+			}
+			// No screen to capture: the pane is gone, which is how this branch
+			// was reached. The pane id is the evidence.
+			p.recordRuntimeDeath(name, paneID, "", "")
+		},
 	}
 }
