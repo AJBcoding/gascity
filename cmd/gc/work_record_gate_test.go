@@ -15,11 +15,19 @@ import (
 func alwaysReachable(string, string) bool { return true }
 func neverReachable(string, string) bool  { return false }
 
+// alwaysOnRemote / neverOnRemote are injected durability oracles: they report
+// whether a commit is contained in any remote-tracking ref. Reachability on a
+// branch and presence on a remote are independent — a commit on a local-only
+// branch is reachable but not durable — so they are separate oracles.
+func alwaysOnRemote(string) bool { return true }
+func neverOnRemote(string) bool  { return false }
+
 func TestValidateWorkRecordOnClose(t *testing.T) {
 	tests := []struct {
 		name      string
 		meta      map[string]string
 		reachable func(string, string) bool
+		onRemote  func(string) bool
 		wantViol  string // substring expected in the (single) violation; "" ⇒ no violations
 	}{
 		{
@@ -41,6 +49,21 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 			},
 			reachable: alwaysReachable,
 			wantViol:  "",
+		},
+		{
+			// az-6n75: the data-loss case. The polecat committed and the commit is
+			// reachable on the branch it recorded, but the branch was never pushed,
+			// so the work exists only in a worktree that any prune can destroy.
+			// Reachability alone cannot see this — the branch resolves locally.
+			name: "shipped with commit reachable locally but NOT on any remote is rejected",
+			meta: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+				beadmeta.WorkCommitMetadataKey:  "abc123",
+				beadmeta.WorkBranchMetadataKey:  "gc-gastown.rictus-5bca5afe897d",
+			},
+			reachable: alwaysReachable,
+			onRemote:  neverOnRemote,
+			wantViol:  "not present on any remote",
 		},
 		{
 			name: "shipped with commit NOT reachable on branch is rejected",
@@ -87,8 +110,14 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 			if reachable == nil {
 				reachable = neverReachable
 			}
+			onRemote := tc.onRemote
+			if onRemote == nil {
+				// Default to durable so pre-existing cases exercise only the rule
+				// they were written for.
+				onRemote = alwaysOnRemote
+			}
 			bead := beads.Bead{ID: "wr-1", Type: "task", Metadata: tc.meta}
-			got := validateWorkRecordOnClose(bead, reachable)
+			got := validateWorkRecordOnClose(bead, reachable, onRemote)
 			if tc.wantViol == "" {
 				if len(got) != 0 {
 					t.Fatalf("expected no violations, got %v", got)
@@ -373,6 +402,85 @@ func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 	}
 	if got := stderr.String(); got != "" {
 		t.Fatalf("valid atomic shipped close warned: %q", got)
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateUnpushedBranch is the az-6n75 regression test.
+// It reproduces the kit-ccf incident end to end against a real repo: a polecat
+// commits on its own branch, records a correct and internally-consistent work
+// record, and closes — but never pushes. Every pre-existing rule passes. The
+// commit IS reachable on the branch it names; the branch simply exists nowhere
+// but this worktree, so a prune destroys the only copy.
+//
+// The paired assertion matters as much as the block: after the identical commit
+// is pushed, the same close must be allowed. A rule that blocks unpushed work by
+// blocking everything would pass a one-sided test.
+func TestEvaluateWorkRecordCloseGateUnpushedBranch(t *testing.T) {
+	originDir := t.TempDir()
+	runGit(t, originDir, "init", "--bare", "--initial-branch=main")
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	runGit(t, repoDir, "remote", "add", "origin", originDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, repoDir, "add", "base.txt")
+	runGit(t, repoDir, "commit", "-m", "test: base")
+	runGit(t, repoDir, "push", "origin", "main")
+
+	// The polecat's own branch, mirroring gc-gastown.<name>-<hash>.
+	const workBranch = "gc-gastown.rictus-5bca5afe897d"
+	runGit(t, repoDir, "checkout", "-b", workBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("quote stripper\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	runGit(t, repoDir, "add", "feature.txt")
+	runGit(t, repoDir, "commit", "-m", "feat: quote stripper stage 1")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+
+	newStore := func() beads.Store {
+		return beads.NewMemStoreFrom(1, []beads.Bead{{
+			ID:     "wr-unpushed",
+			Type:   "task",
+			Status: "in_progress",
+			Metadata: map[string]string{
+				beadmeta.WorkDirMetadataKey: repoDir,
+			},
+		}}, nil)
+	}
+	args := []string{
+		"update", "wr-unpushed",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + workBranch,
+		"--status=closed",
+	}
+
+	// Sanity: the pre-existing reachability rule cannot see this failure. If this
+	// ever stops holding, the durability rule is no longer the thing under test.
+	if !gitCommitReachableOnBranch(repoDir, commit, workBranch) {
+		t.Fatalf("precondition: commit should be reachable on its own branch")
+	}
+
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, newStore(), repoDir, true, &stderr); !block {
+		t.Fatalf("close of unpushed work was allowed; the branch exists on no remote")
+	}
+	if got := stderr.String(); !strings.Contains(got, "not present on any remote") {
+		t.Fatalf("expected a durability violation, got %q", got)
+	}
+
+	// Same commit, same close, after publishing: must now be allowed.
+	runGit(t, repoDir, "push", "origin", workBranch)
+	var pushedStderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, newStore(), repoDir, true, &pushedStderr); block {
+		t.Fatalf("close blocked after push; stderr=%s", pushedStderr.String())
+	}
+	if got := pushedStderr.String(); got != "" {
+		t.Fatalf("pushed close warned: %q", got)
 	}
 }
 

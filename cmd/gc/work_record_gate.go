@@ -70,9 +70,17 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 // validateWorkRecordOnClose checks bead against the typed work-record contract
 // and returns a human-readable message for each violation (empty slice ⇒ the
 // bead satisfies the contract). commitReachable reports whether a commit SHA is
-// an ancestor of a branch; it is injected so the rule is unit-testable without
-// a real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
-func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool) []string {
+// an ancestor of a branch; commitOnRemote reports whether it is contained in any
+// remote-tracking ref. Both are injected so the rule is unit-testable without a
+// real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
+//
+// The two oracles answer different questions and a shipped close needs both.
+// Reachability is a LOCAL property: a commit on a branch that was never pushed is
+// still reachable from it, so reachability alone cannot distinguish delivered
+// work from work that exists only in a worktree. az-6n75 is that gap — nine beads
+// closed as delivered whose commits had no remote ref, one of them the only copy
+// in existence.
+func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool, commitOnRemote func(commit string) bool) []string {
 	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
 	if outcome == "" {
 		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
@@ -97,6 +105,9 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 	if commit != "" && branch != "" && !commitReachable(commit, branch) {
 		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
 	}
+	if commit != "" && !commitOnRemote(commit) {
+		violations = append(violations, fmt.Sprintf("%s %s is not present on any remote — the work exists only locally and any worktree prune or branch GC destroys it (push before closing)", beadmeta.WorkCommitMetadataKey, commit))
+	}
 	return violations
 }
 
@@ -114,6 +125,46 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 		return false
 	}
 	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, branch).Run() == nil
+}
+
+// gitCommitOnRemote reports whether commit is contained in any remote-tracking
+// ref in the repository at repoDir — i.e. whether the work has been published and
+// would survive the worktree being pruned.
+//
+// `git rev-list --max-count=1 <commit> --not --remotes` lists commits reachable
+// from commit but from no remote: empty output means the commit is already on a
+// remote. Any git error reads as "not on a remote" so the gate fails closed —
+// a false "at risk" costs one push, a false "durable" costs the work.
+//
+// This deliberately consults remote-tracking refs rather than running ls-remote:
+// the close path must not depend on network reachability. The tradeoff is that a
+// commit pushed by another clone since the last fetch reads as not-durable.
+func gitCommitOnRemote(repoDir, commit string) bool {
+	if strings.TrimSpace(repoDir) == "" || commit == "" {
+		return false
+	}
+	if strings.HasPrefix(commit, "-") {
+		return false
+	}
+	// A repo with no remotes configured has nowhere to publish, so durability is
+	// not applicable and the rule is skipped. Without this, every close in a
+	// local-only repo would be flagged for a push that cannot exist.
+	//
+	// Known tradeoff: a rig whose origin is removed or renamed silently stops
+	// being protected by this rule. Detecting that is the config layer's job —
+	// the close gate cannot tell "deliberately local" from "misconfigured".
+	remotes, err := exec.Command("git", "-C", repoDir, "remote").Output()
+	if err != nil {
+		return false
+	}
+	if len(strings.TrimSpace(string(remotes))) == 0 {
+		return true
+	}
+	out, err := exec.Command("git", "-C", repoDir, "rev-list", "--max-count=1", commit, "--not", "--remotes").Output()
+	if err != nil {
+		return false
+	}
+	return len(strings.TrimSpace(string(out))) == 0
 }
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and
@@ -223,6 +274,8 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, scopeRoot s
 		} else {
 			violations = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
 				return gitCommitReachableOnBranch(repoDir, commit, branch)
+			}, func(commit string) bool {
+				return gitCommitOnRemote(repoDir, commit)
 			})
 		}
 		for _, v := range violations {
