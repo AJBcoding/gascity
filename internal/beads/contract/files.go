@@ -314,6 +314,32 @@ func ScopeHasEndpointAuthority(fs fsys.FS, scopeRoot string) bool {
 	return ConfigHasEndpointAuthority(cfg)
 }
 
+// ReadMetadataBackend reads the raw backend field from metadata.json without
+// validating it against the backend set LoadMetadataState accepts.
+//
+// Callers that must classify a scope whose backend may be outside the Dolt
+// contract (bd supports backends this package does not model, e.g. mysql) need
+// the recorded value, not a rejection. Absence, unreadable JSON, and an empty
+// backend all report ok=false. I/O failures other than ENOENT surface as
+// errors, mirroring ReadDoltDatabase.
+func ReadMetadataBackend(fs fsys.FS, path string) (string, bool, error) {
+	data, err := fs.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	var meta map[string]any
+	if err := json.Unmarshal(data, &meta); err != nil {
+		return "", false, nil
+	}
+	if value := trimmedString(meta["backend"]); value != "" {
+		return value, true, nil
+	}
+	return "", false, nil
+}
+
 // ReadDoltDatabase reads the pinned dolt_database from metadata.json.
 func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 	data, err := fs.ReadFile(path)

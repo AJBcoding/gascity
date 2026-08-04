@@ -985,7 +985,7 @@ func validateBDStoreTarget(cityPath, scopeRoot string) (contract.DoltConnectionT
 	if !scopeUsesBDDoltStore(cityPath, scopeRoot) {
 		return contract.DoltConnectionTarget{}, "", false, nil
 	}
-	if scopeUsesBDDoltliteStore(cityPath, scopeRoot) {
+	if _, skip := scopeSkipsDoltEndpoint(cityPath, scopeRoot); skip {
 		return contract.DoltConnectionTarget{}, "", false, nil
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
@@ -1026,18 +1026,48 @@ func providerUsesBDDoltStore(provider string) bool {
 	return false
 }
 
-func scopeUsesBDDoltliteStore(cityPath, scopePath string) bool {
-	if backend := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); strings.EqualFold(backend, "doltlite") {
+// backendUsesDoltEndpoint reports whether a bd backend stores beads behind a
+// Dolt server endpoint. Only "dolt" does; an empty value means unset, which
+// defaults to managed Dolt. Every other backend (doltlite embeds its store,
+// mysql and postgres speak to their own servers) reaches its data without the
+// Dolt endpoint, so Dolt endpoint state is not applicable to it.
+func backendUsesDoltEndpoint(backend string) bool {
+	backend = strings.TrimSpace(backend)
+	return backend == "" || strings.EqualFold(backend, "dolt")
+}
+
+// scopeBeadsBackend resolves the bd backend in effect for scopePath, most
+// authoritative source first: an explicit GC_BEADS_BACKEND override scoped to
+// this path, then the scope's own .beads/metadata.json (the file bd itself
+// reads, and the only per-scope record), then the city-wide [beads].backend.
+// It returns "" when no source names a backend.
+func scopeBeadsBackend(cityPath, scopePath string) string {
+	if backend := strings.TrimSpace(os.Getenv("GC_BEADS_BACKEND")); backend != "" {
 		scopedRoot := strings.TrimSpace(os.Getenv("GC_BEADS_SCOPE_ROOT"))
 		if scopedRoot == "" || sameDoctorScope(resolveDoctorScopePath(cityPath, scopedRoot), resolveDoctorScopePath(cityPath, scopePath)) {
-			return true
+			return backend
 		}
+	}
+	scopeRoot := resolveDoctorScopePath(cityPath, scopePath)
+	if backend, ok, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json")); err == nil && ok {
+		return backend
 	}
 	cfg, err := config.Load(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
 	if err != nil {
-		return false
+		return ""
 	}
-	return strings.EqualFold(strings.TrimSpace(cfg.Beads.Backend), "doltlite")
+	return strings.TrimSpace(cfg.Beads.Backend)
+}
+
+// scopeSkipsDoltEndpoint reports whether scopePath's beads backend runs without
+// a Dolt server, and names that backend for the not-applicable message. A Dolt
+// scope always reports false, so Dolt endpoint checks keep their teeth.
+func scopeSkipsDoltEndpoint(cityPath, scopePath string) (string, bool) {
+	backend := scopeBeadsBackend(cityPath, scopePath)
+	if backendUsesDoltEndpoint(backend) {
+		return "", false
+	}
+	return backend, true
 }
 
 func doctorExecProviderBase(provider string) string {
@@ -1146,9 +1176,9 @@ func (c *DoltServerCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "skipped (file backend or GC_DOLT=skip)"
 		return r
 	}
-	if scopeUsesBDDoltliteStore(c.cityPath, c.cityPath) {
+	if backend, skip := scopeSkipsDoltEndpoint(c.cityPath, c.cityPath); skip {
 		r.Status = StatusOK
-		r.Message = "not required (bd backend=doltlite)"
+		r.Message = fmt.Sprintf("not required (bd backend=%s)", backend)
 		return r
 	}
 
@@ -1210,9 +1240,9 @@ func (c *RigDoltServerCheck) Run(_ *CheckContext) *CheckResult {
 	if !filepath.IsAbs(rigPath) {
 		rigPath = filepath.Join(c.cityPath, rigPath)
 	}
-	if scopeUsesBDDoltliteStore(c.cityPath, rigPath) {
+	if backend, skip := scopeSkipsDoltEndpoint(c.cityPath, rigPath); skip {
 		r.Status = StatusOK
-		r.Message = "not required (bd backend=doltlite)"
+		r.Message = fmt.Sprintf("not required (bd backend=%s)", backend)
 		return r
 	}
 	if err := contract.ValidateInheritedCityEndpointMirror(fsys.OSFS{}, c.cityPath, rigPath); err != nil {

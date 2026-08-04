@@ -1407,6 +1407,67 @@ func TestReadDoltDatabase(t *testing.T) {
 	}
 }
 
+func TestReadMetadataBackend(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string // "" means do not create the file
+		want     string
+		wantOK   bool
+	}{
+		{name: "dolt", contents: `{"backend":"dolt"}`, want: "dolt", wantOK: true},
+		{name: "doltlite", contents: `{"backend":"doltlite"}`, want: "doltlite", wantOK: true},
+		// The point of this reader: backends LoadMetadataState rejects must
+		// still be reported verbatim so callers can classify them.
+		{name: "mysql is reported, not rejected", contents: `{"backend":"mysql","mysql_database":"az_beads"}`, want: "mysql", wantOK: true},
+		{name: "surrounding whitespace trimmed", contents: `{"backend":"  mysql  "}`, want: "mysql", wantOK: true},
+		{name: "empty backend", contents: `{"backend":""}`, wantOK: false},
+		{name: "backend absent", contents: `{"database":"beads.db"}`, wantOK: false},
+		// Non-string values stringify, matching ReadDoltDatabase and every
+		// other metadata reader in this package (all share trimmedString).
+		{name: "non-string backend stringifies", contents: `{"backend":7}`, want: "7", wantOK: true},
+		{name: "null backend", contents: `{"backend":null}`, wantOK: false},
+		{name: "unparsable json", contents: `{oh no`, wantOK: false},
+		{name: "missing file", contents: "", wantOK: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fs := fsys.OSFS{}
+			path := filepath.Join(t.TempDir(), "metadata.json")
+			if tt.contents != "" {
+				if err := fs.WriteFile(path, []byte(tt.contents), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			got, ok, err := ReadMetadataBackend(fs, path)
+			if err != nil {
+				t.Fatalf("ReadMetadataBackend() error = %v, want nil", err)
+			}
+			if ok != tt.wantOK || got != tt.want {
+				t.Fatalf("ReadMetadataBackend() = (%q, %v), want (%q, %v)", got, ok, tt.want, tt.wantOK)
+			}
+		})
+	}
+}
+
+// TestReadMetadataBackendSurfacesReadErrors proves a genuine I/O failure is not
+// silently reported as "no backend recorded".
+func TestReadMetadataBackendSurfacesReadErrors(t *testing.T) {
+	fs := fsys.OSFS{}
+	dir := t.TempDir()
+	// A directory at the metadata path fails to read for a reason other than
+	// ENOENT.
+	path := filepath.Join(dir, "metadata.json")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, ok, err := ReadMetadataBackend(fs, path); err == nil {
+		t.Fatalf("ReadMetadataBackend() error = nil (ok = %v), want a read error", ok)
+	}
+}
+
 func countLineOccurrences(text, needle string) int {
 	count := 0
 	for _, line := range strings.Split(text, "\n") {
