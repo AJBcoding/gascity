@@ -420,7 +420,7 @@ func (c *client) tabRename(ctx context.Context, tabID, label string) error {
 }
 
 // tabClose closes a tab and its panes (used to recycle a stale tab left by a
-// previous life of the same session before creating its replacement).
+// previous life of the same session once its replacement exists).
 func (c *client) tabClose(ctx context.Context, tabID string) error {
 	_, err := c.run(ctx, "tab", "close", tabID)
 	return err
@@ -431,9 +431,9 @@ func (c *client) tabClose(ctx context.Context, tabID string) error {
 // the per-rig/town workspace wsLabel, then creates the per-agent tab tabLabel
 // inside it with the agent's cwd and env baked into the pane. A stale tab
 // with the same label (left by a previous life of this session — e.g. an
-// exited agent whose pane sits at a shell prompt) is closed first, so every
-// Start gets a clean shell with the right cwd/env and dead panes never
-// accumulate across restarts.
+// exited agent whose pane sits at a shell prompt) is closed once the
+// replacement exists, so every Start gets a clean shell with the right
+// cwd/env and dead panes never accumulate across restarts.
 func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd string, env map[string]string) (tabID, paneID string, err error) {
 	wsID, err := c.findWorkspace(ctx, wsLabel)
 	if err != nil {
@@ -452,12 +452,21 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 	if err != nil {
 		return "", "", err
 	}
+	// Create the replacement BEFORE closing stale tabs: under herdr ≥0.8.0
+	// closing a workspace's last tab closes the workspace itself, so a
+	// close-then-create on a single-tab workspace would destroy the workspace
+	// the create needs. Create-first keeps the tab count above zero on every
+	// version, and the TabID guard keeps the fresh tab out of the recycle loop.
+	tabID, paneID, err = c.tabCreate(ctx, wsID, tabLabel, cwd, env)
+	if err != nil {
+		return "", "", err
+	}
 	for _, tb := range tabs {
-		if tb.Label == tabLabel {
-			_ = c.tabClose(ctx, tb.TabID) // best-effort: replaced below either way
+		if tb.Label == tabLabel && tb.TabID != tabID {
+			_ = c.tabClose(ctx, tb.TabID) // best-effort: superseded by the new tab either way
 		}
 	}
-	return c.tabCreate(ctx, wsID, tabLabel, cwd, env)
+	return tabID, paneID, nil
 }
 
 // ── shared session-server lifecycle ──────────────────────────────────────────
