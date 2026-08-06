@@ -152,16 +152,36 @@ fi
 
 # No-Dolt guard. Core ships these maintenance scripts to every city, but
 # they only have work when the city has a Dolt target. Skip (exit 0)
-# instead of failing (exit 78) when no Dolt evidence exists, so cities on
-# file/postgres backends do not log a recurring OrderFailed every cooldown.
+# instead of failing (exit 78) when no Dolt target exists, so cities on
+# file/postgres/mysql backends do not log a recurring OrderFailed every cooldown.
 # Order dispatch projects GC_DOLT_PORT explicitly — empty when the city has
 # no canonical Dolt target — so a non-empty port here is city-derived, not
 # inherited operator environment.
+#
+# The distinction that matters here is "has no Dolt target" vs "has a Dolt
+# target that is currently broken". Only the first may skip; the second must
+# still fail loudly, or a corrupt state file silently disables maintenance
+# forever. So the managed state file stays a presence test, while the two
+# signals that a migrated-away city leaves behind as debris are tightened:
+# artifacts outlive the server they evidence, and both of these outlive it in
+# a form indistinguishable from a live target.
 core_city_has_dolt_target() {
     [ -n "${GC_DOLT_PORT:-}" ] && return 0
+    # Presence, deliberately: a managed state file means this city IS configured
+    # for Dolt, so a corrupt or unresolvable one must reach the resolver below
+    # and exit 78 rather than skip.
     [ -f "$DOLT_STATE_FILE" ] && return 0
-    [ -n "${DOLT_PROVIDER_STATE_FILE:-}" ] && [ -f "$DOLT_PROVIDER_STATE_FILE" ] && return 0
-    [ -d "$GC_CITY_PATH/.beads/dolt" ] && return 0
+    # Provider state is routinely left behind by a backend migration, so require
+    # it to describe a LIVE server rather than merely exist.
+    if [ -n "${DOLT_PROVIDER_STATE_FILE:-}" ] && [ -f "$DOLT_PROVIDER_STATE_FILE" ]; then
+        [ -n "$(managed_runtime_port "$DOLT_PROVIDER_STATE_FILE" "$GC_CITY_PATH/.beads/dolt" 2>/dev/null)" ] && return 0
+    fi
+    # .beads/dolt/ survives a migration as an empty husk, so a bare directory is
+    # not evidence. Require actual Dolt data — a noms manifest, the same signal
+    # mol-dog-phantom-db.sh uses to tell a real database from a phantom.
+    for _core_dolt_db in "$GC_CITY_PATH/.beads/dolt"/*/; do
+        [ -f "$_core_dolt_db/.dolt/noms/manifest" ] && return 0
+    done
     return 1
 }
 

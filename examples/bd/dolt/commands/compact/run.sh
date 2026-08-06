@@ -241,6 +241,13 @@ case "${GC_DOLT_MANAGED_LOCAL:-}" in
 esac
 
 PACK_DIR="${GC_PACK_DIR:-$(unset CDPATH; cd -- "$(dirname "$0")/.." && pwd)}"
+# Every branch of the target guard below re-resolves the port itself and exits 0
+# when this city has no live Dolt runtime, so runtime.sh must not exit 78 out
+# from under us first — that failure fires before the guard is reached and turns
+# a clean skip into a recurring OrderFailed. Safe here specifically because the
+# guard below is total: each branch either sets GC_DOLT_PORT or exits 0.
+GC_DOLT_PORT_OPTIONAL=1
+export GC_DOLT_PORT_OPTIONAL
 # shellcheck disable=SC1091
 . "$PACK_DIR/assets/scripts/runtime.sh"
 # shellcheck disable=SC1091

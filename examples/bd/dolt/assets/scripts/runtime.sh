@@ -219,7 +219,20 @@ managed_runtime_port() (
 # runtime state over stale inherited env, then falls back to GC_DOLT_PORT as an
 # operator seed, and exits 78 if neither yields a port.
 . "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/port_resolve.sh"
-GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
+if [ "${GC_DOLT_PORT_OPTIONAL:-}" = "1" ]; then
+  # Opt-in for callers that re-resolve the port themselves and have their own
+  # complete no-target skip path (currently `gc dolt compact`). For those, a
+  # hard exit 78 here fires BEFORE the caller's guard can run, converting a
+  # legitimate no-op on a city with no live Dolt target into a recurring
+  # OrderFailed every cooldown. Leave the port empty and let the caller decide.
+  #
+  # Only set this if you guarantee GC_DOLT_PORT is checked before use — the
+  # scripts that read "$GC_DOLT_PORT" directly (mol-dog-*) would otherwise dial
+  # --port "" instead of skipping.
+  GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH" 2>/dev/null) || GC_DOLT_PORT=""
+else
+  GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
+fi
 
 # Resolve a bounded-execution helper. Prefer gtimeout (coreutils on
 # macOS), fall back to timeout (coreutils on Linux), then to running
