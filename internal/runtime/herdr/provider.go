@@ -216,15 +216,44 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
 		// worse than the prior unconditional send), and the reconciler tolerates a
 		// slow Start (pendingCreateNeverStartedTimeout = 10m).
-		_ = p.WaitForIdle(ctx, name, startupNudgeIdleTimeout)
-		if err := p.c.deliverNudge(ctx, info.PaneID, startupText); err != nil {
-			// Best-effort: the submit didn't confirm (TUI race under boot load).
-			// Surface it rather than silently leaving a stranded startup turn;
-			// nudgeStalledPoolClaims is the reconcile-tick backstop of last resort.
-			fmt.Fprintf(os.Stderr, "herdr: startup delivery for %q not confirmed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+		idleOutcome := p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
+		// Deliver with submission confirmation: the swallowed-CR strand is
+		// detected (agent_prompt_stalled) and recovered in-band with an explicit
+		// Enter (deliverStartupTurn). An error here means even recovery could not
+		// confirm the first turn started — the session is live, so failing Start
+		// would only trigger a respawn storm; record the strand durably instead
+		// so it is machine-visible and countable. nudgeStalledPoolClaims remains
+		// the reconcile-tick backstop of last resort for pool slots.
+		// Reset any marker a crashed prior life left behind (Stop wipes the
+		// sidecar, a crash does not): this life's delivery decides the marker.
+		_ = p.RemoveMeta(name, metaStartupUnconfirmed)
+		if err := p.c.deliverStartupTurn(ctx, info.PaneID, startupText); err != nil {
+			p.recordStartupDeliveryUnconfirmed(name, info.PaneID, idleOutcome, err)
 		}
 	}
 	return nil
+}
+
+// metaStartupUnconfirmed is the sidecar key recording that this life's startup
+// first-turn delivery was never confirmed submitted, even after Enter
+// recovery. The value carries when, the pane, the readiness-guard verdict, and
+// herdr's error. Stop's clearMeta wipes it with the session, so a marker
+// always refers to the CURRENT life; herdr-server.log keeps the historical
+// count (agent.prompt outcomes). Consumers: operators (`gc` sidecar
+// inspection) and a future named-session delivery backstop (gas-90h fix 3).
+const metaStartupUnconfirmed = "GC_HERDR_STARTUP_DELIVERY_UNCONFIRMED"
+
+// recordStartupDeliveryUnconfirmed persists an unconfirmed startup delivery on
+// the session's sidecar and mirrors it to stderr for interactive runs. stderr
+// alone is not enough: daemonized controllers devnull it, which is how this
+// failure stayed invisible for 20h of live operation (gas-90h).
+func (p *Provider) recordStartupDeliveryUnconfirmed(name, paneID string, idleOutcome idleWaitOutcome, derr error) {
+	detail := fmt.Sprintf("%s pane=%s idle_wait=%s: %v",
+		time.Now().UTC().Format(time.RFC3339), paneID, idleOutcome, derr)
+	if err := p.SetMeta(name, metaStartupUnconfirmed, detail); err != nil {
+		fmt.Fprintf(os.Stderr, "herdr: recording unconfirmed startup delivery for %q failed: %v\n", name, err) //nolint:errcheck // best-effort diagnostic
+	}
+	fmt.Fprintf(os.Stderr, "herdr: startup delivery for %q not confirmed: %v\n", name, derr) //nolint:errcheck // best-effort diagnostic
 }
 
 // startupDeliveryText resolves the first-turn text Start delivers to a freshly
@@ -273,9 +302,9 @@ func startupPrimeText(cfg runtime.Config) string {
 // startupNudgeIdleTimeout bounds how long Start waits for a freshly-spawned
 // agent to reach its idle input prompt before delivering the startup nudge. The
 // wait returns as soon as the agent idles (typically a few seconds); the bound
-// only bites on a boot that never idles, after which the nudge is sent
-// best-effort. Sized generously to cover cold, concurrent boots during a
-// town-wide restart.
+// only bites on a boot that never idles, after which delivery proceeds anyway —
+// deliverStartupTurn confirms (or recovers) the submit either way. Sized
+// generously to cover cold, concurrent boots during a town-wide restart.
 const startupNudgeIdleTimeout = 60 * time.Second
 
 const (
