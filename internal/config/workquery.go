@@ -92,15 +92,28 @@ func legacyEphemeralPoolDemandShell(limit int, includeEphemeralReady, quiet bool
 			` | select((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == $target) or ((`+jqMeta(beadmeta.RoutedToMetadataKey)+` == "") and (`+jqMeta(beadmeta.RunTargetMetadataKey)+` == $target) and (`+jqMeta(beadmeta.KindMetadataKey)+` == "`+beadmeta.KindWorkflow+`")))`,
 		limit,
 	)
-	query := bdQueryEphemeralStatusShell("open")
 	if quiet {
-		query = bdQueryEphemeralStatusQuietShell("open")
+		// The quiet form is the work-query path, where the assigned-ready probe
+		// has already populated the memo with this exact unlimited scan earlier
+		// in the same script. Reuse it instead of re-running bd: the query is
+		// byte-identical, every bd exec costs a flat ~0.16s, and `gc hook` runs
+		// the whole script once per store (kit-r0e2).
+		//
+		// The scan-then-jq shape is load-bearing and must survive: bd list
+		// cannot see ephemeral beads at all, so this unfiltered scan piped into
+		// jq is the only thing that surfaces patrol wisps. Only the redundant
+		// second scan is elided; the filter stays client-side.
+		//
+		// The memo is read across the $( ) the caller wraps this in — a write
+		// inside that subshell would not reach the parent — so this pays only
+		// when the assigned-ready probe ran first. It is still correct if it did
+		// not: ephemeralScanMemoShell populates the var lazily on first use.
+		return ephemeralScanMemoShell(ephemeralOpenMemoVar, "open") +
+			`{ printf "%s" "$` + ephemeralOpenMemoVar + `" | jq --arg target "$target" ` +
+			shellquote.Quote(filter) + ` 2>/dev/null; } || printf "[]"`
 	}
-	jqStderr := ""
-	if quiet {
-		jqStderr = ` 2>/dev/null`
-	}
-	return `{ ` + query + ` | jq --arg target "$target" ` + shellquote.Quote(filter) + jqStderr + `; } || printf "[]"`
+	return `{ ` + bdQueryEphemeralStatusShell("open") + ` | jq --arg target "$target" ` +
+		shellquote.Quote(filter) + `; } || printf "[]"`
 }
 
 // poolDemandFirstRowFunctionScript emits the work_query Tier 3 function: it
@@ -216,9 +229,44 @@ func legacyControlAssignedReadyWorkQueryScript(includeEphemeralReady bool) strin
 		`done; `
 }
 
+// Shell variables holding the memoized ephemeral scans. One per status, since
+// the two probes scan different statuses and share a script.
+const (
+	ephemeralInProgressMemoVar = "__gc_eph_in_progress"
+	ephemeralOpenMemoVar       = "__gc_eph_open"
+)
+
+// ephemeralScanMemoShell emits the shell that populates memoVar with one
+// unlimited ephemeral scan for status, at most once per script run.
+//
+// The assigned-work probes loop over three candidate identities
+// ($GC_SESSION_ID, $GC_SESSION_NAME, $GC_ALIAS), and this scan is
+// loop-invariant: the identity enters only through the jq filter downstream,
+// never through the bd query. Re-running it per identity therefore spent an
+// extra subprocess per iteration for a byte-identical result. Every bd exec
+// costs a flat ~0.13s of process startup and connection regardless of query
+// shape, and `gc hook` runs the whole script once per store, so the identity
+// loop alone accounted for 14 of 33 bd execs on an idle agent (kit-021).
+//
+// The guard keeps the scan LAZY on purpose. Hoisting it to the top of the
+// script would dedupe just as well but would add a subprocess to the fast path,
+// where an earlier identity already matched and the fallback is never reached
+// (TestAssignedInProgressQuerySkipsEphemeralProbeWhenFirstIdentityHasWork).
+//
+// A failed scan memoizes as empty for the rest of the script instead of being
+// retried on the next identity. The probe is best-effort either way — its
+// stderr is discarded and a failure already presents as "no work" — so this
+// trades an incidental retry for a bounded subprocess count.
+func ephemeralScanMemoShell(memoVar, status string) string {
+	return `if [ -z "${` + memoVar + `_done:-}" ]; then ` +
+		memoVar + `=$(` + bdQueryEphemeralStatusQuietShell(status) + `); ` +
+		memoVar + `_done=1; fi; `
+}
+
 func ephemeralAssignedInProgressProbeScript(shellVar string, includeEphemeralReady bool) string {
 	_ = includeEphemeralReady
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("in_progress") + ` | ` +
+	return ephemeralScanMemoShell(ephemeralInProgressMemoVar, "in_progress") +
+		`r=$(printf "%s" "$` + ephemeralInProgressMemoVar + `" | ` +
 		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
@@ -228,7 +276,8 @@ func ephemeralAssignedReadyProbeScript(shellVar string, includeEphemeralReady bo
 		return ""
 	}
 	filter := legacyEphemeralReadyFilterJQ(`select((.assignee // "") == $id)`, 1)
-	return `r=$(` + bdQueryEphemeralStatusQuietShell("open") + ` | ` +
+	return ephemeralScanMemoShell(ephemeralOpenMemoVar, "open") +
+		`r=$(printf "%s" "$` + ephemeralOpenMemoVar + `" | ` +
 		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
