@@ -786,6 +786,104 @@ func TestEvaluateWorkRecordCloseGateStaleLocalRef(t *testing.T) {
 	}
 }
 
+// TestEvaluateWorkRecordCloseGateSelfRemote is the gas-6tc regression test.
+// The gascity repo carries a remote whose URL is the repo's own path
+// (herdr-src), with fetched remote-tracking refs snapshotting local branches.
+// A blanket `rev-list <sha> --not --remotes` then reads any previously-fetched
+// local commit as "published" — the az-6n75 hole reopened by configuration, on
+// exactly the rig where the gate guards the gc tool itself. The witness-side
+// twin was fixed as gas-6wq ("exclude self-referential path remotes from the
+// publication oracle"); this covers the Go side: neither the durability oracle
+// nor the stale-stamp containment resolver may count a self-remote.
+func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
+	originDir := t.TempDir()
+	runGit(t, originDir, "init", "--bare", "--initial-branch=main")
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	runGit(t, repoDir, "remote", "add", "origin", originDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, repoDir, "add", "base.txt")
+	runGit(t, repoDir, "commit", "-m", "test: base")
+	runGit(t, repoDir, "push", "origin", "main")
+
+	// The self-referential path remote, as herdr-src is configured in the wild.
+	runGit(t, repoDir, "remote", "add", "self-src", repoDir)
+
+	// Unpushed work on its own branch; then fetch the self-remote so
+	// refs/remotes/self-src/* snapshot the local branches including the commit.
+	const workBranch = "gc-gastown.slit-9d8c7b6a5f4e"
+	runGit(t, repoDir, "checkout", "-b", workBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("only local\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	runGit(t, repoDir, "add", "feature.txt")
+	runGit(t, repoDir, "commit", "-m", "feat: never pushed off-machine")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	runGit(t, repoDir, "fetch", "self-src")
+
+	// Precondition: the self-remote genuinely snapshots the unpushed commit —
+	// the blanket --remotes query is genuinely defeated without the exclusion.
+	if err := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, "refs/remotes/self-src/"+workBranch).Run(); err != nil {
+		t.Fatalf("precondition: self-remote ref must contain the unpushed commit")
+	}
+
+	newStore := func() beads.Store {
+		return beads.NewMemStoreFrom(1, []beads.Bead{{
+			ID:     "wr-self-remote",
+			Type:   "task",
+			Status: "in_progress",
+			Metadata: map[string]string{
+				beadmeta.WorkDirMetadataKey: repoDir,
+			},
+		}}, nil)
+	}
+	closeArgs := func(branch string) []string {
+		return []string{
+			"update", "wr-self-remote",
+			"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+			"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+			"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + branch,
+			"--status=closed",
+		}
+	}
+
+	// With a correct branch stamp: the commit is reachable locally, its only
+	// "remote" presence is the self-remote snapshot — undelivered. Must block.
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(closeArgs(workBranch), newStore(), repoDir, true, &stderr); !block {
+		t.Fatalf("close of self-remote-only work was allowed; --remotes counted the repo itself")
+	}
+	if got := stderr.String(); !strings.Contains(got, "not present on any remote") {
+		t.Fatalf("expected a durability violation, got %q", got)
+	}
+
+	// With a stale branch stamp: the containment resolver must not surface the
+	// self-remote snapshot as a landing branch — no advisory, still blocked.
+	var staleStderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(closeArgs("gc-gastown.nux-1a2b3c4d5e6f"), newStore(), repoDir, true, &staleStderr); !block {
+		t.Fatalf("stale-stamp close of self-remote-only work was allowed")
+	}
+	if got := staleStderr.String(); strings.Contains(got, "self-src/") {
+		t.Fatalf("advisory named a self-remote branch: %q", got)
+	}
+
+	// Paired positive: after a real push, the same close must be allowed — the
+	// exclusion must not block genuinely delivered work.
+	runGit(t, repoDir, "push", "origin", workBranch)
+	var pushedStderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(closeArgs(workBranch), newStore(), repoDir, true, &pushedStderr); block {
+		t.Fatalf("close blocked after real push; stderr=%s", pushedStderr.String())
+	}
+	if got := pushedStderr.String(); got != "" {
+		t.Fatalf("pushed close warned: %q", got)
+	}
+}
+
 func TestWorkRecordEnforceEnabled(t *testing.T) {
 	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
 		t.Setenv(workRecordEnforceEnvVar, v)

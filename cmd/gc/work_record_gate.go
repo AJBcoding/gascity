@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -178,14 +179,21 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
 }
 
-// gitCommitOnRemote reports whether commit is contained in any remote-tracking
-// ref in the repository at repoDir — i.e. whether the work has been published and
-// would survive the worktree being pruned.
+// gitCommitOnRemote reports whether commit is contained in a remote-tracking
+// ref of a PUBLICATION remote in the repository at repoDir — i.e. whether the
+// work has been published and would survive the worktree being pruned.
 //
-// `git rev-list --max-count=1 <commit> --not --remotes` lists commits reachable
-// from commit but from no remote: empty output means the commit is already on a
-// remote. Any git error reads as "not on a remote" so the gate fails closed —
-// a false "at risk" costs one push, a false "durable" costs the work.
+// It lists commits reachable from commit but from no publication remote: empty
+// output means the commit is already on one. Any git error reads as "not on a
+// remote" so the gate fails closed — a false "at risk" costs one push, a false
+// "durable" costs the work.
+//
+// Self-referential path remotes are excluded (gas-6tc; witness-side twin
+// gas-6wq): a remote whose URL resolves back into this same repository — the
+// gascity repo carries herdr-src = its own path — snapshots local branches into
+// refs/remotes/*, so a blanket --remotes reads any previously-fetched local
+// commit as "published" while it exists nowhere off this repo. That is the
+// az-6n75 hole reopened by configuration.
 //
 // This deliberately consults remote-tracking refs rather than running ls-remote:
 // the close path must not depend on network reachability. The tradeoff is that a
@@ -197,37 +205,137 @@ func gitCommitOnRemote(repoDir, commit string) bool {
 	if strings.HasPrefix(commit, "-") {
 		return false
 	}
-	// A repo with no remotes configured has nowhere to publish, so durability is
-	// not applicable and the rule is skipped. Without this, every close in a
-	// local-only repo would be flagged for a push that cannot exist.
+	// A repo with no publication remotes has nowhere to publish, so durability
+	// is not applicable and the rule is skipped. Without this, every close in a
+	// local-only repo would be flagged for a push that cannot exist. A repo
+	// whose only remotes are self-referential is local-only in the same sense.
 	//
 	// Known tradeoff: a rig whose origin is removed or renamed silently stops
 	// being protected by this rule. Detecting that is the config layer's job —
 	// the close gate cannot tell "deliberately local" from "misconfigured".
-	remotes, err := exec.Command("git", "-C", repoDir, "remote").Output()
-	if err != nil {
+	publication := gitPublicationRemotes(repoDir)
+	if publication == nil {
 		return false
 	}
-	if len(strings.TrimSpace(string(remotes))) == 0 {
+	if len(publication) == 0 {
 		return true
 	}
-	out, err := exec.Command("git", "-C", repoDir, "rev-list", "--max-count=1", commit, "--not", "--remotes").Output()
+	args := []string{"-C", repoDir, "rev-list", "--max-count=1", commit, "--not"}
+	for _, name := range publication {
+		args = append(args, "--glob=refs/remotes/"+name+"/*")
+	}
+	out, err := exec.Command("git", args...).Output()
 	if err != nil {
 		return false
 	}
 	return len(strings.TrimSpace(string(out))) == 0
 }
 
+// gitPublicationRemotes returns the names of repoDir's remotes that can confer
+// durability: every configured remote except those whose URL resolves back into
+// this same repository (gas-6tc). nil means the remote list could not be read
+// (callers fail closed); an empty slice means there are remotes but none that
+// publish, or none at all.
+func gitPublicationRemotes(repoDir string) []string {
+	out, err := exec.Command("git", "-C", repoDir, "remote").Output()
+	if err != nil {
+		return nil
+	}
+	selfCommon := gitCommonDir(repoDir)
+	publication := []string{}
+	for _, name := range strings.Fields(string(out)) {
+		if strings.HasPrefix(name, "-") {
+			continue
+		}
+		urlOut, err := exec.Command("git", "-C", repoDir, "remote", "get-url", name).Output()
+		if err != nil {
+			// Unreadable URL: treat as a publication remote so the durability
+			// rule stays armed rather than silently skipped.
+			publication = append(publication, name)
+			continue
+		}
+		url := strings.TrimSpace(string(urlOut))
+		if isSelfRemoteURL(url, selfCommon) {
+			continue
+		}
+		publication = append(publication, name)
+	}
+	return publication
+}
+
+// isSelfRemoteURL reports whether a remote URL is a filesystem path that
+// resolves to the repository whose git common dir is selfCommon. Network URLs
+// (scheme://host/..., scp-style user@host:path) are never self-referential.
+func isSelfRemoteURL(url, selfCommon string) bool {
+	if url == "" || selfCommon == "" {
+		return false
+	}
+	if strings.Contains(url, "://") {
+		if !strings.HasPrefix(url, "file://") {
+			return false
+		}
+		url = strings.TrimPrefix(url, "file://")
+	} else if strings.Contains(url, "@") || looksLikeSCPRemote(url) {
+		return false
+	}
+	common := gitCommonDir(url)
+	return common != "" && common == selfCommon
+}
+
+// looksLikeSCPRemote reports whether url is scp-style (host:path) rather than a
+// local path: a colon before the first slash.
+func looksLikeSCPRemote(url string) bool {
+	colon := strings.Index(url, ":")
+	if colon < 0 {
+		return false
+	}
+	slash := strings.Index(url, "/")
+	return slash < 0 || colon < slash
+}
+
+// gitCommonDir resolves dir's git common directory (shared across worktrees) to
+// an absolute, symlink-resolved path, or "" when dir is not a git repository.
+// Two paths into the same repository — the root and any of its worktrees —
+// resolve to the same common dir, which is what makes it the right identity for
+// self-remote detection.
+func gitCommonDir(dir string) string {
+	if strings.TrimSpace(dir) == "" || strings.HasPrefix(dir, "-") {
+		return ""
+	}
+	out, err := exec.Command("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	if err != nil {
+		return ""
+	}
+	p := strings.TrimSpace(string(out))
+	if p == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(p); err == nil {
+		return resolved
+	}
+	return p
+}
+
 // gitRemoteBranchesContaining reports which remote-tracking branches contain
 // commit in the repository at repoDir, short-form ("origin/main"), with the
-// symbolic origin/HEAD entry filtered out. It powers the stale claim-stamp
-// advisory (Defect C): when the stamped branch does not contain a shipped
-// commit, the branches that DO name where the work actually landed. Any git
-// error reads as "no containing branches", which downgrades the caller to the
-// blocking not-reachable violation — fail closed, never open.
+// symbolic origin/HEAD entry and self-referential remotes' branches (gas-6tc)
+// filtered out. It powers the stale claim-stamp advisory (Defect C): when the
+// stamped branch does not contain a shipped commit, the branches that DO name
+// where the work actually landed — so a self-remote snapshot must never appear
+// as a landing branch. Any git error reads as "no containing branches", which
+// downgrades the caller to the blocking not-reachable violation — fail closed,
+// never open.
 func gitRemoteBranchesContaining(repoDir, commit string) []string {
 	if strings.TrimSpace(repoDir) == "" || commit == "" || strings.HasPrefix(commit, "-") {
 		return nil
+	}
+	publication := gitPublicationRemotes(repoDir)
+	if len(publication) == 0 {
+		return nil
+	}
+	publishes := make(map[string]bool, len(publication))
+	for _, name := range publication {
+		publishes[name] = true
 	}
 	out, err := exec.Command("git", "-C", repoDir, "branch", "-r", "--contains", commit, "--format=%(refname:short)").Output()
 	if err != nil {
@@ -237,6 +345,10 @@ func gitRemoteBranchesContaining(repoDir, commit string) []string {
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasSuffix(line, "/HEAD") {
+			continue
+		}
+		remote, _, ok := strings.Cut(line, "/")
+		if !ok || !publishes[remote] {
 			continue
 		}
 		branches = append(branches, line)
