@@ -193,6 +193,28 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, nil
 }
 
+// configuredRigRepos returns the absolute repository path of every configured
+// rig, for the work-record close gate: a crew agent closes from a city-repo
+// worktree while its commit lives in a rig repo, so the gate has to be able to
+// look beyond the closer's own directory to find it (gas-cj7). Rig paths are
+// resolved the same way bdScopeIssuePrefix does, so migrated rigs bound only in
+// .gc/site.toml resolve to their bound path.
+func configuredRigRepos(cfg *config.City, cityPath string) []string {
+	if cfg == nil {
+		return nil
+	}
+	repos := make([]string, 0, len(cfg.Rigs))
+	for i := range cfg.Rigs {
+		if strings.TrimSpace(cfg.Rigs[i].Path) == "" {
+			continue
+		}
+		if rigPath := resolveStoreScopeRoot(cityPath, cfg.Rigs[i].Path); rigPath != "" {
+			repos = append(repos, rigPath)
+		}
+	}
+	return repos
+}
+
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
@@ -288,7 +310,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// must satisfy the typed work-record contract (gc.work_outcome present;
 	// shipped ⇒ gc.work_commit reachable on gc.work_branch). Warn-only by default;
 	// blocks the close only when GC_WORK_RECORD_ENFORCE is set.
-	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, stderr) {
+	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, configuredRigRepos(cfg, cityPath), stderr) {
 		return 1
 	}
 

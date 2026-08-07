@@ -2449,3 +2449,39 @@ prefix = "fe"
 		t.Fatalf("SQL query = %q, want %q", strings.TrimSpace(string(query)), wantQuery)
 	}
 }
+
+// TestConfiguredRigRepos covers the gas-cj7 wiring. The close gate can only look
+// beyond the closer's own directory if the rig repository paths actually reach
+// it, and a helper that silently returned nothing would leave the gate exactly
+// as broken as it was while every gate unit test still passed — the gas-995
+// inert-mechanism shape. The unbound-rig case is the one with teeth:
+// resolveStoreScopeRoot falls back to cityPath for an empty path, so skipping
+// those rigs is what keeps the CITY repo — the very repo that does not have the
+// commit — from being injected as a candidate.
+func TestConfiguredRigRepos(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "gascity", Path: "/Users/anthonybyrnes/code/gascity"},
+		{Name: "relative", Path: "rigs/local"},
+		{Name: "unbound"},
+	}}
+
+	got := configuredRigRepos(cfg, cityPath)
+	want := []string{"/Users/anthonybyrnes/code/gascity", filepath.Join(cityPath, "rigs", "local")}
+	if len(got) != len(want) {
+		t.Fatalf("configuredRigRepos = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("configuredRigRepos[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+	for _, repo := range got {
+		if repo == filepath.Clean(cityPath) {
+			t.Fatalf("an unbound rig resolved to the city root %q — the gate would search the wrong repo", cityPath)
+		}
+	}
+	if repos := configuredRigRepos(nil, cityPath); repos != nil {
+		t.Fatalf("configuredRigRepos(nil) = %v, want nil", repos)
+	}
+}
