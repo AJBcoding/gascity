@@ -102,7 +102,7 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 			},
 			reachable:  neverReachable,
 			onRemote:   alwaysOnRemote,
-			containing: remoteContains("origin/fix/wr-defect-c"),
+			containing: remoteContains("fix/wr-defect-c"),
 			wantViol:   "",
 			wantAdv:    "fix/wr-defect-c",
 		},
@@ -432,6 +432,256 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	}
 }
 
+// newGateRepo creates a repo with one configured remote (remoteName) backed by
+// a bare origin directory, a base commit on main pushed to that remote, and the
+// remote's HEAD symref set (as a real clone would have it). It is the shared
+// setup for every real-repo gate test; keeping it in one place keeps the gate
+// regression scenarios from silently diverging.
+func newGateRepo(t *testing.T, remoteName string) (repoDir string) {
+	t.Helper()
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare", "--initial-branch=main")
+
+	repoDir = t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	runGit(t, repoDir, "remote", "add", remoteName, bareDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, repoDir, "add", "base.txt")
+	runGit(t, repoDir, "commit", "-m", "test: base")
+	runGit(t, repoDir, "push", remoteName, "main")
+	// A real clone carries refs/remotes/<name>/HEAD; tests must too, because
+	// %(refname:short) renders it as the bare remote name — a shape the
+	// containment filter has to reject (review finding: it sorts first and
+	// would otherwise become the advisory's suggested correction).
+	runGit(t, repoDir, "fetch", remoteName)
+	runGit(t, repoDir, "remote", "set-head", remoteName, "main")
+	return repoDir
+}
+
+// gateCommit writes path with content and commits it in repoDir, returning the
+// commit SHA.
+func gateCommit(t *testing.T, repoDir, path, content, message string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repoDir, path), []byte(content), 0o644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+	runGit(t, repoDir, "add", path)
+	runGit(t, repoDir, "commit", "-m", message)
+	return strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+}
+
+// gateStoreWith returns a fresh in-memory store holding one gated task bead
+// whose work dir is repoDir.
+func gateStoreWith(id, repoDir string) beads.Store {
+	return beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     id,
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: repoDir,
+		},
+	}}, nil)
+}
+
+// gateShippedCloseArgs is the documented atomic shipped-close invocation for
+// bead id: stamp the typed work record and close in one update.
+func gateShippedCloseArgs(id, commit, branch string) []string {
+	return []string{
+		"update", id,
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + branch,
+		"--status=closed",
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateNonOriginRemote covers the review finding that
+// the remote-first resolution must not hardcode the remote name "origin": in a
+// rig whose only remote is named upstream (git clone -o upstream), the #5037
+// stale-local-ref fix must still work, and a stale-stamp advisory must suggest
+// the bare branch name, never a remote-qualified one.
+func TestEvaluateWorkRecordCloseGateNonOriginRemote(t *testing.T) {
+	repoDir := newGateRepo(t, "upstream")
+
+	// Land the work on upstream/main without moving local main (the refinery
+	// topology), as in TestEvaluateWorkRecordCloseGateStaleLocalRef.
+	runGit(t, repoDir, "checkout", "-b", "tmp-land")
+	commit := gateCommit(t, repoDir, "landed.txt", "merged over the network\n", "feat: the work")
+	runGit(t, repoDir, "push", "upstream", "tmp-land:main")
+	runGit(t, repoDir, "fetch", "upstream")
+	runGit(t, repoDir, "checkout", "main")
+	runGit(t, repoDir, "branch", "-D", "tmp-land")
+
+	if err := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, "refs/heads/main").Run(); err == nil {
+		t.Fatalf("precondition: commit must NOT be reachable on the stale local main")
+	}
+	if !gitCommitReachableOnBranch(repoDir, commit, "main") {
+		t.Fatalf("remote-first resolution is inert for a remote not named origin")
+	}
+
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-upstream", commit, "main"), gateStoreWith("wr-upstream", repoDir), repoDir, true, &stderr); block {
+		t.Fatalf("delivered close blocked in a non-origin repo; stderr=%s", stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("clean delivered close produced gate output: %q", got)
+	}
+
+	// Stale stamp in the same repo: the advisory must suggest the unqualified
+	// branch name — never "upstream/main", and never the bare remote name.
+	var staleStderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-upstream", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-upstream", repoDir), repoDir, true, &staleStderr); block {
+		t.Fatalf("delivered stale-stamp close blocked; stderr=%s", staleStderr.String())
+	}
+	out := staleStderr.String()
+	if !strings.Contains(out, beadmeta.WorkBranchMetadataKey+"=main") {
+		t.Fatalf("advisory must suggest the unqualified branch: %q", out)
+	}
+	if strings.Contains(out, beadmeta.WorkBranchMetadataKey+"=upstream") {
+		t.Fatalf("advisory suggested a remote-qualified or bare-remote value: %q", out)
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateUnpushedOnBranchSingleViolation covers the
+// review finding that a commit sitting exactly on its stamped branch's local
+// head — just not yet pushed — must produce only the actionable durability
+// violation, not an additional false "not reachable" one: the stamped branch is
+// factually correct, the only defect is the missing push.
+func TestEvaluateWorkRecordCloseGateUnpushedOnBranchSingleViolation(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+
+	const workBranch = "gc-gastown.rictus-5bca5afe897d"
+	runGit(t, repoDir, "checkout", "-b", workBranch)
+	gateCommit(t, repoDir, "feature.txt", "v1\n", "feat: v1")
+	runGit(t, repoDir, "push", "origin", workBranch)
+	runGit(t, repoDir, "fetch", "origin")
+	// A second commit on the same branch, not yet pushed: origin/<workBranch>
+	// exists but is one behind.
+	commit := gateCommit(t, repoDir, "feature.txt", "v2\n", "feat: v2")
+
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-onbranch", commit, workBranch), gateStoreWith("wr-onbranch", repoDir), repoDir, true, &stderr); !block {
+		t.Fatalf("close of unpushed work was allowed")
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "not present on any remote") {
+		t.Fatalf("expected the durability violation, got %q", out)
+	}
+	if strings.Contains(out, "not reachable") {
+		t.Fatalf("factually-wrong reachability violation for a commit on its stamped branch: %q", out)
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateRemotelessStaleStamp covers the review finding
+// that Defect C persisted in the local-only topology the durability oracle
+// deliberately supports: with no remotes at all, a stale claim stamp must
+// downgrade to an advisory naming the local branch the work landed on, not
+// block the close.
+func TestEvaluateWorkRecordCloseGateRemotelessStaleStamp(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, repoDir, "add", "base.txt")
+	runGit(t, repoDir, "commit", "-m", "test: base")
+
+	runGit(t, repoDir, "checkout", "-b", "fix/local-work")
+	commit := gateCommit(t, repoDir, "feature.txt", "local-only rig\n", "feat: local work")
+
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-remoteless", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-remoteless", repoDir), repoDir, true, &stderr); block {
+		t.Fatalf("stale-stamp close blocked in a remoteless repo; stderr=%s", stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "advisory") || !strings.Contains(out, "fix/local-work") {
+		t.Fatalf("expected a stale-stamp advisory naming the local branch, got %q", out)
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateMissingStampDelivered covers the review
+// finding that a delivered shipped close with no gc.work_branch at all (a
+// detached-HEAD or non-repo claim omits the stamp) was still hard-blocked:
+// when the containment evidence can name the landing branch, the missing stamp
+// downgrades to an advisory carrying the correction.
+func TestEvaluateWorkRecordCloseGateMissingStampDelivered(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+
+	const landedBranch = "fix/wr-detached-claim"
+	runGit(t, repoDir, "checkout", "-b", landedBranch)
+	commit := gateCommit(t, repoDir, "feature.txt", "delivered\n", "feat: the work")
+	runGit(t, repoDir, "push", "origin", landedBranch)
+	runGit(t, repoDir, "fetch", "origin")
+
+	args := []string{
+		"update", "wr-nostamp",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--status=closed",
+	}
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, gateStoreWith("wr-nostamp", repoDir), repoDir, true, &stderr); block {
+		t.Fatalf("delivered close with a missing stamp blocked; stderr=%s", stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "advisory") || !strings.Contains(out, landedBranch) {
+		t.Fatalf("expected a missing-stamp advisory naming the landed branch, got %q", out)
+	}
+
+	// The paired negative: missing stamp AND undelivered commit must still
+	// violate — the downgrade rides on delivery evidence, not on leniency.
+	unpushed := gateCommit(t, repoDir, "feature.txt", "delivered v2\n", "feat: never pushed")
+	undeliveredArgs := []string{
+		"update", "wr-nostamp",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + unpushed,
+		"--status=closed",
+	}
+	var undeliveredStderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(undeliveredArgs, gateStoreWith("wr-nostamp", repoDir), repoDir, true, &undeliveredStderr); !block {
+		t.Fatalf("undelivered close with a missing stamp was allowed")
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateAdvisoryPrefersDefaultBranch covers the review
+// finding that the suggested correction was containing[0] — the alphabetically
+// first remote branch, an arbitrary choice for an older commit contained in
+// many branches. The remote's default branch must win when it contains the
+// commit, and the bare remote name (origin/HEAD's short form) must never be
+// suggested.
+func TestEvaluateWorkRecordCloseGateAdvisoryPrefersDefaultBranch(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+
+	// Land the work on main, then cut branches that also contain it and sort
+	// ahead of "main" alphabetically.
+	runGit(t, repoDir, "checkout", "main")
+	commit := gateCommit(t, repoDir, "feature.txt", "landed\n", "feat: the work")
+	runGit(t, repoDir, "push", "origin", "main")
+	for _, b := range []string{"aa-derived", "ab-derived"} {
+		runGit(t, repoDir, "branch", b)
+		runGit(t, repoDir, "push", "origin", b)
+	}
+	runGit(t, repoDir, "fetch", "origin")
+
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-prefer", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-prefer", repoDir), repoDir, true, &stderr); block {
+		t.Fatalf("delivered stale-stamp close blocked; stderr=%s", stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, beadmeta.WorkBranchMetadataKey+"=main") {
+		t.Fatalf("advisory must suggest the remote default branch, got %q", out)
+	}
+	if strings.Contains(out, beadmeta.WorkBranchMetadataKey+"=aa-derived") {
+		t.Fatalf("advisory suggested the alphabetically-first branch instead of the default: %q", out)
+	}
+}
+
 func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 	repoDir := t.TempDir()
 	runGit(t, repoDir, "init", "--initial-branch=main")
@@ -480,48 +730,15 @@ func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 // is pushed, the same close must be allowed. A rule that blocks unpushed work by
 // blocking everything would pass a one-sided test.
 func TestEvaluateWorkRecordCloseGateUnpushedBranch(t *testing.T) {
-	originDir := t.TempDir()
-	runGit(t, originDir, "init", "--bare", "--initial-branch=main")
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init", "--initial-branch=main")
-	runGit(t, repoDir, "config", "user.name", "Gas City Test")
-	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
-	runGit(t, repoDir, "remote", "add", "origin", originDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write base: %v", err)
-	}
-	runGit(t, repoDir, "add", "base.txt")
-	runGit(t, repoDir, "commit", "-m", "test: base")
-	runGit(t, repoDir, "push", "origin", "main")
+	repoDir := newGateRepo(t, "origin")
 
 	// The polecat's own branch, mirroring gc-gastown.<name>-<hash>.
 	const workBranch = "gc-gastown.rictus-5bca5afe897d"
 	runGit(t, repoDir, "checkout", "-b", workBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("quote stripper\n"), 0o644); err != nil {
-		t.Fatalf("write feature: %v", err)
-	}
-	runGit(t, repoDir, "add", "feature.txt")
-	runGit(t, repoDir, "commit", "-m", "feat: quote stripper stage 1")
-	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	commit := gateCommit(t, repoDir, "feature.txt", "quote stripper\n", "feat: quote stripper stage 1")
 
-	newStore := func() beads.Store {
-		return beads.NewMemStoreFrom(1, []beads.Bead{{
-			ID:     "wr-unpushed",
-			Type:   "task",
-			Status: "in_progress",
-			Metadata: map[string]string{
-				beadmeta.WorkDirMetadataKey: repoDir,
-			},
-		}}, nil)
-	}
-	args := []string{
-		"update", "wr-unpushed",
-		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
-		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
-		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + workBranch,
-		"--status=closed",
-	}
+	newStore := func() beads.Store { return gateStoreWith("wr-unpushed", repoDir) }
+	args := gateShippedCloseArgs("wr-unpushed", commit, workBranch)
 
 	// Sanity: the pre-existing reachability rule cannot see this failure. If this
 	// ever stops holding, the durability rule is no longer the thing under test.
@@ -611,20 +828,7 @@ func TestRunWorkRecordCloseGateReusesPreOpenedStore(t *testing.T) {
 // the work actually landed on so the record can be corrected — while the same
 // close with an unpushed commit must still block (the az-6n75 protection).
 func TestEvaluateWorkRecordCloseGateStaleClaimStamp(t *testing.T) {
-	originDir := t.TempDir()
-	runGit(t, originDir, "init", "--bare", "--initial-branch=main")
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init", "--initial-branch=main")
-	runGit(t, repoDir, "config", "user.name", "Gas City Test")
-	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
-	runGit(t, repoDir, "remote", "add", "origin", originDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write base: %v", err)
-	}
-	runGit(t, repoDir, "add", "base.txt")
-	runGit(t, repoDir, "commit", "-m", "test: base")
-	runGit(t, repoDir, "push", "origin", "main")
+	repoDir := newGateRepo(t, "origin")
 
 	// The claim-time stamp: the polecat worktree branch, cut at base and never
 	// advanced. This is what gc.work_branch carries when the close arrives.
@@ -634,31 +838,12 @@ func TestEvaluateWorkRecordCloseGateStaleClaimStamp(t *testing.T) {
 	// The work lands on a different branch and is pushed — delivered.
 	const landedBranch = "fix/wr-defect-c"
 	runGit(t, repoDir, "checkout", "-b", landedBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("stale stamp fix\n"), 0o644); err != nil {
-		t.Fatalf("write feature: %v", err)
-	}
-	runGit(t, repoDir, "add", "feature.txt")
-	runGit(t, repoDir, "commit", "-m", "feat: the work that satisfied the bead")
-	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	commit := gateCommit(t, repoDir, "feature.txt", "stale stamp fix\n", "feat: the work that satisfied the bead")
 	runGit(t, repoDir, "push", "origin", landedBranch)
+	runGit(t, repoDir, "fetch", "origin")
 
-	newStore := func() beads.Store {
-		return beads.NewMemStoreFrom(1, []beads.Bead{{
-			ID:     "wr-stale-stamp",
-			Type:   "task",
-			Status: "in_progress",
-			Metadata: map[string]string{
-				beadmeta.WorkDirMetadataKey: repoDir,
-			},
-		}}, nil)
-	}
-	args := []string{
-		"update", "wr-stale-stamp",
-		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
-		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
-		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + claimBranch,
-		"--status=closed",
-	}
+	newStore := func() beads.Store { return gateStoreWith("wr-stale-stamp", repoDir) }
+	args := gateShippedCloseArgs("wr-stale-stamp", commit, claimBranch)
 
 	// Precondition: the stale stamp genuinely does not contain the commit, so
 	// this test exercises the stale-stamp rule and not reachability.
@@ -683,19 +868,8 @@ func TestEvaluateWorkRecordCloseGateStaleClaimStamp(t *testing.T) {
 
 	// Paired negative: the same stale-stamp close with an UNPUSHED commit is the
 	// az-6n75 data-loss case and must still block under enforcement.
-	if err := os.WriteFile(filepath.Join(repoDir, "unpushed.txt"), []byte("only copy\n"), 0o644); err != nil {
-		t.Fatalf("write unpushed: %v", err)
-	}
-	runGit(t, repoDir, "add", "unpushed.txt")
-	runGit(t, repoDir, "commit", "-m", "feat: never pushed")
-	unpushed := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
-	unpushedArgs := []string{
-		"update", "wr-stale-stamp",
-		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
-		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + unpushed,
-		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + claimBranch,
-		"--status=closed",
-	}
+	unpushed := gateCommit(t, repoDir, "unpushed.txt", "only copy\n", "feat: never pushed")
+	unpushedArgs := gateShippedCloseArgs("wr-stale-stamp", unpushed, claimBranch)
 	var unpushedStderr strings.Builder
 	if block := evaluateWorkRecordCloseGate(unpushedArgs, newStore(), nil, repoDir, true, &unpushedStderr); !block {
 		t.Fatalf("close of unpushed work was allowed through the stale-stamp path")
@@ -718,33 +892,16 @@ func TestEvaluateWorkRecordCloseGateStaleClaimStamp(t *testing.T) {
 // passes for a commit that is on origin/main but NOT on a deliberately-stale
 // local main.
 func TestEvaluateWorkRecordCloseGateStaleLocalRef(t *testing.T) {
-	originDir := t.TempDir()
-	runGit(t, originDir, "init", "--bare", "--initial-branch=main")
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init", "--initial-branch=main")
-	runGit(t, repoDir, "config", "user.name", "Gas City Test")
-	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
-	runGit(t, repoDir, "remote", "add", "origin", originDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write base: %v", err)
-	}
-	runGit(t, repoDir, "add", "base.txt")
-	runGit(t, repoDir, "commit", "-m", "test: base")
-	runGit(t, repoDir, "push", "origin", "main")
+	repoDir := newGateRepo(t, "origin")
 
 	// Land the work on origin/main without moving local main, the way the
 	// refinery does: commit on a temporary branch, push it to origin's main,
 	// return to the stale local main, and drop the temporary branch so the
 	// commit exists locally only via the remote-tracking ref.
 	runGit(t, repoDir, "checkout", "-b", "tmp-land")
-	if err := os.WriteFile(filepath.Join(repoDir, "landed.txt"), []byte("merged over the network\n"), 0o644); err != nil {
-		t.Fatalf("write landed: %v", err)
-	}
-	runGit(t, repoDir, "add", "landed.txt")
-	runGit(t, repoDir, "commit", "-m", "feat: the work that satisfied the bead")
-	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	commit := gateCommit(t, repoDir, "landed.txt", "merged over the network\n", "feat: the work that satisfied the bead")
 	runGit(t, repoDir, "push", "origin", "tmp-land:main")
+	runGit(t, repoDir, "fetch", "origin")
 	runGit(t, repoDir, "checkout", "main")
 	runGit(t, repoDir, "branch", "-D", "tmp-land")
 
@@ -762,21 +919,8 @@ func TestEvaluateWorkRecordCloseGateStaleLocalRef(t *testing.T) {
 		t.Fatalf("gitCommitReachableOnBranch resolved the stale local ref; want refs/remotes/origin/main")
 	}
 
-	store := beads.NewMemStoreFrom(1, []beads.Bead{{
-		ID:     "wr-stale-local",
-		Type:   "task",
-		Status: "in_progress",
-		Metadata: map[string]string{
-			beadmeta.WorkDirMetadataKey: repoDir,
-		},
-	}}, nil)
-	args := []string{
-		"update", "wr-stale-local",
-		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
-		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
-		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=main",
-		"--status=closed",
-	}
+	store := gateStoreWith("wr-stale-local", repoDir)
+	args := gateShippedCloseArgs("wr-stale-local", commit, "main")
 	var stderr strings.Builder
 	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, true, &stderr); block {
 		t.Fatalf("close of work merged to origin/main blocked on a stale local ref; stderr=%s", stderr.String())
@@ -796,20 +940,7 @@ func TestEvaluateWorkRecordCloseGateStaleLocalRef(t *testing.T) {
 // publication oracle"); this covers the Go side: neither the durability oracle
 // nor the stale-stamp containment resolver may count a self-remote.
 func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
-	originDir := t.TempDir()
-	runGit(t, originDir, "init", "--bare", "--initial-branch=main")
-
-	repoDir := t.TempDir()
-	runGit(t, repoDir, "init", "--initial-branch=main")
-	runGit(t, repoDir, "config", "user.name", "Gas City Test")
-	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
-	runGit(t, repoDir, "remote", "add", "origin", originDir)
-	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
-		t.Fatalf("write base: %v", err)
-	}
-	runGit(t, repoDir, "add", "base.txt")
-	runGit(t, repoDir, "commit", "-m", "test: base")
-	runGit(t, repoDir, "push", "origin", "main")
+	repoDir := newGateRepo(t, "origin")
 
 	// The self-referential path remote, as herdr-src is configured in the wild.
 	runGit(t, repoDir, "remote", "add", "self-src", repoDir)
@@ -818,12 +949,7 @@ func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
 	// refs/remotes/self-src/* snapshot the local branches including the commit.
 	const workBranch = "gc-gastown.slit-9d8c7b6a5f4e"
 	runGit(t, repoDir, "checkout", "-b", workBranch)
-	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("only local\n"), 0o644); err != nil {
-		t.Fatalf("write feature: %v", err)
-	}
-	runGit(t, repoDir, "add", "feature.txt")
-	runGit(t, repoDir, "commit", "-m", "feat: never pushed off-machine")
-	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	commit := gateCommit(t, repoDir, "feature.txt", "only local\n", "feat: never pushed off-machine")
 	runGit(t, repoDir, "fetch", "self-src")
 
 	// Precondition: the self-remote genuinely snapshots the unpushed commit —
@@ -832,24 +958,9 @@ func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
 		t.Fatalf("precondition: self-remote ref must contain the unpushed commit")
 	}
 
-	newStore := func() beads.Store {
-		return beads.NewMemStoreFrom(1, []beads.Bead{{
-			ID:     "wr-self-remote",
-			Type:   "task",
-			Status: "in_progress",
-			Metadata: map[string]string{
-				beadmeta.WorkDirMetadataKey: repoDir,
-			},
-		}}, nil)
-	}
+	newStore := func() beads.Store { return gateStoreWith("wr-self-remote", repoDir) }
 	closeArgs := func(branch string) []string {
-		return []string{
-			"update", "wr-self-remote",
-			"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
-			"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
-			"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + branch,
-			"--status=closed",
-		}
+		return gateShippedCloseArgs("wr-self-remote", commit, branch)
 	}
 
 	// With a correct branch stamp: the commit is reachable locally, its only
