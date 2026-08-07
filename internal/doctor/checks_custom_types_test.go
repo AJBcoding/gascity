@@ -267,6 +267,84 @@ func TestCustomTypesCheck_TableDriftUsesTestOwnedDoltContext(t *testing.T) {
 	}
 }
 
+// TestCustomTypesCheck_IgnoresLeakedBeadsDir is the regression test for
+// gas-3cb: the check shelled out to a bare `bd` with only cmd.Dir set, so an
+// ambient BEADS_DIR — which every agent session exports — overrode bd's
+// working-directory scope resolution and pointed every scope's check at one
+// unrelated store. On a real city that produced four permanent phantom
+// "missing 13 custom type(s)" failures per `gc doctor` run, and masked the
+// one genuine finding.
+//
+// Two real stores are built: `leaked`, with every required type registered,
+// and `scope`, the one actually under test, with none. BEADS_DIR is then
+// pointed at `leaked`. The check must still report `scope`'s state. Before
+// the fix it read `leaked` and returned StatusOK — the inverse of the truth.
+func TestCustomTypesCheck_IgnoresLeakedBeadsDir(t *testing.T) {
+	if _, err := exec.LookPath("bd"); err != nil {
+		t.Skip("bd binary not on PATH")
+	}
+	if _, err := exec.LookPath("dolt"); err != nil {
+		t.Skip("dolt binary not on PATH")
+	}
+
+	// Scrub the shared-server routing vars only. BEADS_DIR is deliberately
+	// left for this test to set below — it is the leak under test, and
+	// scrubbing it here would defeat the whole assertion. See
+	// TestCustomTypesCheck_MissingTypes for why each of the others matters:
+	// without them, both stores resolve to one shared dolt server and the
+	// two scopes become indistinguishable.
+	for _, key := range []string{
+		"BEADS_ACTOR", "GC_BEADS_SCOPE_ROOT",
+		"GC_BEADS", "BEADS_DOLT_SERVER_PORT", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SHARED_SERVER",
+		"BEADS_DOLT_SERVER_MODE", "BEADS_SHARED_SERVER_DIR",
+	} {
+		t.Setenv(key, "")
+	}
+	t.Setenv("BEADS_DIR", "")
+	t.Setenv("HOME", t.TempDir())
+
+	initStore := func(dir, prefix string, withTypes bool) {
+		t.Helper()
+		runBD := func(args ...string) {
+			t.Helper()
+			cmd := exec.Command("bd", args...)
+			cmd.Dir = dir
+			if out, err := cmd.CombinedOutput(); err != nil {
+				t.Fatalf("bd %s in %s: %v\n%s", strings.Join(args, " "), dir, err, out)
+			}
+		}
+		runBD("init", "--non-interactive", "-p", prefix, "--skip-hooks", "--skip-agents")
+		if withTypes {
+			runBD("config", "set", "types.custom", strings.Join(RequiredCustomTypes, ","))
+		}
+	}
+
+	// The store the ambient BEADS_DIR will point at: fully registered.
+	leaked := t.TempDir()
+	t.Cleanup(func() { retryRemoveAllForTest(t, leaked) })
+	initStore(leaked, "lkd", true)
+
+	// The store actually under test: no custom types at all.
+	scope := t.TempDir()
+	t.Cleanup(func() { retryRemoveAllForTest(t, scope) })
+	initStore(scope, "scp", false)
+
+	// Leak the wrong scope, exactly as an agent session does.
+	t.Setenv("BEADS_DIR", filepath.Join(leaked, ".beads"))
+
+	c := NewCustomTypesCheck(scope, "scope")
+	r := c.Run(&CheckContext{CityPath: scope})
+
+	if r.Status == StatusOK {
+		t.Fatalf("Run status = OK, want non-OK: the check read the leaked store at %s instead of the scope at %s; message=%q",
+			leaked, scope, r.Message)
+	}
+	if len(c.missing) == 0 {
+		t.Fatalf("c.missing is empty, want the scope's unregistered types; the check read the leaked store. message=%q", r.Message)
+	}
+}
+
 func TestCustomTypesCheck_RequiredTypesIncludeSpec(t *testing.T) {
 	found := false
 	for _, typ := range RequiredCustomTypes {

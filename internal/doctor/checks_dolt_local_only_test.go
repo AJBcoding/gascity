@@ -24,6 +24,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -511,5 +512,30 @@ func TestDoltLocalOnlyRemoteCheck_DBNameFromMetadata(t *testing.T) {
 	if r.Status != StatusWarning {
 		t.Fatalf("status = %d, want StatusWarning (resolved db=customdb from metadata); message=%s",
 			r.Status, r.Message)
+	}
+}
+
+// TestDoltRemoteRemoveCmdPinsScope covers the sibling half of gas-3cb. The
+// custom-types check leaked an ambient BEADS_DIR on a read path; this one
+// leaks it on a WRITE path — `bd dolt remote remove` sent at whichever store
+// the invoking session pointed at rather than the rig being fixed, so
+// `gc doctor --fix` could strip a remote from a store the operator never
+// asked about while leaving the offending one in place.
+func TestDoltRemoteRemoveCmdPinsScope(t *testing.T) {
+	leaked := filepath.Join(t.TempDir(), "elsewhere", ".beads")
+	t.Setenv("BEADS_DIR", leaked)
+
+	rigPath := t.TempDir()
+	cmd := doltRemoteRemoveCmd(rigPath, "origin")
+
+	want := filepath.Join(rigPath, ".beads")
+	if got := envValues(cmd.Env, "BEADS_DIR"); !slices.Equal(got, []string{want}) {
+		t.Fatalf("BEADS_DIR = %v, want exactly [%q] — the removal must target the rig, not the ambient scope", got, want)
+	}
+	if got := envValues(cmd.Env, "GIT_TERMINAL_PROMPT"); !slices.Equal(got, []string{"0"}) {
+		t.Fatalf("GIT_TERMINAL_PROMPT = %v, want [\"0\"] preserved", got)
+	}
+	if cmd.Dir != rigPath {
+		t.Fatalf("cmd.Dir = %q, want %q", cmd.Dir, rigPath)
 	}
 }
