@@ -414,7 +414,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr strings.Builder
-			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, t.TempDir(), tc.enforce, &stderr)
+			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, t.TempDir(), nil, tc.enforce, &stderr)
 			if block != tc.wantBlock {
 				t.Fatalf("block = %v, want %v; stderr=%s", block, tc.wantBlock, stderr.String())
 			}
@@ -524,7 +524,7 @@ func TestEvaluateWorkRecordCloseGateNonOriginRemote(t *testing.T) {
 	}
 
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-upstream", commit, "main"), gateStoreWith("wr-upstream", repoDir), nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-upstream", commit, "main"), gateStoreWith("wr-upstream", repoDir), nil, repoDir, nil, true, &stderr); block {
 		t.Fatalf("delivered close blocked in a non-origin repo; stderr=%s", stderr.String())
 	}
 	if got := stderr.String(); got != "" {
@@ -534,7 +534,7 @@ func TestEvaluateWorkRecordCloseGateNonOriginRemote(t *testing.T) {
 	// Stale stamp in the same repo: the advisory must suggest the unqualified
 	// branch name — never "upstream/main", and never the bare remote name.
 	var staleStderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-upstream", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-upstream", repoDir), nil, repoDir, true, &staleStderr); block {
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-upstream", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-upstream", repoDir), nil, repoDir, nil, true, &staleStderr); block {
 		t.Fatalf("delivered stale-stamp close blocked; stderr=%s", staleStderr.String())
 	}
 	out := staleStderr.String()
@@ -564,7 +564,7 @@ func TestEvaluateWorkRecordCloseGateUnpushedOnBranchSingleViolation(t *testing.T
 	commit := gateCommit(t, repoDir, "feature.txt", "v2\n", "feat: v2")
 
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-onbranch", commit, workBranch), gateStoreWith("wr-onbranch", repoDir), nil, repoDir, true, &stderr); !block {
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-onbranch", commit, workBranch), gateStoreWith("wr-onbranch", repoDir), nil, repoDir, nil, true, &stderr); !block {
 		t.Fatalf("close of unpushed work was allowed")
 	}
 	out := stderr.String()
@@ -596,7 +596,7 @@ func TestEvaluateWorkRecordCloseGateRemotelessStaleStamp(t *testing.T) {
 	commit := gateCommit(t, repoDir, "feature.txt", "local-only rig\n", "feat: local work")
 
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-remoteless", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-remoteless", repoDir), nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-remoteless", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-remoteless", repoDir), nil, repoDir, nil, true, &stderr); block {
 		t.Fatalf("stale-stamp close blocked in a remoteless repo; stderr=%s", stderr.String())
 	}
 	out := stderr.String()
@@ -626,7 +626,7 @@ func TestEvaluateWorkRecordCloseGateMissingStampDelivered(t *testing.T) {
 		"--status=closed",
 	}
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, gateStoreWith("wr-nostamp", repoDir), nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(args, gateStoreWith("wr-nostamp", repoDir), nil, repoDir, nil, true, &stderr); block {
 		t.Fatalf("delivered close with a missing stamp blocked; stderr=%s", stderr.String())
 	}
 	out := stderr.String()
@@ -644,7 +644,7 @@ func TestEvaluateWorkRecordCloseGateMissingStampDelivered(t *testing.T) {
 		"--status=closed",
 	}
 	var undeliveredStderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(undeliveredArgs, gateStoreWith("wr-nostamp", repoDir), nil, repoDir, true, &undeliveredStderr); !block {
+	if block := evaluateWorkRecordCloseGate(undeliveredArgs, gateStoreWith("wr-nostamp", repoDir), nil, repoDir, nil, true, &undeliveredStderr); !block {
 		t.Fatalf("undelivered close with a missing stamp was allowed")
 	}
 }
@@ -670,7 +670,7 @@ func TestEvaluateWorkRecordCloseGateAdvisoryPrefersDefaultBranch(t *testing.T) {
 	runGit(t, repoDir, "fetch", "origin")
 
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-prefer", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-prefer", repoDir), nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-prefer", commit, "gc-gastown.nux-1a2b3c4d5e6f"), gateStoreWith("wr-prefer", repoDir), nil, repoDir, nil, true, &stderr); block {
 		t.Fatalf("delivered stale-stamp close blocked; stderr=%s", stderr.String())
 	}
 	out := stderr.String()
@@ -711,7 +711,7 @@ func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 		"--status=closed",
 	}
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, nil, true, &stderr); block {
 		t.Fatalf("valid atomic shipped close blocked; stderr=%s", stderr.String())
 	}
 	if got := stderr.String(); got != "" {
@@ -747,7 +747,7 @@ func TestEvaluateWorkRecordCloseGateUnpushedBranch(t *testing.T) {
 	}
 
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, newStore(), nil, repoDir, true, &stderr); !block {
+	if block := evaluateWorkRecordCloseGate(args, newStore(), nil, repoDir, nil, true, &stderr); !block {
 		t.Fatalf("close of unpushed work was allowed; the branch exists on no remote")
 	}
 	if got := stderr.String(); !strings.Contains(got, "not present on any remote") {
@@ -757,7 +757,7 @@ func TestEvaluateWorkRecordCloseGateUnpushedBranch(t *testing.T) {
 	// Same commit, same close, after publishing: must now be allowed.
 	runGit(t, repoDir, "push", "origin", workBranch)
 	var pushedStderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, newStore(), nil, repoDir, true, &pushedStderr); block {
+	if block := evaluateWorkRecordCloseGate(args, newStore(), nil, repoDir, nil, true, &pushedStderr); block {
 		t.Fatalf("close blocked after push; stderr=%s", pushedStderr.String())
 	}
 	if got := pushedStderr.String(); got != "" {
@@ -781,7 +781,7 @@ func TestEvaluateWorkRecordCloseGateUsesPreFetchedBead(t *testing.T) {
 		"wr-shipped-nocommit": {ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
 	}
 	var stderr strings.Builder
-	block := evaluateWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, panicOnGetStore{}, preFetched, t.TempDir(), true, &stderr)
+	block := evaluateWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, panicOnGetStore{}, preFetched, t.TempDir(), nil, true, &stderr)
 	if !block {
 		t.Fatalf("expected block=true for shipped-without-commit, got false; stderr=%s", stderr.String())
 	}
@@ -852,7 +852,7 @@ func TestEvaluateWorkRecordCloseGateStaleClaimStamp(t *testing.T) {
 	}
 
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, newStore(), nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(args, newStore(), nil, repoDir, nil, true, &stderr); block {
 		t.Fatalf("delivered close blocked on a stale claim-time stamp; stderr=%s", stderr.String())
 	}
 	out := stderr.String()
@@ -871,7 +871,7 @@ func TestEvaluateWorkRecordCloseGateStaleClaimStamp(t *testing.T) {
 	unpushed := gateCommit(t, repoDir, "unpushed.txt", "only copy\n", "feat: never pushed")
 	unpushedArgs := gateShippedCloseArgs("wr-stale-stamp", unpushed, claimBranch)
 	var unpushedStderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(unpushedArgs, newStore(), nil, repoDir, true, &unpushedStderr); !block {
+	if block := evaluateWorkRecordCloseGate(unpushedArgs, newStore(), nil, repoDir, nil, true, &unpushedStderr); !block {
 		t.Fatalf("close of unpushed work was allowed through the stale-stamp path")
 	}
 	if got := unpushedStderr.String(); !strings.Contains(got, "not present on any remote") {
@@ -922,7 +922,7 @@ func TestEvaluateWorkRecordCloseGateStaleLocalRef(t *testing.T) {
 	store := gateStoreWith("wr-stale-local", repoDir)
 	args := gateShippedCloseArgs("wr-stale-local", commit, "main")
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, nil, true, &stderr); block {
 		t.Fatalf("close of work merged to origin/main blocked on a stale local ref; stderr=%s", stderr.String())
 	}
 	if got := stderr.String(); got != "" {
@@ -966,7 +966,7 @@ func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
 	// With a correct branch stamp: the commit is reachable locally, its only
 	// "remote" presence is the self-remote snapshot — undelivered. Must block.
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(closeArgs(workBranch), newStore(), nil, repoDir, true, &stderr); !block {
+	if block := evaluateWorkRecordCloseGate(closeArgs(workBranch), newStore(), nil, repoDir, nil, true, &stderr); !block {
 		t.Fatalf("close of self-remote-only work was allowed; --remotes counted the repo itself")
 	}
 	if got := stderr.String(); !strings.Contains(got, "not present on any remote") {
@@ -976,7 +976,7 @@ func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
 	// With a stale branch stamp: the containment resolver must not surface the
 	// self-remote snapshot as a landing branch — no advisory, still blocked.
 	var staleStderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(closeArgs("gc-gastown.nux-1a2b3c4d5e6f"), newStore(), nil, repoDir, true, &staleStderr); !block {
+	if block := evaluateWorkRecordCloseGate(closeArgs("gc-gastown.nux-1a2b3c4d5e6f"), newStore(), nil, repoDir, nil, true, &staleStderr); !block {
 		t.Fatalf("stale-stamp close of self-remote-only work was allowed")
 	}
 	if got := staleStderr.String(); strings.Contains(got, "self-src/") {
@@ -987,11 +987,69 @@ func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
 	// exclusion must not block genuinely delivered work.
 	runGit(t, repoDir, "push", "origin", workBranch)
 	var pushedStderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(closeArgs(workBranch), newStore(), nil, repoDir, true, &pushedStderr); block {
+	if block := evaluateWorkRecordCloseGate(closeArgs(workBranch), newStore(), nil, repoDir, nil, true, &pushedStderr); block {
 		t.Fatalf("close blocked after real push; stderr=%s", pushedStderr.String())
 	}
 	if got := pushedStderr.String(); got != "" {
 		t.Fatalf("pushed close warned: %q", got)
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateCommitInRigRepo covers gas-cj7: the crew
+// topology. A crew agent's session dir is a worktree of the CITY repo, while its
+// commits land in the RIG repo — and gc.work_dir is stamped with that session
+// dir by pool dispatch, not by the claim path. The gate therefore shelled git
+// against the city repo looking for a rig commit and reported verifiably
+// delivered work as "not present on any remote". Per this city's CLAUDE.md
+// ("Commit rig work in the rig's repo, never in this city repo") that is the
+// mandated normal shape of ALL rig work, so under GC_WORK_RECORD_ENFORCE it is a
+// false block landing on exactly the closers conscientious enough to stamp a
+// correct work record — the class beads#4960 measured as teaching agents --force.
+//
+// It went unnoticed because every prior gate test passes the same directory as
+// both the bead's gc.work_dir and the scopeRoot argument (gateStoreWith hardcodes
+// it), so the divergence that IS the bug had never been exercised.
+func TestEvaluateWorkRecordCloseGateCommitInRigRepo(t *testing.T) {
+	rigRepo := newGateRepo(t, "origin")
+	cityRepo := newGateRepo(t, "origin")
+
+	// The work lands and is pushed in the RIG repo, as all rig work must.
+	const workBranch = "fix/gas-cj7-example"
+	runGit(t, rigRepo, "checkout", "-b", workBranch)
+	commit := gateCommit(t, rigRepo, "landed.txt", "delivered in the rig\n", "fix: the work")
+	runGit(t, rigRepo, "push", "origin", workBranch)
+
+	// Precondition: the city repo genuinely does not know the commit — exactly as
+	// the live city repo does not contain a0aae6551, the commit az-i946 recorded.
+	// Asked of git directly rather than through gitRepoHasCommit: a precondition
+	// that leans on the code under test would pass silently if that code broke.
+	if _, err := gitOutputImportE(t, cityRepo, "cat-file", "-e", commit+"^{commit}"); err == nil {
+		t.Fatalf("precondition: the city repo must not contain the rig commit")
+	}
+
+	// The bead is stamped with the crew session dir (a city-repo worktree) and the
+	// close is scoped there too — the shape pool dispatch actually produces.
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-cross-repo", commit, workBranch), gateStoreWith("wr-cross-repo", cityRepo), nil, cityRepo, []string{rigRepo}, true, &stderr); block {
+		t.Fatalf("delivered rig commit blocked because the gate searched the city repo; stderr=%s", stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("delivered cross-repo close produced gate output: %q", got)
+	}
+
+	// Paired negative: widening the search must not become a fail-open. Work that
+	// exists in the rig repo but was never pushed is still undelivered, and the
+	// durability violation must be reported from the repo that actually has it.
+	const unpushedBranch = "fix/gas-cj7-unpushed"
+	runGit(t, rigRepo, "checkout", "-b", unpushedBranch)
+	unpushed := gateCommit(t, rigRepo, "wip.txt", "never pushed\n", "wip: not delivered")
+
+	var unpushedStderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-cross-repo", unpushed, unpushedBranch), gateStoreWith("wr-cross-repo", cityRepo), nil, cityRepo, []string{rigRepo}, true, &unpushedStderr); !block {
+		t.Fatalf("cross-repo search failed open on undelivered work; stderr=%s", unpushedStderr.String())
+	}
+	if got := unpushedStderr.String(); !strings.Contains(got, "not present on any remote") {
+		t.Fatalf("expected a durability violation from the rig repo, got %q", got)
 	}
 }
 

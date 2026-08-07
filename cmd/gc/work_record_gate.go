@@ -350,6 +350,62 @@ func gitCommonDir(dir string) string {
 	return p
 }
 
+// gitRepoHasCommit reports whether repoDir's object database contains commit.
+// It is a pure existence check — it says nothing about reachability, publication
+// or branches — and exists only to answer WHICH repository the real oracles
+// should interrogate.
+func gitRepoHasCommit(repoDir, commit string) bool {
+	repoDir, commit = strings.TrimSpace(repoDir), strings.TrimSpace(commit)
+	if repoDir == "" || commit == "" {
+		return false
+	}
+	if strings.HasPrefix(repoDir, "-") || strings.HasPrefix(commit, "-") {
+		return false
+	}
+	return exec.Command("git", "-C", repoDir, "cat-file", "-e", commit+"^{commit}").Run() == nil
+}
+
+// workRecordRepoForCommit picks the repository the close-gate oracles should
+// interrogate for commit, given the closer's own repo and the city's configured
+// rig repositories.
+//
+// gas-cj7: the gate previously interrogated repoDir alone — gc.work_dir, which
+// pool dispatch stamps with the agent's OWN SESSION DIRECTORY. For a crew agent
+// that directory is a worktree of the CITY repo, while its commits land in the
+// RIG repo, because this city's CLAUDE.md mandates exactly that ("Commit rig
+// work in the rig's repo, never in this city repo"). The gate therefore asked
+// the city repo about a rig commit, got a truthful "no such commit", and
+// reported delivered work as undelivered — a false block, under enforcement, on
+// the normal shape of all rig work.
+//
+// Resolving by EVIDENCE rather than by the closer's location fixes that
+// retroactively, for beads already stamped with the wrong work_dir: a 40-char
+// SHA is self-identifying, so the repository that actually holds the object is
+// the repository the work happened in. The closer's own repo is tried first, so
+// a commit present there resolves exactly as before and no existing behavior
+// moves; rig repos are consulted only when it is absent.
+//
+// This widens WHERE the commit is looked for, never WHETHER it must be
+// delivered. Whichever repository answers, the durability and reachability
+// oracles then run against that one repository unchanged — so undelivered work
+// still violates, and a commit no configured repo holds falls back to repoDir
+// and produces the same violation it does today.
+func workRecordRepoForCommit(repoDir string, rigRepos []string, commit string) string {
+	if strings.TrimSpace(commit) == "" || gitRepoHasCommit(repoDir, commit) {
+		return repoDir
+	}
+	for _, candidate := range rigRepos {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" || candidate == repoDir {
+			continue
+		}
+		if gitRepoHasCommit(candidate, commit) {
+			return candidate
+		}
+	}
+	return repoDir
+}
+
 // gitRemoteBranchesContaining reports which branches contain commit in the
 // repository at repoDir, as SUGGESTIBLE branch names: normalized (the
 // "<remote>/" qualifier stripped), deduplicated, remote default branches
@@ -552,6 +608,10 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 // them in instead of paying a second openStoreAtForCity + store.Get round
 // trip. Both are optional (nil is fine): preOpened falls back to opening its
 // own store, and any ID missing from preFetched falls back to store.Get.
+//
+// The city's configured rig repository paths are derived from cfg, because the
+// repository a bead's commit lives in is frequently NOT the one the closer is
+// standing in — see workRecordRepoForCommit (gas-cj7).
 func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, preOpened beads.Store, preFetched map[string]beads.Bead, stderr io.Writer) bool {
 	if _, ok := workRecordCloseTargets(bdArgs); !ok {
 		return false
@@ -565,15 +625,17 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 			return false
 		}
 	}
-	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, scopeRoot, workRecordEnforceEnabled(), stderr)
+	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, scopeRoot, configuredRigRepos(cfg, cityPath), workRecordEnforceEnabled(), stderr)
 }
 
 // evaluateWorkRecordCloseGate is the store-driven core of the close gate, split
 // from the IO wrapper so it is unit-testable with an in-memory store. It logs
 // each violation and reports whether the close should be blocked. preFetched
 // (optional) supplies beads already read by an earlier guard in this same
-// invocation, avoiding a duplicate store.Get for the same ID.
-func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot string, enforce bool, stderr io.Writer) (block bool) {
+// invocation, avoiding a duplicate store.Get for the same ID. rigRepos carries
+// the city's configured rig repository paths — see workRecordRepoForCommit
+// (gas-cj7).
+func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot string, rigRepos []string, enforce bool, stderr io.Writer) (block bool) {
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
@@ -600,6 +662,11 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		if repoDir == "" {
 			repoDir = scopeRoot
 		}
+		// The closer's own repo is only a starting guess: gc.work_dir is the
+		// agent's session directory, which for a crew agent is a CITY-repo
+		// worktree while the commit lands in a RIG repo (gas-cj7). Re-resolve
+		// against the repository that actually holds the object.
+		repoDir = workRecordRepoForCommit(repoDir, rigRepos, bead.Metadata[beadmeta.WorkCommitMetadataKey])
 		var violations, advisories []string
 		if projectionErr != nil {
 			violations = []string{projectionErr.Error()}
