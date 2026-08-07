@@ -2,6 +2,7 @@ package main
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -22,13 +23,25 @@ func neverReachable(string, string) bool  { return false }
 func alwaysOnRemote(string) bool { return true }
 func neverOnRemote(string) bool  { return false }
 
+// noRemoteContains / remoteContains are injected containment resolvers: they
+// report which remote-tracking branches contain a commit. The stale claim-stamp
+// rule (ADR-0009 Defect C) uses them to distinguish a delivered commit whose
+// stamped gc.work_branch is merely stale from genuinely undelivered work.
+func noRemoteContains(string) []string { return nil }
+
+func remoteContains(branches ...string) func(string) []string {
+	return func(string) []string { return branches }
+}
+
 func TestValidateWorkRecordOnClose(t *testing.T) {
 	tests := []struct {
-		name      string
-		meta      map[string]string
-		reachable func(string, string) bool
-		onRemote  func(string) bool
-		wantViol  string // substring expected in the (single) violation; "" ⇒ no violations
+		name       string
+		meta       map[string]string
+		reachable  func(string, string) bool
+		onRemote   func(string) bool
+		containing func(string) []string
+		wantViol   string // substring expected in the (single) violation; "" ⇒ no violations
+		wantAdv    string // substring expected in the (single) advisory; "" ⇒ no advisories
 	}{
 		{
 			name:     "no-op close passes",
@@ -76,6 +89,39 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 			wantViol:  "not reachable",
 		},
 		{
+			// ADR-0009 Defect C: gc.work_branch is stamped at claim time, before
+			// the work exists, so an honest delivered close can carry a stale
+			// branch. Delivered work (on a remote-tracking ref) must not be
+			// blocked for a stale stamp — it gets a precise advisory naming the
+			// branch the work actually landed on, so the record can be corrected.
+			name: "shipped delivered on another remote branch passes with a stale-stamp advisory",
+			meta: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+				beadmeta.WorkCommitMetadataKey:  "abc123",
+				beadmeta.WorkBranchMetadataKey:  "gc-gastown.nux-1a2b3c4d5e6f",
+			},
+			reachable:  neverReachable,
+			onRemote:   alwaysOnRemote,
+			containing: remoteContains("origin/fix/wr-defect-c"),
+			wantViol:   "",
+			wantAdv:    "fix/wr-defect-c",
+		},
+		{
+			// The advisory path must not open the az-6n75 hole: an unreachable
+			// commit that is on NO remote ref is undelivered work and still
+			// violates, stale stamp or not.
+			name: "shipped unreachable and on no remote ref stays rejected",
+			meta: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+				beadmeta.WorkCommitMetadataKey:  "abc123",
+				beadmeta.WorkBranchMetadataKey:  "gc-gastown.nux-1a2b3c4d5e6f",
+			},
+			reachable:  neverReachable,
+			onRemote:   neverOnRemote,
+			containing: noRemoteContains,
+			wantViol:   "not reachable",
+		},
+		{
 			name: "shipped without commit is rejected",
 			meta: map[string]string{
 				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
@@ -116,8 +162,26 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 				// they were written for.
 				onRemote = alwaysOnRemote
 			}
+			containing := tc.containing
+			if containing == nil {
+				// Default to no containing branches so pre-existing cases keep
+				// their original violation semantics.
+				containing = noRemoteContains
+			}
 			bead := beads.Bead{ID: "wr-1", Type: "task", Metadata: tc.meta}
-			got := validateWorkRecordOnClose(bead, reachable, onRemote)
+			got, advisories := validateWorkRecordOnClose(bead, reachable, onRemote, containing)
+			if tc.wantAdv == "" {
+				if len(advisories) != 0 {
+					t.Fatalf("expected no advisories, got %v", advisories)
+				}
+			} else {
+				if len(advisories) == 0 {
+					t.Fatalf("expected an advisory containing %q, got none", tc.wantAdv)
+				}
+				if joined := strings.Join(advisories, " | "); !strings.Contains(joined, tc.wantAdv) {
+					t.Fatalf("advisory %q does not contain %q", joined, tc.wantAdv)
+				}
+			}
 			if tc.wantViol == "" {
 				if len(got) != 0 {
 					t.Fatalf("expected no violations, got %v", got)
@@ -530,6 +594,195 @@ func TestRunWorkRecordCloseGateReusesPreOpenedStore(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "work-record gate (enforced)") {
 		t.Fatalf("expected enforced gate output, got %q", stderr.String())
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateStaleClaimStamp is the ADR-0009 Defect C
+// regression test. gc.work_branch is stamped at claim time — before the work
+// exists — with the branch the claiming worktree happened to be on (the
+// polecat's persistent gc-<agent>-<hash> branch, cut from the default branch).
+// When the work then lands on a different branch, the stamp is stale, and the
+// pre-fix gate reported the delivered commit "not reachable" — under
+// GC_WORK_RECORD_ENFORCE that blocks every such honest close citywide, which is
+// exactly why az-fuag/az-z4p1 blocked enforcement on this defect.
+//
+// Contract under test: a shipped commit that IS on a remote-tracking ref must
+// close (delivery is the guarantee), with a precise advisory naming the branch
+// the work actually landed on so the record can be corrected — while the same
+// close with an unpushed commit must still block (the az-6n75 protection).
+func TestEvaluateWorkRecordCloseGateStaleClaimStamp(t *testing.T) {
+	originDir := t.TempDir()
+	runGit(t, originDir, "init", "--bare", "--initial-branch=main")
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	runGit(t, repoDir, "remote", "add", "origin", originDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, repoDir, "add", "base.txt")
+	runGit(t, repoDir, "commit", "-m", "test: base")
+	runGit(t, repoDir, "push", "origin", "main")
+
+	// The claim-time stamp: the polecat worktree branch, cut at base and never
+	// advanced. This is what gc.work_branch carries when the close arrives.
+	const claimBranch = "gc-gastown.nux-1a2b3c4d5e6f"
+	runGit(t, repoDir, "branch", claimBranch)
+
+	// The work lands on a different branch and is pushed — delivered.
+	const landedBranch = "fix/wr-defect-c"
+	runGit(t, repoDir, "checkout", "-b", landedBranch)
+	if err := os.WriteFile(filepath.Join(repoDir, "feature.txt"), []byte("stale stamp fix\n"), 0o644); err != nil {
+		t.Fatalf("write feature: %v", err)
+	}
+	runGit(t, repoDir, "add", "feature.txt")
+	runGit(t, repoDir, "commit", "-m", "feat: the work that satisfied the bead")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	runGit(t, repoDir, "push", "origin", landedBranch)
+
+	newStore := func() beads.Store {
+		return beads.NewMemStoreFrom(1, []beads.Bead{{
+			ID:     "wr-stale-stamp",
+			Type:   "task",
+			Status: "in_progress",
+			Metadata: map[string]string{
+				beadmeta.WorkDirMetadataKey: repoDir,
+			},
+		}}, nil)
+	}
+	args := []string{
+		"update", "wr-stale-stamp",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + claimBranch,
+		"--status=closed",
+	}
+
+	// Precondition: the stale stamp genuinely does not contain the commit, so
+	// this test exercises the stale-stamp rule and not reachability.
+	if gitCommitReachableOnBranch(repoDir, commit, claimBranch) {
+		t.Fatalf("precondition: commit must not be reachable on the claim-time branch")
+	}
+
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, newStore(), nil, repoDir, true, &stderr); block {
+		t.Fatalf("delivered close blocked on a stale claim-time stamp; stderr=%s", stderr.String())
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "advisory") {
+		t.Fatalf("expected a stale-stamp advisory, got %q", out)
+	}
+	if !strings.Contains(out, landedBranch) {
+		t.Fatalf("advisory %q does not name the landed branch %q", out, landedBranch)
+	}
+	if strings.Contains(out, "not reachable") {
+		t.Fatalf("delivered close still reported unreachable: %q", out)
+	}
+
+	// Paired negative: the same stale-stamp close with an UNPUSHED commit is the
+	// az-6n75 data-loss case and must still block under enforcement.
+	if err := os.WriteFile(filepath.Join(repoDir, "unpushed.txt"), []byte("only copy\n"), 0o644); err != nil {
+		t.Fatalf("write unpushed: %v", err)
+	}
+	runGit(t, repoDir, "add", "unpushed.txt")
+	runGit(t, repoDir, "commit", "-m", "feat: never pushed")
+	unpushed := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	unpushedArgs := []string{
+		"update", "wr-stale-stamp",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + unpushed,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=" + claimBranch,
+		"--status=closed",
+	}
+	var unpushedStderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(unpushedArgs, newStore(), nil, repoDir, true, &unpushedStderr); !block {
+		t.Fatalf("close of unpushed work was allowed through the stale-stamp path")
+	}
+	if got := unpushedStderr.String(); !strings.Contains(got, "not present on any remote") {
+		t.Fatalf("expected a durability violation, got %q", got)
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateStaleLocalRef is the gastownhall/gascity#5037
+// finding-1 regression test. In any topology where merges reach the target
+// branch over the network (the refinery pushes from a detached worktree),
+// nothing ever advances the local ref: refs/heads/main goes permanently stale
+// while refs/remotes/origin/main is the truth. The pre-fix gate resolved the
+// bare branch name by gitrevisions precedence — the stale local ref — and
+// reported genuinely-merged commits unreachable.
+//
+// Per the issue's own verification guidance: do not verify by the warning
+// stopping — assert the check resolves against refs/remotes/origin/<branch> and
+// passes for a commit that is on origin/main but NOT on a deliberately-stale
+// local main.
+func TestEvaluateWorkRecordCloseGateStaleLocalRef(t *testing.T) {
+	originDir := t.TempDir()
+	runGit(t, originDir, "init", "--bare", "--initial-branch=main")
+
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	runGit(t, repoDir, "remote", "add", "origin", originDir)
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, repoDir, "add", "base.txt")
+	runGit(t, repoDir, "commit", "-m", "test: base")
+	runGit(t, repoDir, "push", "origin", "main")
+
+	// Land the work on origin/main without moving local main, the way the
+	// refinery does: commit on a temporary branch, push it to origin's main,
+	// return to the stale local main, and drop the temporary branch so the
+	// commit exists locally only via the remote-tracking ref.
+	runGit(t, repoDir, "checkout", "-b", "tmp-land")
+	if err := os.WriteFile(filepath.Join(repoDir, "landed.txt"), []byte("merged over the network\n"), 0o644); err != nil {
+		t.Fatalf("write landed: %v", err)
+	}
+	runGit(t, repoDir, "add", "landed.txt")
+	runGit(t, repoDir, "commit", "-m", "feat: the work that satisfied the bead")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	runGit(t, repoDir, "push", "origin", "tmp-land:main")
+	runGit(t, repoDir, "checkout", "main")
+	runGit(t, repoDir, "branch", "-D", "tmp-land")
+
+	// Preconditions from the issue's repro: the local ref is genuinely stale
+	// and the remote-tracking ref genuinely contains the commit.
+	if err := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, "refs/heads/main").Run(); err == nil {
+		t.Fatalf("precondition: commit must NOT be reachable on the stale local main")
+	}
+	if err := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, "refs/remotes/origin/main").Run(); err != nil {
+		t.Fatalf("precondition: commit must be reachable on origin/main")
+	}
+
+	// The fixed resolver must answer via the remote-tracking ref.
+	if !gitCommitReachableOnBranch(repoDir, commit, "main") {
+		t.Fatalf("gitCommitReachableOnBranch resolved the stale local ref; want refs/remotes/origin/main")
+	}
+
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID:     "wr-stale-local",
+		Type:   "task",
+		Status: "in_progress",
+		Metadata: map[string]string{
+			beadmeta.WorkDirMetadataKey: repoDir,
+		},
+	}}, nil)
+	args := []string{
+		"update", "wr-stale-local",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=main",
+		"--status=closed",
+	}
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, true, &stderr); block {
+		t.Fatalf("close of work merged to origin/main blocked on a stale local ref; stderr=%s", stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("clean delivered close produced gate output: %q", got)
 	}
 }
 

@@ -16,9 +16,19 @@ import (
 // Work-record close gate (ADR-0009). Closing a work bead through the SDK close
 // seam (`gc bd close`) is validated against the typed work-record contract: the
 // bead must carry a typed gc.work_outcome, and a "shipped" outcome must point at
-// a commit that is reachable on the stamped gc.work_branch. This turns the
+// a commit that has been DELIVERED — present on a remote-tracking ref — and
+// reachable on the recorded gc.work_branch, with branch names resolved
+// remote-first (refs/remotes/origin/<branch> when it exists, because local refs
+// go stale in push-based topologies; gastownhall/gascity#5037). This turns the
 // recurring "drain-without-commit" close (a close that leaves no artifact at
 // all) into a machine-checkable violation.
+//
+// gc.work_branch is stamped at claim time (cmd_hook_claim.go) — before the work
+// exists — so it is a PROVISIONAL handle, not a promise. A shipped commit that
+// landed on a different branch than the stamp yields a non-blocking stale-stamp
+// advisory naming the actual landing branch (Defect C); only undelivered work
+// (no remote ref contains the commit) is a violation. Delivery is the guarantee;
+// the branch is the pointer.
 //
 // The gate ships warn-only by default — violations are logged but the close
 // proceeds — so existing open beads migrate without breakage. Set
@@ -68,35 +78,49 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 	return true
 }
 
-// validateWorkRecordOnClose checks bead against the typed work-record contract
-// and returns a human-readable message for each violation (empty slice ⇒ the
-// bead satisfies the contract). commitReachable reports whether a commit SHA is
-// an ancestor of a branch; commitOnRemote reports whether it is contained in any
-// remote-tracking ref. Both are injected so the rule is unit-testable without a
-// real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
+// validateWorkRecordOnClose checks bead against the typed work-record contract.
+// It returns a human-readable message for each violation (blocking under
+// enforcement) and each advisory (never blocking). Empty violations ⇒ the bead
+// satisfies the contract. commitReachable reports whether a commit SHA is an
+// ancestor of a branch; commitOnRemote reports whether it is contained in any
+// remote-tracking ref; remoteBranchesContaining reports which remote-tracking
+// branches contain it. All three are injected so the rule is unit-testable
+// without a real repo. The caller is responsible for scoping
+// (isWorkRecordGatedBead).
 //
-// The two oracles answer different questions and a shipped close needs both.
+// The oracles answer different questions and a shipped close needs them all.
 // Reachability is a LOCAL property: a commit on a branch that was never pushed is
 // still reachable from it, so reachability alone cannot distinguish delivered
 // work from work that exists only in a worktree. az-6n75 is that gap — nine beads
 // closed as delivered whose commits had no remote ref, one of them the only copy
 // in existence.
-func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool, commitOnRemote func(commit string) bool) []string {
+//
+// The containment resolver exists for the converse gap (ADR-0009 Defect C):
+// gc.work_branch is stamped at claim time, before the work exists, with whatever
+// branch the claiming worktree was on. When the work lands elsewhere the stamp is
+// stale, and treating the resulting unreachability as a violation blocks honest
+// delivered closes — under GC_WORK_RECORD_ENFORCE, citywide. Delivery is the
+// guarantee this gate protects; the branch handle is the record's pointer to the
+// work. So: a commit unreachable on its stamped branch but present on a
+// remote-tracking ref yields a precise stale-stamp ADVISORY naming the branch the
+// work actually landed on (so the record can be corrected), not a violation —
+// while a commit on no remote ref remains a blocking violation regardless of the
+// stamp.
+func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool, commitOnRemote func(commit string) bool, remoteBranchesContaining func(commit string) []string) (violations, advisories []string) {
 	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
 	if outcome == "" {
-		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
+		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}, nil
 	}
 	if !validWorkOutcome(outcome) {
-		return []string{fmt.Sprintf("invalid %s=%q (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey, outcome)}
+		return []string{fmt.Sprintf("invalid %s=%q (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey, outcome)}, nil
 	}
 	if outcome != beadmeta.WorkOutcomeShipped {
 		// no-op / blocked / abandoned carry their reason in the close-reason; no
 		// commit artifact is required.
-		return nil
+		return nil, nil
 	}
 	commit := strings.TrimSpace(bead.Metadata[beadmeta.WorkCommitMetadataKey])
 	branch := strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey])
-	var violations []string
 	if commit == "" {
 		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the commit that satisfied the bead)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey))
 	}
@@ -104,12 +128,21 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the branch the commit lives on)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkBranchMetadataKey))
 	}
 	if commit != "" && branch != "" && !commitReachable(commit, branch) {
-		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
+		if containing := remoteBranchesContaining(commit); len(containing) > 0 {
+			// Delivered, but the claim-time stamp went stale (Defect C): name the
+			// branch the work actually landed on and how to correct the record.
+			suggested := strings.TrimPrefix(containing[0], "origin/")
+			advisories = append(advisories, fmt.Sprintf(
+				"%s %q is stale (stamped at claim time): commit %s landed on %s — correct the record with --set-metadata %s=%s",
+				beadmeta.WorkBranchMetadataKey, branch, commit, strings.Join(containing, ", "), beadmeta.WorkBranchMetadataKey, suggested))
+		} else {
+			violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
+		}
 	}
 	if commit != "" && !commitOnRemote(commit) {
 		violations = append(violations, fmt.Sprintf("%s %s is not present on any remote — the work exists only locally and any worktree prune or branch GC destroys it (push before closing)", beadmeta.WorkCommitMetadataKey, commit))
 	}
-	return violations
+	return violations, advisories
 }
 
 // gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
@@ -118,6 +151,18 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 // repo, unknown ref, unknown commit — reads as "not reachable". A commit/branch
 // that looks like a flag (leading "-") is rejected outright so a malformed
 // metadata value can never be parsed as a git option.
+//
+// The branch name resolves REMOTE-FIRST (gastownhall/gascity#5037): in any
+// topology where merges reach the target branch over the network, nothing ever
+// advances the local ref — the refinery merges in a detached worktree and
+// pushes, and no one may move a branch checked out in another worktree — so
+// refs/heads/<branch> goes permanently stale while refs/remotes/origin/<branch>
+// is the truth. A bare name resolves to the stale local ref by gitrevisions
+// precedence, reporting genuinely-merged commits unreachable. The existence
+// probe is a separate rev-parse call, deliberately NOT a fallback on the
+// merge-base exit code: retrying a genuinely-unreachable commit against the
+// local ref could let it pass, breaking the fail-closed contract. Only when no
+// remote-tracking ref exists (a purely local repo) is the local ref the truth.
 func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.TrimSpace(repoDir) == "" || commit == "" || branch == "" {
 		return false
@@ -125,7 +170,12 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	if strings.HasPrefix(commit, "-") || strings.HasPrefix(branch, "-") {
 		return false
 	}
-	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, branch).Run() == nil
+	ref := branch
+	remoteRef := "refs/remotes/origin/" + branch
+	if exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", remoteRef).Run() == nil {
+		ref = remoteRef
+	}
+	return exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, ref).Run() == nil
 }
 
 // gitCommitOnRemote reports whether commit is contained in any remote-tracking
@@ -166,6 +216,32 @@ func gitCommitOnRemote(repoDir, commit string) bool {
 		return false
 	}
 	return len(strings.TrimSpace(string(out))) == 0
+}
+
+// gitRemoteBranchesContaining reports which remote-tracking branches contain
+// commit in the repository at repoDir, short-form ("origin/main"), with the
+// symbolic origin/HEAD entry filtered out. It powers the stale claim-stamp
+// advisory (Defect C): when the stamped branch does not contain a shipped
+// commit, the branches that DO name where the work actually landed. Any git
+// error reads as "no containing branches", which downgrades the caller to the
+// blocking not-reachable violation — fail closed, never open.
+func gitRemoteBranchesContaining(repoDir, commit string) []string {
+	if strings.TrimSpace(repoDir) == "" || commit == "" || strings.HasPrefix(commit, "-") {
+		return nil
+	}
+	out, err := exec.Command("git", "-C", repoDir, "branch", "-r", "--contains", commit, "--format=%(refname:short)").Output()
+	if err != nil {
+		return nil
+	}
+	var branches []string
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasSuffix(line, "/HEAD") {
+			continue
+		}
+		branches = append(branches, line)
+	}
+	return branches
 }
 
 // workRecordCloseTargets returns the bead IDs a bd invocation closes, and
@@ -289,18 +365,23 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		if repoDir == "" {
 			repoDir = scopeRoot
 		}
-		var violations []string
+		var violations, advisories []string
 		if projectionErr != nil {
 			violations = []string{projectionErr.Error()}
 		} else {
-			violations = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
+			violations, advisories = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
 				return gitCommitReachableOnBranch(repoDir, commit, branch)
 			}, func(commit string) bool {
 				return gitCommitOnRemote(repoDir, commit)
+			}, func(commit string) []string {
+				return gitRemoteBranchesContaining(repoDir, commit)
 			})
 		}
 		for _, v := range violations {
 			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, v) //nolint:errcheck // best-effort stderr
+		}
+		for _, a := range advisories {
+			fmt.Fprintf(stderr, "gc bd: work-record gate (advisory): close of %s: %s\n", id, a) //nolint:errcheck // best-effort stderr
 		}
 		if enforce && len(violations) > 0 {
 			block = true
