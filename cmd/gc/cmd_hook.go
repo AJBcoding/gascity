@@ -380,30 +380,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 
-	// A cross-store-eligible (city-scoped) agent federates its work query across
-	// all stores — its own first, then every rig store — matched on its own
-	// identity (vp-kvp stage iii). A rig-scoped agent ("<rig>/<name>") instead
-	// queries its own <rig> store FIRST: its routed work lives there, but its
-	// city-scoped work-query env does not reach it, so without this the hook
-	// returns empty and the spawned session exits with nothing to do. The rig
-	// store goes first (as the primary entry, not a best-effort federated
-	// extra) so a rig-store work-query timeout still surfaces to the reconciler
-	// via firstStoreWithWork's emit-on-timeout contract — the agent's
-	// (work-less) city-scoped env stays as a best-effort secondary. This
-	// extends the #2877 city-scoped cross-store delivery to rig-scoped agents.
-	stores := []hookStore{{dir: workDir, env: queryEnv}}
-	if agentIsCrossStoreEligible(&a) {
-		stores = appendRigHookStores(stores, cityPath, cfg, &a, overrides)
-	} else if rig := rigScopedHookRig(cfg, agentForQuery); rig != "" {
-		if rigStores := appendOneRigHookStore(nil, cityPath, cfg, &a, rig, overrides); len(rigStores) > 0 {
-			stores = append(rigStores, stores...)
-		}
-		// A rig-backed agent's own env above is ALSO rig-scoped, so without
-		// this no entry reaches the CITY store and root-only beads assigned
-		// to the agent stay invisible. Best-effort tertiary; see
-		// appendCityHookStore.
-		stores = appendCityHookStore(stores, cityPath, cfg, &a, overrides)
-	}
+	// Assemble the federated store list (own store, rig store(s), city store),
+	// deduped so no store is queried twice. See buildHookStores for the ordering
+	// and dedupe contracts.
+	stores := buildHookStores(cityPath, workDir, cfg, &a, agentForQuery, queryEnv, overrides)
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as

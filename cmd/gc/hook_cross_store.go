@@ -250,3 +250,74 @@ func sameHookStore(a, b hookStore) bool {
 	}
 	return true
 }
+
+// buildHookStores assembles the federated store list a hook work query runs
+// against, deduped.
+//
+// A cross-store-eligible (city-scoped) agent federates across all stores — its
+// own first, then every rig store — matched on its own identity (vp-kvp stage
+// iii). A rig-scoped agent ("<rig>/<name>") instead queries its own <rig> store
+// FIRST: its routed work lives there, but its city-scoped work-query env does
+// not reach it, so without this the hook returns empty and the spawned session
+// exits with nothing to do. The rig store goes first (as the primary entry, not
+// a best-effort federated extra) so a rig-store work-query timeout still
+// surfaces to the reconciler via firstStoreWithWork's emit-on-timeout contract —
+// the agent's (work-less) city-scoped env stays as a best-effort secondary. This
+// extends the #2877 city-scoped cross-store delivery to rig-scoped agents.
+//
+// A rig-backed, rig-scoped agent's own work-query env is ALSO rig-scoped, so the
+// prepended rig store and the own entry address the same store. Each duplicate
+// costs a full work-query script run (9 bd execs, ~1.4s) for a byte-identical
+// answer, so the assembled list is deduped once here and both the discovery path
+// and the claim loop (which starts from this same slice) inherit it. kit-r0e2.
+func buildHookStores(cityPath, workDir string, cfg *config.City, a *config.Agent, agentForQuery string, queryEnv []string, overrides map[string]string) []hookStore {
+	stores := []hookStore{{dir: workDir, env: queryEnv}}
+	if agentIsCrossStoreEligible(a) {
+		stores = appendRigHookStores(stores, cityPath, cfg, a, overrides)
+	} else if rig := rigScopedHookRig(cfg, agentForQuery); rig != "" {
+		if rigStores := appendOneRigHookStore(nil, cityPath, cfg, a, rig, overrides); len(rigStores) > 0 {
+			stores = append(rigStores, stores...)
+		}
+		// A rig-backed agent's own env above is ALSO rig-scoped, so without this
+		// no entry reaches the CITY store and root-only beads assigned to the
+		// agent stay invisible. Best-effort tertiary; see appendCityHookStore.
+		stores = appendCityHookStore(stores, cityPath, cfg, a, overrides)
+	}
+	return dedupeHookStores(stores)
+}
+
+// dedupeHookStores returns stores with any entry that addresses a store already
+// present earlier in the list removed, preserving order and keeping the FIRST
+// occurrence.
+//
+// A rig-scoped agent's list is assembled as [rigStore, ownStore, cityStore],
+// and for an agent with a configured rig dir the first two are the same store:
+// controllerWorkQueryEnv switches to rig coordinates whenever the agent has a
+// rig, so its "own" work-query env is ALSO rig-scoped (see the comment at the
+// appendCityHookStore call site). The prepended rig store is still required for
+// agents whose own env is NOT rig-scoped, so the duplicate is dynamic rather
+// than structural and is fixed by deduping the assembled list, not by
+// restructuring the builder.
+//
+// Each duplicate entry costs a full work-query script run — measured at 9 bd
+// execs and ~1.4s on kit/jeeves, one third of the whole hook — for a
+// byte-identical result. Keeping the first occurrence leaves stores[0]
+// unchanged, so firstStoreWithWork's primary/emit-on-timeout contract is
+// untouched. Only an entry addressing an already-present store is dropped, so
+// federated cross-rig discovery is never narrowed. See kit-r0e2.
+func dedupeHookStores(stores []hookStore) []hookStore {
+	out := make([]hookStore, 0, len(stores))
+	for _, s := range stores {
+		dup := false
+		for _, kept := range out {
+			if sameHookStore(kept, s) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, s)
+		}
+	}
+	return out
+}

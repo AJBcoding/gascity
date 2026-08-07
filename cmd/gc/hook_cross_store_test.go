@@ -2,6 +2,9 @@ package main
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -231,4 +234,183 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 	if len(calls) != 1 || calls[0] != "city" {
 		t.Fatalf("calls = %v, want a single [city] re-validation", calls)
 	}
+}
+
+// TestDedupeHookStores pins the kit-r0e2 fix: a rig-backed, rig-scoped agent's
+// store list contains the SAME store twice (the prepended rig store and the
+// agent's own env, which controllerWorkQueryEnv also points at the rig). Every
+// duplicate entry costs a full work-query script run — 9 bd execs, ~1.4s — for
+// a byte-identical answer. Dedupe keeps the FIRST occurrence so stores[0], and
+// with it firstStoreWithWork's primary/emit-on-timeout contract, is unchanged.
+func TestDedupeHookStores(t *testing.T) {
+	rig := hookStore{dir: "/repos/kit", env: []string{"BEADS_DIR=/repos/kit/.beads", "GC_AGENT=kit/jeeves"}}
+	own := hookStore{dir: "/repos/kit", env: []string{"BEADS_DIR=/repos/kit/.beads", "GC_AGENT=kit/jeeves"}}
+	city := hookStore{dir: "/city", env: []string{"BEADS_DIR=/city/.beads", "GC_AGENT=kit/jeeves"}}
+
+	got := dedupeHookStores([]hookStore{rig, own, city})
+	if len(got) != 2 {
+		t.Fatalf("dedupeHookStores kept %d stores, want 2 (rig+city; own duplicates rig)", len(got))
+	}
+	if !sameHookStore(got[0], rig) {
+		t.Errorf("got[0] = %+v, want the rig store (first occurrence must win)", got[0])
+	}
+	if !sameHookStore(got[1], city) {
+		t.Errorf("got[1] = %+v, want the city store", got[1])
+	}
+}
+
+// A list with no duplicates must pass through untouched, so federated cross-rig
+// discovery is never narrowed: only an entry addressing an already-present
+// store may be dropped, never a distinct store.
+func TestDedupeHookStoresKeepsDistinctStores(t *testing.T) {
+	stores := []hookStore{
+		{dir: "/repos/kit", env: []string{"BEADS_DIR=/repos/kit/.beads"}},
+		{dir: "/repos/voxist", env: []string{"BEADS_DIR=/repos/voxist/.beads"}},
+		{dir: "/city", env: []string{"BEADS_DIR=/city/.beads"}},
+	}
+	got := dedupeHookStores(stores)
+	if len(got) != 3 {
+		t.Fatalf("dedupeHookStores kept %d stores, want 3 (all distinct)", len(got))
+	}
+	for i := range stores {
+		if !sameHookStore(got[i], stores[i]) {
+			t.Errorf("got[%d] = %+v, want %+v (order must be preserved)", i, got[i], stores[i])
+		}
+	}
+}
+
+// Same dir but different env is a DIFFERENT store (a rig view and a city view
+// can share a working dir while pointing bd at different beads dirs), and an
+// empty list must not panic.
+func TestDedupeHookStoresDistinguishesEnv(t *testing.T) {
+	a := hookStore{dir: "/same", env: []string{"BEADS_DIR=/a/.beads"}}
+	b := hookStore{dir: "/same", env: []string{"BEADS_DIR=/b/.beads"}}
+	if got := dedupeHookStores([]hookStore{a, b}); len(got) != 2 {
+		t.Fatalf("dedupeHookStores collapsed stores with different env: kept %d, want 2", len(got))
+	}
+	if got := dedupeHookStores(nil); len(got) != 0 {
+		t.Fatalf("dedupeHookStores(nil) = %+v, want empty", got)
+	}
+}
+
+// hookStoreScope returns a hookStore's GC_STORE_SCOPE ("rig" or "city"), or ""
+// when unset — the store a federated entry actually addresses. The env is the
+// merged []string form ("KEY=VALUE"), and the LAST assignment wins the way exec
+// does.
+func hookStoreScope(env []string) string {
+	got := ""
+	for _, kv := range env {
+		if name, value, ok := strings.Cut(kv, "="); ok && name == "GC_STORE_SCOPE" {
+			got = value
+		}
+	}
+	return got
+}
+
+// TestBuildHookStoresRigScopedAgent is the CI regression guard for the store-list
+// CONSTRUCTION path (kit-ak9e). The TestDedupeHookStores* tests above cover the
+// helper in isolation against hand-built literals; nothing covered the assembly
+// in doHook, which is where a regression actually lands — dropping the dedupe
+// call, or "fixing" the duplicate structurally by removing the rig-store append.
+//
+// Both shapes are exercised because the duplicate is DYNAMIC, not structural:
+//   - rig-backed + rig-scoped: the agent's own work-query env is ALSO rig-scoped
+//     (controllerWorkQueryEnv switches to rig coordinates whenever the agent has
+//     a configured rig), so the prepended rig store and the own entry address the
+//     same store and must collapse — with the rig store still stores[0].
+//   - rig identity but NO configured rig dir: the own env stays city-scoped, so
+//     the rig store is a genuinely distinct store and must SURVIVE. This is the
+//     half that fails if someone removes the rig-store append instead.
+func TestBuildHookStoresRigScopedAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "riga")
+	if err := os.MkdirAll(rigPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	const identity = "riga/worker"
+
+	// build assembles the store list exactly as doHook does for a rig-scoped
+	// agent in the non-session-template path: full work-query env, the six
+	// identity overrides, then the construction under test.
+	build := func(t *testing.T, agentDir string) []hookStore {
+		t.Helper()
+		cfg := &config.City{
+			Rigs:   []config.Rig{{Name: "riga", Path: rigPath}},
+			Agents: []config.Agent{{Name: "worker", Dir: agentDir}},
+		}
+		a := &cfg.Agents[0]
+		overrides, err := hookQueryEnv(cityPath, cfg, a)
+		if err != nil {
+			t.Fatalf("hookQueryEnv: %v", err)
+		}
+		overrides["GC_AGENT"] = identity
+		overrides["GC_SESSION_NAME"] = "worker-session"
+		overrides["GC_ALIAS"] = identity
+		overrides["GC_SESSION_ID"] = ""
+		overrides["GC_SESSION_ORIGIN"] = ""
+		overrides["GC_TEMPLATE"] = ""
+		workDir := agentCommandDir(cityPath, a, cfg.Rigs)
+		queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+		return buildHookStores(cityPath, workDir, cfg, a, identity, queryEnv, overrides)
+	}
+
+	// No entry may address a store already present: each duplicate costs a full
+	// work-query script run (9 bd execs, ~1.4s) for a byte-identical answer.
+	assertNoDuplicates := func(t *testing.T, stores []hookStore) {
+		t.Helper()
+		for i := range stores {
+			for j := i + 1; j < len(stores); j++ {
+				if sameHookStore(stores[i], stores[j]) {
+					t.Errorf("stores[%d] and stores[%d] address the same store (dir=%q, scope=%q): the duplicate costs a full work-query run for a byte-identical answer",
+						i, j, stores[i].dir, hookStoreScope(stores[i].env))
+				}
+			}
+		}
+	}
+
+	t.Run("rig-backed agent collapses the duplicate and keeps the rig store primary", func(t *testing.T) {
+		stores := build(t, "riga")
+		assertNoDuplicates(t, stores)
+		if len(stores) != 2 {
+			t.Fatalf("got %d stores, want 2 (rig + city; the agent's own entry duplicates the rig store)", len(stores))
+		}
+		// stores[0] must stay the RIG store: firstStoreWithWork treats it as the
+		// primary and only its work-query failures reach the reconciler.
+		if stores[0].dir != rigPath {
+			t.Errorf("stores[0].dir = %q, want the rig root %q (the rig store must stay primary)", stores[0].dir, rigPath)
+		}
+		if got := hookStoreScope(stores[0].env); got != "rig" {
+			t.Errorf("stores[0] GC_STORE_SCOPE = %q, want %q", got, "rig")
+		}
+		// The city entry must remain reachable, or root-only beads assigned to a
+		// rig-scoped agent go invisible.
+		if got := hookStoreScope(stores[1].env); got != "city" {
+			t.Errorf("stores[1] GC_STORE_SCOPE = %q, want %q (the city store must stay reachable)", got, "city")
+		}
+	})
+
+	t.Run("agent without a configured rig dir keeps the distinct rig store", func(t *testing.T) {
+		stores := build(t, "")
+		assertNoDuplicates(t, stores)
+		// The count is deliberately NOT pinned here: whether the own (city-scoped)
+		// entry collapses into the appended city store is incidental. What must
+		// hold is that BOTH scopes stay reachable — the rig store carries this
+		// agent's routed work and its own env never reaches it.
+		if stores[0].dir != rigPath {
+			t.Errorf("stores[0].dir = %q, want the rig root %q (the rig store is a distinct store here and must survive)", stores[0].dir, rigPath)
+		}
+		if got := hookStoreScope(stores[0].env); got != "rig" {
+			t.Errorf("stores[0] GC_STORE_SCOPE = %q, want %q", got, "rig")
+		}
+		sawCity := false
+		for _, s := range stores {
+			if hookStoreScope(s.env) == "city" {
+				sawCity = true
+				break
+			}
+		}
+		if !sawCity {
+			t.Errorf("no city-scoped store in %d entries: dedupe must never drop a distinct store", len(stores))
+		}
+	})
 }
