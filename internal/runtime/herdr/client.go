@@ -251,20 +251,107 @@ func (c *client) paneRun(ctx context.Context, paneID, command string) error {
 // Panes with no registered agent (raw `exec /bin/sh -c` sessions, bare
 // shells) fall back to paste + Enter: there is no TUI prompt machinery to
 // confirm against, so delivery is best-effort by construction.
+//
+// Note this path does NOT confirm the submit landed: `agent prompt` without
+// --wait reports ok the moment the text is typed. Against a live mid-session
+// TUI that is reliable; a FIRST turn into a freshly-booted TUI must go
+// through deliverStartupTurn, which opts into herdr's submission
+// confirmation.
 func (c *client) deliverNudge(ctx context.Context, paneID, text string) error {
 	err := c.agentPrompt(ctx, paneID, text)
 	if err == nil {
 		return nil
 	}
-	if !strings.Contains(err.Error(), "not_found") && !strings.Contains(err.Error(), "not found") {
+	if !isAgentNotFound(err) {
 		return err
 	}
-	// No registered agent on this pane: paste, settle, submit.
+	return c.pasteAndSubmit(ctx, paneID, text)
+}
+
+// Startup-delivery confirmation bounds (herdr ≥0.7.5 `agent prompt --wait`).
+// herdr's stall verdict fires at its fixed 5000ms observed-state-change
+// window, so the prompt timeout must exceed 5000 or a plain "timeout" masks
+// the more precise "agent_prompt_stalled".
+const (
+	startupPromptConfirmTimeoutMS = 15000
+	startupStallRecoveryTimeoutMS = 10000
+)
+
+// startupConfirmStates are the post-submission states that prove the submit
+// CR took: the turn is running (working), already finished (done — an
+// ultra-short turn can settle between herdr's observations), or hit a dialog
+// (blocked). "idle" is deliberately absent — it is the pre-submit state, and
+// matching it would confirm a swallowed CR.
+var startupConfirmStates = []string{"working", "done", "blocked"}
+
+// deliverStartupTurn delivers an agent's FIRST turn with submission
+// confirmation, unlike deliverNudge's fire-and-forget prompt. A freshly
+// spawned TUI boots through a shell→TUI handoff during which the submit CR
+// can be swallowed: the text sits typed-but-unsubmitted in the input box and
+// the agent idles forever (the stranded-startup outage, gas-90h). The
+// un-waited `agent prompt` reports ok without verifying the CR took, so here
+// the prompt runs with --wait: herdr requires an observed state change after
+// submission and returns agent_prompt_stalled when the agent never leaves
+// idle — the swallowed-CR detector.
+//
+// On a stall (or a wait that elapsed without a confirming state), recovery is
+// a single explicit Enter — the text is already in the input box, and a bare
+// Enter on an empty box is a no-op, so this is safe in every plausible state
+// — followed by a confirming wait. Never re-prompt: retyping would double the
+// text. Unregistered panes (raw shells) keep the best-effort
+// paste+settle+Enter path. A non-nil error means the turn could not be
+// confirmed submitted.
+func (c *client) deliverStartupTurn(ctx context.Context, paneID, text string) error {
+	args := []string{"agent", "prompt", paneID, text, "--wait"}
+	for _, s := range startupConfirmStates {
+		args = append(args, "--until", s)
+	}
+	args = append(args, "--timeout", strconv.Itoa(startupPromptConfirmTimeoutMS))
+	_, err := c.run(ctx, args...)
+	if err == nil {
+		return nil
+	}
+	if isAgentNotFound(err) {
+		return c.pasteAndSubmit(ctx, paneID, text)
+	}
+	switch herdrErrorCode(err) {
+	case "agent_prompt_stalled", "timeout":
+		if kerr := c.sendKeys(ctx, paneID, "Enter"); kerr != nil {
+			return fmt.Errorf("startup submit not confirmed (%w) and recovery Enter failed: %w", err, kerr)
+		}
+		wait := []string{"agent", "wait", paneID}
+		for _, s := range startupConfirmStates {
+			wait = append(wait, "--until", s)
+		}
+		wait = append(wait, "--timeout", strconv.Itoa(startupStallRecoveryTimeoutMS))
+		if _, werr := c.run(ctx, wait...); werr != nil {
+			return fmt.Errorf("startup submit not confirmed after Enter recovery (%w): %w", err, werr)
+		}
+		return nil
+	}
+	return err
+}
+
+// pasteAndSubmit is the unregistered-pane delivery: paste, settle, submit.
+func (c *client) pasteAndSubmit(ctx context.Context, paneID, text string) error {
 	if err := c.paneRun(ctx, paneID, text); err != nil {
 		return err
 	}
 	time.Sleep(submitSettleDelay)
 	return c.sendKeys(ctx, paneID, "Enter")
+}
+
+// isAgentNotFound reports whether err is herdr's missing-agent rejection
+// (typed agent_not_found, or the message-text forms the pre-typed-error
+// callers matched on).
+func isAgentNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if herdrErrorCode(err) == "agent_not_found" {
+		return true
+	}
+	return strings.Contains(err.Error(), "not_found") || strings.Contains(err.Error(), "not found")
 }
 
 // submitSettleDelay is how long the unregistered-pane fallback waits for a

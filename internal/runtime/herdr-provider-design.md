@@ -71,6 +71,15 @@ exhaustion; bead az-405 has the full evidence trail). The adapter was rewritten 
 - **Delivery**: `deliverNudge` targets the pane id via native `agent prompt`
   (registered agents), falling back to paste+Enter for unregistered panes.
   `WaitForIdle` uses `agent wait --until idle`. `Peek` reads via `pane read`.
+- **Startup delivery** (`deliverStartupTurn`, gas-90h): the FIRST turn opts into
+  submission confirmation — `agent prompt --wait --until working/done/blocked`
+  — because a freshly-booted TUI can swallow the submit CR while the un-waited
+  prompt reports ok (text typed-but-unsubmitted, agent stranded idle). On
+  `agent_prompt_stalled`/`timeout` the recovery is one explicit `send-keys
+  Enter` (the text is already in the box; never re-prompt) plus a confirming
+  wait; a still-unconfirmed delivery is recorded on the sidecar
+  (`GC_HERDR_STARTUP_DELIVERY_UNCONFIRMED`) and stderr. Mid-session nudges keep
+  the fast un-waited form.
 
 ### Operational gotchas (learned in production, 2026-07-26)
 

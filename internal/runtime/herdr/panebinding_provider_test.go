@@ -56,13 +56,21 @@ agent_start)
   if [ -e "$METADIR/$3/GC_HERDR_PANE_ID" ]; then : > "$STATE/bound_before_launch"; fi
   printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}' ;;
 agent_wait)
-  printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"idle"}}}' ;;
+  if [ ! -e "$STATE/registered" ]; then
+    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/wait_times_out" ]; then
+    printf '%s' '{"error":{"code":"timeout","message":"timed out waiting for agent status"}}'
+  else
+    printf '%s' '{"result":{"agent":{"name":"'"$3"'","agent_status":"idle"}}}'
+  fi ;;
 agent_prompt)
-  if [ -e "$STATE/registered" ]; then
+  if [ ! -e "$STATE/registered" ]; then
+    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
+  elif [ -e "$STATE/prompt_stalled" ]; then
+    printf '%s' '{"error":{"code":"agent_prompt_stalled","message":"no state change observed after submission"}}'
+  else
     : > "$STATE/prompted"
     printf '%s' '{"result":{"type":"agent_prompted"}}'
-  else
-    printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
   fi ;;
 pane_run)
   : > "$STATE/busy"
