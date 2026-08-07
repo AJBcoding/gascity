@@ -180,6 +180,7 @@ func getCustomTypes(dir string) ([]string, error) {
 	args := []string{"config", "get", "--json", "types.custom"}
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
+	cmd.Env = bdScopeEnv(dir)
 	out, err := cmd.Output()
 	exitCode := 0
 	if err != nil {
@@ -221,6 +222,7 @@ func getRegisteredTypes(dir string) ([]string, error) {
 	args := []string{"types", "--json"}
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
+	cmd.Env = bdScopeEnv(dir)
 	out, err := cmd.Output()
 	exitCode := 0
 	if err != nil {
@@ -257,6 +259,7 @@ func setCustomTypes(dir, types string) error {
 	args := []string{"config", "set", "types.custom", types}
 	cmd := exec.Command("bd", args...)
 	cmd.Dir = dir
+	cmd.Env = bdScopeEnv(dir)
 	err := cmd.Run()
 	exitCode := 0
 	if err != nil {

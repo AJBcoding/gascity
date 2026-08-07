@@ -282,10 +282,19 @@ func localOnlyRemoteFixHint(remotes []doltRemoteState) string {
 	return strings.Join(lines, "\n")
 }
 
-func removeDoltRemote(rigPath, remoteName string) error {
+// doltRemoteRemoveCmd builds the bd command that removes remoteName from the
+// store at rigPath. Split out from removeDoltRemote so the scope projection is
+// directly testable: this is a write, so an inherited BEADS_DIR would send the
+// removal at another store entirely. See bdScopeEnv.
+func doltRemoteRemoveCmd(rigPath, remoteName string) *exec.Cmd {
 	cmd := exec.Command("bd", "--sandbox", "dolt", "remote", "remove", remoteName)
 	cmd.Dir = rigPath
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = bdScopeEnv(rigPath, "GIT_TERMINAL_PROMPT=0")
+	return cmd
+}
+
+func removeDoltRemote(rigPath, remoteName string) error {
+	cmd := doltRemoteRemoveCmd(rigPath, remoteName)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("bd --sandbox dolt remote remove %s: %w: %s", remoteName, err, strings.TrimSpace(string(out)))
