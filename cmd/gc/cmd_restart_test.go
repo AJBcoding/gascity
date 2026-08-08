@@ -24,6 +24,19 @@ func (s *stopErrorProvider) Stop(_ string) error {
 	return s.stopErr
 }
 
+func TestRigRestartHelpWarnsAboutInFlightWork(t *testing.T) {
+	cmd := newRigRestartCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	for _, want := range []string{
+		"kills every running agent session",
+		"in-flight",
+		"gc session wake",
+	} {
+		if !strings.Contains(cmd.Long, want) {
+			t.Fatalf("gc rig restart Long = %q, want it to contain %q", cmd.Long, want)
+		}
+	}
+}
+
 func TestDoRigRestart(t *testing.T) {
 	sp := runtime.NewFake()
 	// Start 2 sessions for agents in the rig.
