@@ -1,6 +1,7 @@
 package dolt_test
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,6 +12,18 @@ import (
 
 	"github.com/gastownhall/gascity/internal/orders"
 )
+
+// compactScriptRunTimeout bounds a single compact/run.sh invocation from the
+// test side. The script carries its own per-operation timeouts, but they do
+// not cover every path it can block on: a wedged child left this fixture
+// parked in exec.Cmd.Wait until the whole package hit the Go test deadline,
+// so one stuck script took the entire suite down and reported it as a package
+// timeout with no failing test named (gas-3mf).
+//
+// A bound here cannot fix the script, but it converts that class of failure
+// into a named test failure with the script's partial output attached, which
+// is the difference between a debuggable result and a dead suite.
+const compactScriptRunTimeout = 90 * time.Second
 
 func runDogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir string, extraEnv ...string) (string, error) {
 	t.Helper()
@@ -175,7 +188,9 @@ func (f compactScriptFixture) run(t *testing.T, mode string, extraEnv ...string)
 func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []string, extraEnv ...string) (string, error) {
 	t.Helper()
 	scriptArgs := append([]string{filepath.Join(f.root, "commands", "compact", "run.sh")}, args...)
-	cmd := exec.Command("sh", scriptArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), compactScriptRunTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sh", scriptArgs...)
 	cmd.Env = append(filteredEnv(
 		"PATH",
 		"GC_CITY_PATH",
@@ -220,6 +235,14 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	out, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		// Name the timeout here rather than returning the bare "signal:
+		// killed" that context cancellation produces, which reads like an
+		// ordinary script failure and sends the next reader hunting through
+		// compact/run.sh for an exit path that does not exist.
+		t.Fatalf("compact/run.sh (mode %s) exceeded %s and was killed; partial output:\n%s",
+			mode, compactScriptRunTimeout, out)
+	}
 	return string(out), err
 }
 
