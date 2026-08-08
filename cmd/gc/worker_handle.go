@@ -85,6 +85,9 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		ResolveSessionRuntime:   workerSessionRuntimeResolverWithConfig(cityPath, cfg),
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
+		DiskFreeBytes:           sessionDiskFreeBytesFunc,
+		DiskMinFreeBytes:        sessionDiskMinFreeBytes(),
+		DiskWarnFreeBytes:       sessionDiskWarnFreeBytes(),
 	})
 }
 

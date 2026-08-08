@@ -3,6 +3,7 @@ package worker
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -35,6 +36,14 @@ type FactoryConfig struct {
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
+	// DiskFreeBytes probes free space before a session is started, and
+	// DiskMinFreeBytes is the floor below which the start is refused. The
+	// probe is supplied by the caller rather than implemented here, matching
+	// internal/supervisor's maintenance loop, so one statfs implementation
+	// serves both preflights. A nil probe or zero floor leaves the check off.
+	DiskFreeBytes     sessionpkg.DiskFreeBytesFunc
+	DiskMinFreeBytes  int64
+	DiskWarnFreeBytes int64
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -62,6 +71,10 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
+	}
+	if cfg.DiskFreeBytes != nil && cfg.DiskMinFreeBytes > 0 {
+		opts = append(opts, sessionpkg.WithDiskPreflight(
+			cfg.DiskFreeBytes, cfg.DiskMinFreeBytes, cfg.DiskWarnFreeBytes, os.Stderr))
 	}
 	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
 	return newFactory(manager, cfg.Store, cfg.Provider, cfg.SearchPaths, cfg.Recorder, cfg.UsageSink, cfg.ResolveSessionRuntime, cfg.Pricing)
