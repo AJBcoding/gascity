@@ -417,6 +417,67 @@ func TestTmuxLeakGuardWatchesTheProcessSocketRoot(t *testing.T) {
 	}
 }
 
+// TestNamedSessionFixtureLeavesNoTmuxServerBehind covers the other half of the
+// leak: the guard above only makes residue visible, and the residue came from
+// writeNamedSessionCityTOML. Driving that fixture used to leave one
+// `tmux -u -L test-city ... -s mayor` server per run — 22 of them on one box,
+// every run reporting ok (gas-iio, gas-1fb).
+//
+// The subtest starts the server itself instead of driving gc: what is under
+// test is the fixture's teardown contract, not gc's session start, and the
+// contract is that a test which used the fixture leaves the guard nothing to
+// report. Asserting through discoverTmuxServersForSocketRoot rather than a
+// bare liveness check is deliberate — it asks the question in exactly the
+// terms the production guard asks it.
+func TestNamedSessionFixtureLeavesNoTmuxServerBehind(t *testing.T) {
+	tmuxtest.RequireTmux(t)
+	socketRoot := os.Getenv("TMUX_TMPDIR")
+	if socketRoot == "" {
+		t.Fatal("TMUX_TMPDIR is empty; TestMain must point cmd/gc tests at an isolated tmux socket root")
+	}
+	socket := tmuxLeakTestSocket(socketRoot, namedSessionTestSocketName)
+
+	scan := func() (map[int]TmuxProcInfo, error) {
+		return snapshotTmuxServersForSocketRoot(func() ([]TmuxProcInfo, error) {
+			return discoverTmuxServersForSocketRoot(socketRoot)
+		}, socketRoot)
+	}
+	initial, err := scan()
+	if err != nil {
+		t.Fatalf("scanning tmux servers before the fixture ran: %v", err)
+	}
+
+	var spawnedPID int
+	t.Run("test that uses the named-session fixture", func(t *testing.T) {
+		writeNamedSessionCityTOML(t, t.TempDir())
+
+		start := exec.Command("tmux", "-L", namedSessionTestSocketName, "new-session", "-d", "-s", "mayor", "sleep 120")
+		if out, err := start.CombinedOutput(); err != nil {
+			t.Skipf("starting tmux server on the fixture socket: %v: %s", err, out)
+		}
+		spawnedPID, _ = tmuxServerPID(socket)
+		if spawnedPID <= 0 {
+			t.Fatalf("no server answered on %s after starting one", socket)
+		}
+	})
+	if spawnedPID <= 0 {
+		t.Skip("fixture subtest could not start a tmux server")
+	}
+	// Belt and braces: if the fixture did not reap it, this test must not be
+	// the one that leaves a server behind for the guard to find.
+	registerTmuxTestServerReaper(t, spawnedPID)
+
+	leaked, err := settleTmuxLeaks(scan, initial, tmuxLeakSettleWindow(), tmuxLeakSettleInterval)
+	if err != nil {
+		t.Fatalf("settling tmux servers after the fixture ran: %v", err)
+	}
+	for _, proc := range leaked {
+		if proc.PID == spawnedPID {
+			t.Fatalf("tmux server pid %d on %s outlived the test that used writeNamedSessionCityTOML; the fixture must tear its server down", proc.PID, socket)
+		}
+	}
+}
+
 // registerTmuxTestServerReaper guarantees a test-spawned tmux server dies with
 // the test, by PID, whether or not the assertions that follow pass.
 func registerTmuxTestServerReaper(t *testing.T, pid int) {
