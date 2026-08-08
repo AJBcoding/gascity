@@ -46,16 +46,30 @@ func doltLeakSettleWindow() time.Duration {
 // false failure this fixes. Waiting the window out costs time only on runs
 // that were going to fail anyway.
 func settleDoltLeaks(scan func() (map[int]DoltProcInfo, error), initial map[int]DoltProcInfo, window, interval time.Duration) ([]DoltProcInfo, error) {
+	if interval <= 0 {
+		interval = doltLeakSettleInterval
+	}
+	return settleLeaks(scan, initial, window, interval, diffDoltProcessSnapshots)
+}
+
+// settleLeaks is the settle loop shared by the dolt and tmux halves of the
+// leak guard (gas-1fb). Both ask the same question of different process
+// types — "is this survivor orphaned, or still shutting down?" — so the
+// waiting policy documented on settleDoltLeaks lives here once, and each
+// caller supplies its own scan and diff.
+func settleLeaks[T any](
+	scan func() (map[int]T, error),
+	initial map[int]T,
+	window, interval time.Duration,
+	diff func(initial, final map[int]T) []T,
+) ([]T, error) {
 	final, err := scan()
 	if err != nil {
 		return nil, err
 	}
-	leaked := diffDoltProcessSnapshots(initial, final)
+	leaked := diff(initial, final)
 	if len(leaked) == 0 || window <= 0 {
 		return leaked, nil
-	}
-	if interval <= 0 {
-		interval = doltLeakSettleInterval
 	}
 
 	deadline := time.Now().Add(window)
@@ -65,7 +79,7 @@ func settleDoltLeaks(scan func() (map[int]DoltProcInfo, error), initial map[int]
 		if err != nil {
 			return nil, err
 		}
-		next := diffDoltProcessSnapshots(initial, final)
+		next := diff(initial, final)
 		if len(next) == 0 {
 			return next, nil
 		}
