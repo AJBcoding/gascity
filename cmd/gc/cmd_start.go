@@ -1319,9 +1319,16 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 	}
 }
 
-func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+// resolveConfiguredWorkDirPath returns the absolute working directory an agent
+// is configured for WITHOUT creating it. Callers that only need the value — the
+// trigger-binding metadata patch, template fingerprinting — must use this.
+// Materializing during resolution leaves plain directories that are not linked
+// worktrees, so `git rev-parse --show-toplevel` inside one walks up past them to
+// the city repo, and any consumer trusting that path writes into the operator's
+// city checkout (gas-m7h).
+func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
 	if a == nil {
-		return resolveAgentDir(cityPath, "")
+		return resolveAgentDirPath(cityPath, ""), nil
 	}
 	if strings.TrimSpace(qualifiedName) == "" {
 		qualifiedName = a.QualifiedName()
@@ -1331,11 +1338,23 @@ func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *confi
 		return "", err
 	}
 	// Guard against spawning into a path whose ancestor has a stale
-	// worktree pointer — see gascity#1556. Fails closed before MkdirAll
-	// so the operator sees the broken ancestor instead of a structurally
-	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
-	// returns through ResolveDirPath), so no further resolution is needed.
+	// worktree pointer — see gascity#1556. Fails closed before any
+	// materialization so the operator sees the broken ancestor instead of a
+	// structurally orphaned spawn. workDir is already absolute
+	// (ResolveWorkDirPathStrict returns through ResolveDirPath), so no
+	// further resolution is needed.
 	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
+		return "", err
+	}
+	return resolveAgentDirPath(cityPath, workDir), nil
+}
+
+// resolveConfiguredWorkDir resolves the agent work dir and materializes it. Use
+// it only on paths that are about to run a concrete session in that directory;
+// for value-only questions use resolveConfiguredWorkDirPath.
+func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	workDir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
+	if err != nil {
 		return "", err
 	}
 	return resolveAgentDir(cityPath, workDir)

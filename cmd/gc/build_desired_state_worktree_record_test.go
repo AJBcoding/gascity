@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -33,6 +34,37 @@ func TestPoolTriggerWorkDirNonPackUsesConfiguredBase(t *testing.T) {
 	})
 	if got != want {
 		t.Fatalf("ordinary non-pack work dir = %q, want configured base %q", got, want)
+	}
+}
+
+// TestPoolTriggerWorkDirDoesNotCreateDirectory pins the invariant that computing
+// a trigger-binding work_dir is a pure metadata question. Materializing the
+// directory here leaves husk dirs that are not linked worktrees, so
+// `git rev-parse --show-toplevel` inside one walks up to the city repo (gas-m7h).
+func TestPoolTriggerWorkDirDoesNotCreateDirectory(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "fixture"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	bp := newAgentBuildParams("fixture", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), &bytes.Buffer{})
+	want := filepath.Join(bp.cityPath, ".gc", "workspaces", "worker")
+
+	got := poolTriggerWorkDir(bp, &cfg.Agents[0], "worker", SessionRequest{
+		WorkBeadID:    "ga-123",
+		WorkBeadTitle: "ordinary repository work",
+	})
+	if got != want {
+		t.Fatalf("work dir = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Fatalf("poolTriggerWorkDir materialized %q on disk (stat err = %v); "+
+			"binding metadata must not create directories", want, err)
 	}
 }
 
