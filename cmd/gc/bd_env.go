@@ -400,15 +400,15 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 
 // canonicalScopeDoltProjectionAuthoritative reports whether canonical
 // Dolt projection would resolve auth for the city scope: the scope
-// backend is not postgres and the scope config resolves authoritative —
-// the same ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv
-// and its managed fallback apply before calling
-// applyCanonicalDoltAuthEnv. Callers that feed ambient environments
+// backend is not an external server (postgres, mysql) and the scope config
+// resolves authoritative — the same ResolveScopeConfigState gate
+// applyOrderExecCanonicalDoltEnv and its managed fallback apply before
+// calling applyCanonicalDoltAuthEnv. Callers that feed ambient environments
 // into the projection use this to strip untrusted password mirrors
 // from the resolution input without breaking the strict no-op
 // pass-through for non-authoritative scopes.
 func canonicalScopeDoltProjectionAuthoritative(cityPath string) bool {
-	if scopeBackendIsPostgres(cityPath, cityPath) {
+	if scopeBackendIsExternalServer(cityPath, cityPath) {
 		return false
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, cityPath, "")
@@ -546,6 +546,9 @@ func applyCanonicalScopeBackendEnv(env map[string]string, cityPath, scopeRoot st
 			return true, err
 		}
 		return true, nil
+	case "mysql":
+		applyResolvedScopeMySQLEnv(env)
+		return true, nil
 	default:
 		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, scopeRoot)
 	}
@@ -574,11 +577,29 @@ func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, 
 			return true, err
 		}
 		return true, nil
+	case "mysql":
+		applyResolvedScopeMySQLEnv(env)
+		return true, nil
 	case "", "dolt", "doltlite":
 		return false, nil
 	default:
 		return true, fmt.Errorf("unsupported backend %q for scope %s", meta.Backend, cityPath)
 	}
+}
+
+// applyResolvedScopeMySQLEnv clears every gc-projected backend key and
+// projects nothing for a MySQL scope: bd self-configures entirely from the
+// scope's own .beads/metadata.json (mysql_dsn + mysql_database), and any
+// password is resolved bd-side (BEADS_MYSQL_PASSWORD, never persisted).
+// Projecting nothing keeps gc free of a second MySQL credential path.
+func applyResolvedScopeMySQLEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	clearProjectedBeadsBackendEnv(env)
+	clearProjectedDoltEnv(env)
+	mirrorBeadsDoltEnv(env)
+	clearProjectedPostgresEnv(env)
 }
 
 func scopeBackendIsDoltlite(cityPath, scopeRoot string) bool {
@@ -747,7 +768,18 @@ var projectedPostgresEnvKeys = []string{
 	"BEADS_POSTGRES_DATABASE",
 }
 
-func postgresMetadataForScope(cityPath, scopeRoot string) (contract.MetadataState, bool, error) {
+// isExternalServerBackend reports whether backend is served by a server
+// process gc never manages. No managed-Dolt lifecycle, identity, or
+// runtime-state publication applies to such a scope: bd self-configures
+// from the scope's own metadata and owns the connection.
+func isExternalServerBackend(backend string) bool {
+	return backend == "postgres" || backend == "mysql"
+}
+
+// externalBackendMetadataForScope resolves the external-server metadata that
+// governs a scope, following the same inheritance the bead store does: the
+// scope's own metadata.json wins, otherwise the city's applies.
+func externalBackendMetadataForScope(cityPath, scopeRoot string) (contract.MetadataState, bool, error) {
 	if scopeRoot == "" {
 		scopeRoot = cityPath
 	}
@@ -756,15 +788,24 @@ func postgresMetadataForScope(cityPath, scopeRoot string) (contract.MetadataStat
 		return contract.MetadataState{}, false, fmt.Errorf("loading metadata for scope %s: %w", scopeRoot, err)
 	}
 	if ok {
-		switch meta.Backend {
-		case "postgres":
+		if isExternalServerBackend(meta.Backend) {
 			return meta, true, nil
-		case "dolt":
+		}
+		if meta.Backend == "dolt" {
 			return contract.MetadataState{}, false, nil
 		}
 	}
 	if samePath(scopeRoot, cityPath) {
 		return contract.MetadataState{}, false, nil
+	}
+	if !ok {
+		// No metadata.json at all: the scope is uninitialized, which is
+		// exactly where gc rig add starts. There is no scope-local endpoint
+		// state to resolve, so the city's backend governs by definition —
+		// without this arm a fresh rig on an external-server city falls
+		// through to the managed-Dolt path and gc writes Dolt metadata for
+		// a Dolt server that does not exist (gas-4cu).
+		return cityExternalBackendMetadata(cityPath, scopeRoot)
 	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil {
@@ -773,26 +814,43 @@ func postgresMetadataForScope(cityPath, scopeRoot string) (contract.MetadataStat
 	if resolved.Kind != contract.ScopeConfigAuthoritative || resolved.State.EndpointOrigin != contract.EndpointOriginInheritedCity {
 		return contract.MetadataState{}, false, nil
 	}
+	return cityExternalBackendMetadata(cityPath, scopeRoot)
+}
+
+// cityExternalBackendMetadata returns the city's metadata when the city runs
+// on an external server backend, for a scope that inherits it.
+func cityExternalBackendMetadata(cityPath, scopeRoot string) (contract.MetadataState, bool, error) {
 	cityMeta, cityOK, cityErr := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
 	if cityErr != nil {
 		return contract.MetadataState{}, false, fmt.Errorf("loading city metadata for inherited scope %s: %w", scopeRoot, cityErr)
 	}
-	if !cityOK || cityMeta.Backend != "postgres" {
+	if !cityOK || !isExternalServerBackend(cityMeta.Backend) {
 		return contract.MetadataState{}, false, nil
 	}
 	return cityMeta, true, nil
 }
 
-// scopeBackendIsPostgres returns true when the scope's MetadataState
-// has Backend == "postgres" or when the scope inherits a city-level
-// Postgres backend. On any read error returns false for best-effort callers
-// that do not need to make recovery decisions.
-func scopeBackendIsPostgres(cityPath, scopeRoot string) bool {
-	_, ok, err := postgresMetadataForScope(cityPath, scopeRoot)
+// scopeBackendIsExternalServer returns true when the scope runs on an
+// external server backend (postgres or mysql), either declared in its own
+// metadata or inherited from the city. On any read error returns false for
+// best-effort callers that do not need to make recovery decisions.
+func scopeBackendIsExternalServer(cityPath, scopeRoot string) bool {
+	_, ok, err := externalBackendMetadataForScope(cityPath, scopeRoot)
 	if err != nil {
 		return false
 	}
 	return ok
+}
+
+// scopeBackendIsPostgres is the Postgres-only variant of
+// scopeBackendIsExternalServer, for callers gating PG-specific behavior
+// (doctor auth checks, pgauth bypass decisions).
+func scopeBackendIsPostgres(cityPath, scopeRoot string) bool {
+	meta, ok, err := externalBackendMetadataForScope(cityPath, scopeRoot)
+	if err != nil {
+		return false
+	}
+	return ok && meta.Backend == "postgres"
 }
 
 func applyCanonicalConfigStateDoltEnv(env map[string]string, cityPath, scopeRoot string, state contract.ConfigState) {
@@ -1266,19 +1324,22 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 		if name != "bd" {
 			return out, err
 		}
-		// PG-backed scopes never invoke managed-Dolt recovery. A transport
-		// error gets wrapped with an operator-facing hint and surfaced; gc
-		// does not manage external PG endpoints.
+		// External-server scopes (postgres, mysql) never invoke managed-Dolt
+		// recovery. A transport error gets wrapped with an operator-facing
+		// hint and surfaced; gc does not manage external endpoints.
 		if err != nil {
-			meta, ok, classifyErr := postgresMetadataForScope(cityPath, dir)
+			meta, ok, classifyErr := externalBackendMetadataForScope(cityPath, dir)
 			if classifyErr != nil {
 				return out, fmt.Errorf("classifying scope backend (bd error: %w): %w", err, classifyErr)
 			}
 			if ok {
+				if meta.Backend == "mysql" {
+					return out, fmt.Errorf("mysql database %s: gc does not manage external MySQL endpoints (no managed recovery attempted): %w", meta.MySQLDatabase, err)
+				}
 				return out, fmt.Errorf("postgres at %s:%s: gc does not manage external PG endpoints (no managed recovery attempted): %w", meta.PostgresHost, meta.PostgresPort, err)
 			}
 		}
-		if err == nil && scopeBackendIsPostgres(cityPath, dir) {
+		if err == nil && scopeBackendIsExternalServer(cityPath, dir) {
 			return out, err
 		}
 		if !bdTransportRetryableError(cityPath, dir, env, err) {
@@ -1433,8 +1494,7 @@ func cityPostgresProjectionErrorCanBeBypassed(cityPath string, err error) bool {
 	if err == nil || !errors.Is(err, pgauth.ErrNoPasswordResolvable) {
 		return false
 	}
-	_, ok, metaErr := postgresMetadataForScope(cityPath, cityPath)
-	return metaErr == nil && ok
+	return scopeBackendIsPostgres(cityPath, cityPath)
 }
 
 func bdRuntimeEnvForRigWithError(cityPath string, cfg *config.City, rigPath string) (map[string]string, error) {

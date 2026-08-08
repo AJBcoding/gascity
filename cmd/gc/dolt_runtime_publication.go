@@ -78,11 +78,11 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 		if completeBinding {
 			return false, nil
 		}
-		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		_, usesExternal, err := externalBackendMetadataForScope(cityPath, cityPath)
 		if err != nil {
 			return false, err
 		}
-		if usesPostgres {
+		if usesExternal {
 			return false, nil
 		}
 		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
@@ -221,11 +221,11 @@ func clearManagedDoltRuntimeStateUnlessPostgres(cityPath string) error {
 		if completeBinding {
 			return nil
 		}
-		_, usesPostgres, err := postgresMetadataForScope(cityPath, cityPath)
+		_, usesExternal, err := externalBackendMetadataForScope(cityPath, cityPath)
 		if err != nil {
 			return err
 		}
-		if usesPostgres {
+		if usesExternal {
 			return nil
 		}
 	}
