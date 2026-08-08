@@ -101,15 +101,24 @@ func requireNoLeakedDoltAfterForPaths(t *testing.T, paths ...string) {
 }
 
 type doltLeakGuardedTestingM struct {
-	m            *testing.M
-	tempRoot     string
+	m        *testing.M
+	tempRoot string
+	// packageDir is go test's working directory — this package's source dir.
+	// It is watched alongside tempRoot because a test whose city path resolves
+	// to the cwd roots its managed dolt at $REPO/cmd/gc/.beads/dolt, where the
+	// temp-root-scoped snapshots could never see it leak (gas-dfn).
+	packageDir   string
 	cleanupPaths []string
 }
 
 func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
+	// A failed lookup yields "", which the snapshot ignores rather than
+	// treating as a match-everything root.
+	packageDir, _ := os.Getwd()
 	return &doltLeakGuardedTestingM{
 		m:            m,
 		tempRoot:     tempRoot,
+		packageDir:   packageDir,
 		cleanupPaths: cleanupPaths,
 	}
 }
@@ -131,7 +140,7 @@ func (g *doltLeakGuardedTestingM) runWith(
 	stopSignalHandler := g.installSignalHandler()
 	defer stopSignalHandler()
 
-	initial, initialErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
+	initial, initialErr := snapshotDoltProcessesForConfigRoots(enumerate, g.tempRoot, g.packageDir)
 	if initialErr != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
 	}
@@ -140,12 +149,12 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	guardFailed := initialErr != nil
 	if initialErr == nil {
-		final, finalErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
+		final, finalErr := snapshotDoltProcessesForConfigRoots(enumerate, g.tempRoot, g.packageDir)
 		if finalErr != nil {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
 		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
-			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), g.tempRoot) //nolint:errcheck
+			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s or %s\n", len(leaked), g.tempRoot, g.packageDir) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
 			reapLeaks(leaked)
 			guardFailed = true
@@ -311,6 +320,23 @@ func cmdGCTestConfigOwnerPID(configPath string, tempParent string) (int, bool) {
 }
 
 func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error), root string) (map[int]DoltProcInfo, error) {
+	return snapshotDoltProcessesForConfigRoots(enumerate, root)
+}
+
+// snapshotDoltProcessesForConfigRoots collects the dolt servers this package's
+// tests own, keyed by PID. A server is owned when its --config path lies under
+// ANY of roots; empty roots are ignored so a failed root resolution can never
+// widen the guard into a box-wide reaper of other checkouts' servers.
+//
+// Multiple roots exist because the private temp root is not the only place a
+// test can strand a server. A test whose city path resolves to the package
+// directory (go test's cwd) instead of t.TempDir() roots its managed dolt at
+// $REPO/cmd/gc/.beads/dolt, outside the temp root and therefore outside both
+// the before and after snapshots — so it leaked silently while the package
+// still reported ok, and its lock on that data dir could block the next run in
+// the same checkout (gas-dfn). Scoping to the package directory as well turns
+// that class from silent into a reported leak.
+func snapshotDoltProcessesForConfigRoots(enumerate func() ([]DoltProcInfo, error), roots ...string) (map[int]DoltProcInfo, error) {
 	procs, err := enumerate()
 	if err != nil {
 		return nil, err
@@ -318,10 +344,13 @@ func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error)
 	out := make(map[int]DoltProcInfo, len(procs))
 	for _, p := range procs {
 		configPath := extractConfigPath(p.Argv)
-		if root == "" || !pathutil.PathWithin(root, configPath) {
-			continue
+		for _, root := range roots {
+			if root == "" || !pathutil.PathWithin(root, configPath) {
+				continue
+			}
+			out[p.PID] = p
+			break
 		}
-		out[p.PID] = p
 	}
 	return out, nil
 }
