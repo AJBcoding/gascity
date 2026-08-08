@@ -13,7 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bootstrap"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func overrideBootstrapPacks(t *testing.T, names ...string) {
@@ -1196,7 +1196,7 @@ func TestCanonicalizePath(t *testing.T) {
 	// /private/var/... while the production normalizer collapses the
 	// equivalent /var alias. The comparison stays exact, so an unresolved
 	// alias still fails.
-	expected := pathutil.NormalizePathForCompare(alias)
+	expected := testutil.CanonicalPath(alias)
 	if got != expected {
 		t.Errorf("alias dir: got %q, want %q", got, expected)
 	}
@@ -1207,7 +1207,7 @@ func TestCanonicalizePath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantPrefix := pathutil.NormalizePathForCompare(alias)
+	wantPrefix := testutil.CanonicalPath(alias)
 	wantMissing := filepath.Join(wantPrefix, "not-yet-created", "leaf")
 	if got != wantMissing {
 		t.Errorf("missing tail: got %q, want %q", got, wantMissing)

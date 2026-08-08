@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestWithLockHonorsContextWhileWaitingForLocalLock(t *testing.T) {
@@ -979,7 +979,7 @@ func TestCanonicalScopeRefResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 	// than bare EvalSymlinks: the two pick different spellings of the macOS
 	// temp root (/var/... vs /private/var/...). The comparison stays exact,
 	// so an unresolved alias still fails.
-	resolvedAlias := pathutil.NormalizePathForCompare(aliasDir)
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
 	want := filepath.Join(resolvedAlias, "missing-leaf")
 	if got != want {
 		t.Errorf("canonicalScopeRef(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
@@ -1022,7 +1022,7 @@ func TestCanonicalCityPathResolvesSymlinkedParentWithMissingLeaf(t *testing.T) {
 	}
 
 	// Same canonical-form alignment as canonicalScopeRef above.
-	resolvedAlias := pathutil.NormalizePathForCompare(aliasDir)
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
 	want := filepath.Join(resolvedAlias, "missing-leaf")
 	if got != want {
 		t.Errorf("canonicalCityPath(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)

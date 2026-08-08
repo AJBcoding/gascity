@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // TestFSSourceMatchesLegacyBehavior asserts FSSource is a faithful
@@ -613,7 +613,7 @@ func TestCanonicalExistingPathResolvesSymlinkedGrandparentWithTwoMissingLevels(t
 	// than bare EvalSymlinks: on macOS the two disagree on whether the temp
 	// root is spelled /var/... or /private/var/..., and only the former is
 	// what canonicalExistingPath returns. The comparison stays exact.
-	resolvedAlias := pathutil.NormalizePathForCompare(aliasDir)
+	resolvedAlias := testutil.CanonicalPath(aliasDir)
 	want := filepath.Join(resolvedAlias, "missing-parent", "missing-leaf")
 	if got != want {
 		t.Errorf("canonicalExistingPath(%q) = %q, want %q (resolved through symlinked grandparent, 2 missing levels)", missing, got, want)

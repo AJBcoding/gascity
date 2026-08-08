@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 func TestParse_BasicFormula(t *testing.T) {
@@ -3636,7 +3636,7 @@ func TestDescriptionFileBaseDirResolvesSymlinkedParentWithMissingLeaf(t *testing
 	// pathutil collapses the equivalent /var alias — see pathutil's
 	// TestNormalizePathForCompareCollapsesDarwinPrivateVarAlias. The
 	// assertion stays exact, so failing to resolve the alias still fails.
-	want := pathutil.NormalizePathForCompare(aliasDir)
+	want := testutil.CanonicalPath(aliasDir)
 	if got != want {
 		t.Errorf("descriptionFileBaseDir(%q) = %q, want %q (resolved through symlinked parent)", missing, got, want)
 	}
