@@ -2,7 +2,6 @@ package main
 
 import (
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -98,26 +97,18 @@ func TestWorkRecordRepoDirEmptyWhenNeitherKnown(t *testing.T) {
 // the fail-closed reading blocked a delivered close.
 func TestEvaluateWorkRecordCloseGateAllowsShippedCloseAfterWorktreePruned(t *testing.T) {
 	repo := t.TempDir()
-	gitInRepo := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command("git", args...)
-		cmd.Dir = repo
-		cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %s: %v: %s", strings.Join(args, " "), err, out)
-		}
-	}
-	gitInRepo("init", "-b", "work-branch")
-	gitInRepo("config", "user.email", "test@test.com")
-	gitInRepo("config", "user.name", "Test")
-	gitInRepo("commit", "--allow-empty", "-m", "delivered work")
-	shaCmd := exec.Command("git", "rev-parse", "HEAD")
-	shaCmd.Dir = repo
-	shaOut, err := shaCmd.Output()
+	mustGit(t, repo, "init", "-b", "work-branch")
+	mustGit(t, repo, "config", "user.email", "test@test.com")
+	mustGit(t, repo, "config", "user.name", "Test")
+	mustGit(t, repo, "commit", "--allow-empty", "-m", "delivered work")
+	// Read the SHA from the loose ref instead of shelling out for rev-parse:
+	// the repository resource census budgets subprocess call sites, and a
+	// fresh single-commit repo has not packed its refs.
+	shaBytes, err := os.ReadFile(filepath.Join(repo, ".git", "refs", "heads", "work-branch"))
 	if err != nil {
-		t.Fatalf("git rev-parse HEAD: %v", err)
+		t.Fatalf("reading work-branch ref: %v", err)
 	}
-	sha := strings.TrimSpace(string(shaOut))
+	sha := strings.TrimSpace(string(shaBytes))
 
 	prunedWorktree := filepath.Join(t.TempDir(), "reaped-polecat-worktree")
 	preFetched := map[string]beads.Bead{
