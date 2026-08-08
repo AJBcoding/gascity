@@ -14,6 +14,7 @@ provider-catalog
 provider-catalog-local-readiness
 expanded-config-load
 implicit-import-cache
+bd-telemetry-queue
 deprecated-attachment-fields
 dolt-topology
 dolt-drift
