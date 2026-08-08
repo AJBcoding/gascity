@@ -60,6 +60,18 @@ gc rig resume <name>                   # Resume a suspended rig
 ## Restarting
 
 ```
-gc rig restart <name>                  # Restart all agents in a rig
+gc rig restart <name>                  # Restart ALL agents in a rig (kills running sessions)
 gc restart                             # Restart entire city
+```
+
+**Warning:** `gc rig restart` kills every running agent session in the rig —
+including worker sessions that are mid-task, whose uncommitted and unpushed
+in-flight work is destroyed. There is no `gc rig start`, `gc rig stop`, or
+`gc rig reboot`.
+
+To start one stopped session (for example, a single patrol agent is down)
+without touching the rig's other sessions, wake just that session:
+
+```
+gc session wake <rig>/<agent>          # Start one stopped session
 ```

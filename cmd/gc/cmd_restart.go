@@ -92,11 +92,16 @@ func restartTarget(args []string) (cityPath, nameOverride string, err error) {
 func newRigRestartCmd(stdout, stderr io.Writer) *cobra.Command {
 	return &cobra.Command{
 		Use:   "restart [name]",
-		Short: "Restart all agents in a rig",
+		Short: "Restart all agents in a rig (kills running sessions)",
 		Long: `Kill all agent sessions belonging to a rig.
 
 The reconciler will restart the agents on its next tick. This is a
-quick way to force-refresh all agents working on a particular project.`,
+quick way to force-refresh all agents working on a particular project.
+
+WARNING: this kills every running agent session in the rig, including
+worker sessions that are mid-task; their uncommitted and unpushed
+in-flight work is destroyed. To start a single stopped session without
+touching its siblings, use "gc session wake <session>" instead.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdRigRestart(args, stdout, stderr) != 0 {
