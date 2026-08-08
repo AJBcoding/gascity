@@ -195,7 +195,8 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 		return false
 	}
 	refs := []string{}
-	for _, remote := range gitPublicationRemotes(repoDir) {
+	publication, _ := gitPublicationRemotes(repoDir)
+	for _, remote := range publication {
 		remoteRef := "refs/remotes/" + remote + "/" + branch
 		if exec.Command("git", "-C", repoDir, "rev-parse", "--verify", "--quiet", remoteRef).Run() == nil {
 			refs = append(refs, remoteRef)
@@ -238,20 +239,32 @@ func gitCommitOnRemote(repoDir, commit string) bool {
 	if strings.HasPrefix(commit, "-") {
 		return false
 	}
-	// A repo with no publication remotes has nowhere to publish, so durability
-	// is not applicable and the rule is skipped. Without this, every close in a
-	// local-only repo would be flagged for a push that cannot exist. A repo
-	// whose only remotes are self-referential is local-only in the same sense.
+	// An empty publication list has two causes that must NOT share an answer
+	// (gas-avv). A repo with NO remotes configured at all has nowhere to
+	// publish, so durability is not applicable and the rule is skipped —
+	// without this, every close in a local-only rig would be flagged for a push
+	// that cannot exist. But a repo that HAS remotes, none of which survive the
+	// self-referential filter, is a misconfiguration: the herdr-src shape, where
+	// the only "remote" is the repo itself. Reading that as durable is the
+	// az-6n75 hole reopened by configuration — the work exists nowhere off this
+	// machine and the close says nothing at all. It fails closed instead, per
+	// the asymmetry above: a false at-risk costs one push, a false durable costs
+	// the work.
 	//
-	// Known tradeoff: a rig whose origin is removed or renamed silently stops
-	// being protected by this rule. Detecting that is the config layer's job —
-	// the close gate cannot tell "deliberately local" from "misconfigured".
-	publication := gitPublicationRemotes(repoDir)
-	if publication == nil {
+	// Known tradeoff: a rig whose sole real origin is removed or renamed now
+	// nags every close until a publication remote is restored. That is the
+	// intended direction — a missing origin is a durability emergency, not a
+	// topology choice — and the nag is warn-only unless GC_WORK_RECORD_ENFORCE
+	// is set.
+	publication, configured := gitPublicationRemotes(repoDir)
+	if configured == nil {
 		return false
 	}
-	if len(publication) == 0 {
+	if len(configured) == 0 {
 		return true
+	}
+	if len(publication) == 0 {
+		return false
 	}
 	args := []string{"-C", repoDir, "rev-list", "--max-count=1", commit, "--not"}
 	for _, name := range publication {
@@ -265,19 +278,28 @@ func gitCommitOnRemote(repoDir, commit string) bool {
 }
 
 // gitPublicationRemotes returns the names of repoDir's remotes that can confer
-// durability: every configured remote except those whose URL resolves back into
-// this same repository (gas-6tc). nil means the remote list could not be read
-// (callers fail closed); an empty slice means there are remotes but none that
-// publish, or none at all.
-func gitPublicationRemotes(repoDir string) []string {
+// durability — every configured remote except those whose URL resolves back
+// into this same repository (gas-6tc) — alongside the full configured list it
+// was filtered from.
+//
+// Callers need both because an empty publication list is ambiguous on its own:
+// no remotes at all is a local-only rig, while remotes that all filter out is a
+// misconfiguration, and the durability rule answers those two differently
+// (gas-avv). Both results are nil when the remote list could not be read, which
+// callers treat as fail-closed.
+func gitPublicationRemotes(repoDir string) (publication, configured []string) {
 	out, err := exec.Command("git", "-C", repoDir, "remote").Output()
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	selfCommon := gitCommonDir(repoDir)
-	publication := []string{}
+	publication, configured = []string{}, []string{}
 	for _, name := range strings.Fields(string(out)) {
+		configured = append(configured, name)
 		if strings.HasPrefix(name, "-") {
+			// Unprobeable as a git argument, so it cannot be cleared as
+			// self-referential — it counts as configured (the repo is not
+			// local-only) but never as publication.
 			continue
 		}
 		urlOut, err := exec.Command("git", "-C", repoDir, "remote", "get-url", name).Output()
@@ -293,7 +315,7 @@ func gitPublicationRemotes(repoDir string) []string {
 		}
 		publication = append(publication, name)
 	}
-	return publication
+	return publication, configured
 }
 
 // isSelfRemoteURL reports whether a remote URL is a filesystem path that
@@ -386,7 +408,7 @@ func gitRemoteBranchesContaining(repoDir, commit string) []string {
 	if strings.TrimSpace(repoDir) == "" || commit == "" || strings.HasPrefix(commit, "-") {
 		return nil
 	}
-	publication := gitPublicationRemotes(repoDir)
+	publication, _ := gitPublicationRemotes(repoDir)
 	if publication == nil {
 		return nil
 	}

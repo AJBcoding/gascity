@@ -946,6 +946,95 @@ func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
 	}
 }
 
+// newLocalOnlyGateRepo initializes a repo carrying one base commit and NO
+// remotes at all — the genuinely local-only topology the durability rule
+// deliberately skips.
+func newLocalOnlyGateRepo(t *testing.T) (repoDir string) {
+	t.Helper()
+	repoDir = t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, repoDir, "add", "base.txt")
+	runGit(t, repoDir, "commit", "-m", "test: base")
+	return repoDir
+}
+
+// newSelfRemoteOnlyGateRepo builds the herdr-src shape with no publication
+// remote left standing: the repo's ONLY configured remote resolves back into
+// itself, and an unpushed commit on a work branch has been snapshotted into
+// that remote's refs/remotes/*. This is the topology the gas-6tc exclusion
+// produces — remotes are configured, none of them publish.
+func newSelfRemoteOnlyGateRepo(t *testing.T) (repoDir, workBranch, commit string) {
+	t.Helper()
+	repoDir = newLocalOnlyGateRepo(t)
+	runGit(t, repoDir, "remote", "add", "self-src", repoDir)
+
+	workBranch = "gc-gastown.slit-9d8c7b6a5f4e"
+	runGit(t, repoDir, "checkout", "-b", workBranch)
+	commit = gateCommit(t, repoDir, "feature.txt", "only local\n", "feat: never pushed off-machine")
+	runGit(t, repoDir, "fetch", "self-src")
+
+	// Precondition: the self-remote genuinely snapshots the unpushed commit, so
+	// the durability query has real self-referential evidence to reject.
+	if err := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, "refs/remotes/self-src/"+workBranch).Run(); err != nil {
+		t.Fatalf("precondition: self-remote ref must contain the unpushed commit")
+	}
+	return repoDir, workBranch, commit
+}
+
+// TestGitCommitOnRemoteNoRemotesSkipsDurability pins the half of the durability
+// split that must NOT change (gas-avv): a repo with zero remotes configured has
+// nowhere to publish, so the rule is skipped rather than flagging every close in
+// a local-only rig for a push that cannot exist.
+func TestGitCommitOnRemoteNoRemotesSkipsDurability(t *testing.T) {
+	repoDir := newLocalOnlyGateRepo(t)
+	commit := gateCommit(t, repoDir, "feature.txt", "local-only rig\n", "feat: local work")
+
+	if !gitCommitOnRemote(repoDir, commit) {
+		t.Fatalf("gitCommitOnRemote = false in a repo with no remotes; the durability rule must stay skipped where there is nowhere to publish")
+	}
+}
+
+// TestGitCommitOnRemoteSelfRemoteOnlyFailsClosed is the gas-avv regression test.
+// A repo whose remotes all fail the self-referential filter is a
+// MISCONFIGURATION, not a local-only rig: the empty publication list must fail
+// closed, not read as durable. Before the split both sub-cases shared
+// len(publication) == 0 and returned true, so every commit in this topology read
+// as delivered and the durability rule was silently skipped — az-6n75 reopened
+// by configuration.
+func TestGitCommitOnRemoteSelfRemoteOnlyFailsClosed(t *testing.T) {
+	repoDir, _, commit := newSelfRemoteOnlyGateRepo(t)
+
+	if gitCommitOnRemote(repoDir, commit) {
+		t.Fatalf("gitCommitOnRemote = true for commit %s whose only remote is the repo itself; the work exists nowhere off this machine", commit)
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateSelfRemoteOnlyIsNotSilent is the gas-avv
+// regression test at the gate seam. With the stamp CORRECT — the commit really
+// is on the branch it names — the reachability rule is satisfied and the
+// containment resolver has nothing to advise, so the durability rule is the only
+// thing standing between this close and silence. Before the split the close
+// emitted neither a violation nor an advisory and was allowed under enforcement.
+func TestEvaluateWorkRecordCloseGateSelfRemoteOnlyIsNotSilent(t *testing.T) {
+	repoDir, workBranch, commit := newSelfRemoteOnlyGateRepo(t)
+
+	var stderr strings.Builder
+	block := evaluateWorkRecordCloseGate(
+		gateShippedCloseArgs("wr-self-only", commit, workBranch),
+		gateStoreWith("wr-self-only", repoDir), repoDir, true, &stderr)
+	if !block {
+		t.Fatalf("close of work published nowhere but the repo itself was allowed; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "not present on any remote") {
+		t.Fatalf("expected a durability violation, got %q", got)
+	}
+}
+
 func TestWorkRecordEnforceEnabled(t *testing.T) {
 	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
 		t.Setenv(workRecordEnforceEnvVar, v)
