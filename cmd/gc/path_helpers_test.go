@@ -139,14 +139,11 @@ func (g *doltLeakGuardedTestingM) runWith(
 
 	guardFailed := initialErr != nil
 	if initialErr == nil {
-		scan := func() (map[int]DoltProcInfo, error) {
-			return snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
-		}
-		leaked, finalErr := settleDoltLeaks(scan, initial, doltLeakSettleWindow(), doltLeakSettleInterval)
+		final, finalErr := snapshotDoltProcessesForConfigRoot(enumerate, g.tempRoot)
 		if finalErr != nil {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: final scan failed: %v\n", finalErr) //nolint:errcheck
 			guardFailed = true
-		} else if len(leaked) > 0 {
+		} else if leaked := diffDoltProcessSnapshots(initial, final); len(leaked) > 0 {
 			fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: leaked %d dolt sql-server process(es) under %s\n", len(leaked), g.tempRoot) //nolint:errcheck
 			writeDoltLeakReport(os.Stderr, leaked)
 			reapLeaks(leaked)
