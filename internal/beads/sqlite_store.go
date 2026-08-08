@@ -20,17 +20,10 @@ import (
 )
 
 const (
-	sqliteStoreFilename              = "beads.sqlite"
-	sqliteDefaultPrefix              = "gc"
-	sqliteGraphPrefix                = "gcg"
-	sqliteGraphSequenceFloorFilename = "graph.seqfloor"
-
-	// sqliteSequenceFloorLockSuffix names the sidecar that carries the
-	// cross-process sequence-floor lock, appended to the floor path. The floor
-	// file itself is replaced by rename and so cannot hold a stable lock, and
-	// the database inode must not be used — see persistSQLiteSequenceFloorAtLeast.
-	sqliteSequenceFloorLockSuffix = ".lock"
-
+	sqliteStoreFilename               = "beads.sqlite"
+	sqliteDefaultPrefix               = "gc"
+	sqliteGraphPrefix                 = "gcg"
+	sqliteGraphSequenceFloorFilename  = "graph.seqfloor"
 	sqliteClaimFenceKVPrefix          = "gascity.claim-fence.v1/"
 	sqliteDefaultRetentionPeriod      = 4 * time.Hour
 	sqliteDefaultRetentionSweepPeriod = 30 * time.Second
