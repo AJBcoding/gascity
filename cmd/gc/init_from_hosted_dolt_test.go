@@ -71,6 +71,11 @@ func TestInitFromWithoutHostedPreservesTemplate(t *testing.T) {
 
 	src := gastownExamplePath(t)
 	cityPath := filepath.Join(t.TempDir(), "city")
+	// With no endpoint supplied this is the only test in this file that takes
+	// the managed-local bootstrap path, so it is the only one that starts a
+	// real Dolt sql-server; without teardown the server outlives the test and
+	// the TestMain leak guard fails the whole package.
+	cleanupManagedDoltTestCity(t, cityPath)
 
 	var stdout, stderr bytes.Buffer
 	// disabled hosted options => template preserved
