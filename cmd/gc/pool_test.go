@@ -653,6 +653,27 @@ func TestExpandSessionSetup_AllVariables(t *testing.T) {
 	}
 }
 
+// TestExpandSessionSetup_DefaultBranch covers gas-e6r: pre_start scripts create
+// agent worktrees, so the rig's mainline has to be templatable there. Note the
+// failure mode this guards — a missing field makes tmpl.Execute error, and
+// expandSessionSetup's graceful fallback then keeps the RAW command, handing
+// the literal "{{.DefaultBranch}}" to the shell rather than expanding it.
+func TestExpandSessionSetup_DefaultBranch(t *testing.T) {
+	ctx := SessionSetupContext{
+		AgentBase:     "polecat",
+		Rig:           "gascity",
+		RigRoot:       "/repos/gascity",
+		WorkDir:       "/city/.gc/worktrees/gascity/polecats/polecat",
+		DefaultBranch: "feat/mysql-first-class-backend",
+	}
+	cmds := []string{"worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --base {{.DefaultBranch}}"}
+	got := expandSessionSetup(cmds, ctx)
+	want := "worktree-setup.sh /repos/gascity /city/.gc/worktrees/gascity/polecats/polecat polecat --base feat/mysql-first-class-backend"
+	if got[0] != want {
+		t.Errorf("got %q, want %q", got[0], want)
+	}
+}
+
 func TestExpandSessionSetup_InvalidTemplate(t *testing.T) {
 	ctx := SessionSetupContext{Session: "test"}
 	cmds := []string{

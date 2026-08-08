@@ -1313,6 +1313,9 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 		RigRoot:   ctx.RigRoot,
 		CityRoot:  cityPath,
 		CityName:  cityName,
+		// Probe the rig root rather than the work dir: callers fill WorkDir
+		// in after construction, so it is not available here yet.
+		DefaultBranch: defaultBranchForRig(ctx.Rig, rigs, ctx.RigRoot),
 	}
 }
 
