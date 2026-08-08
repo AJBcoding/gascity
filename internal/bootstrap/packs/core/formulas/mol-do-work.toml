@@ -46,8 +46,14 @@ Read the bead's title and description carefully. This is your task.
 
 **Signal liveness:** run `gc bd heartbeat "$WORK_BEAD_ID"` now, and again before any
 shell command you expect to run for many minutes (long builds, test sweeps).
-It stamps `gc.last_heartbeat_at` so the dashboard can tell you are alive and
+It renews your claim lease — which expires 5 minutes after each heartbeat, and
+is what tells the fleet your work is still yours rather than free to reclaim —
+and stamps `gc.last_heartbeat_at` so the dashboard can tell you are alive and
 working rather than wedged.
+
+If a heartbeat exits non-zero, your lease is gone: someone else may already
+have picked up this bead. Stop, re-read the bead with `gc bd show
+"$WORK_BEAD_ID"`, and confirm you still hold it before doing more work.
 
 **2. Implement the solution and verify it:**
 

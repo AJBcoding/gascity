@@ -272,11 +272,17 @@ city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
 All arguments after "gc bd" are forwarded to bd unchanged, except the
-gc-only "heartbeat &lt;issue-id&gt;" subcommand, which rewrites to
-"update &lt;issue-id&gt; --set-metadata gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;"
-so long-running workers can signal liveness to the dashboard, and
+gc-only "heartbeat &lt;issue-id&gt;" subcommand (and bd's "hb" alias for it),
+which renews the claim lease through bd's own "heartbeat" and then stamps
+"gc.last_heartbeat_at=&lt;RFC3339 UTC now&gt;", and
 "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
+
+Both heartbeat writes are needed: bd's lease is ephemeral and node-local and
+is what "bd reclaim" keys on, while gc.last_heartbeat_at is Dolt-committed
+and is the only liveness signal a dashboard on another machine can see. A
+heartbeat that cannot renew the lease (you are not the holder, the bead is
+not in_progress, the id is unknown) exits non-zero and stamps nothing.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -294,7 +300,7 @@ gc bd --rig my-project create "New task"
 gc bd show my-project-abc          # auto-detects rig from bead prefix
 gc bd list --rig my-project -s open
 gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+gc bd heartbeat my-project-abc     # renew the claim lease + stamp gc.last_heartbeat_at=now
 gc bd release-if-current my-project-abc worker-1
 ```
 

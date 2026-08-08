@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	helpers "github.com/gastownhall/gascity/test/acceptance/helpers"
 )
@@ -853,4 +854,99 @@ func TestBdWorkflow(t *testing.T) {
 			t.Errorf("bead %s not closed after workflow:\n%s", id, showOut)
 		}
 	}
+}
+
+// leaseFields are the claim-lease timestamps bd exposes on an issue.
+type leaseFields struct {
+	HeartbeatAt    time.Time
+	LeaseExpiresAt time.Time
+}
+
+// readLeaseFields reads an issue's claim-lease timestamps via bd show --json.
+// A missing or empty timestamp reads as the zero time so callers can assert on
+// establishment as well as movement.
+func readLeaseFields(t *testing.T, dir, id string) leaseFields {
+	t.Helper()
+	out := requireBD(t, dir, "show", "--json", id)
+	start := strings.IndexAny(out, "[{")
+	if start < 0 {
+		t.Fatalf("bd show --json produced no JSON for %s:\n%s", id, out)
+	}
+	type leaseJSON struct {
+		HeartbeatAt    string `json:"heartbeat_at"`
+		LeaseExpiresAt string `json:"lease_expires_at"`
+	}
+	// bd show --json returns an array; tolerate a bare object too so this
+	// contract test pins the lease semantics, not the envelope shape.
+	payload := json.RawMessage(out[start:])
+	var list []leaseJSON
+	if err := json.Unmarshal(payload, &list); err != nil {
+		var single leaseJSON
+		if objErr := json.Unmarshal(payload, &single); objErr != nil {
+			t.Fatalf("parsing bd show JSON for %s (array: %v; object: %v):\n%s", id, err, objErr, out)
+		}
+		list = []leaseJSON{single}
+	}
+	if len(list) == 0 {
+		t.Fatalf("bd show --json returned no issues for %s:\n%s", id, out)
+	}
+
+	parse := func(field, value string) time.Time {
+		if strings.TrimSpace(value) == "" {
+			return time.Time{}
+		}
+		parsed, err := time.Parse(time.RFC3339, value)
+		if err != nil {
+			t.Fatalf("bead %s has unparseable %s %q: %v", id, field, value, err)
+		}
+		return parsed
+	}
+	return leaseFields{
+		HeartbeatAt:    parse("heartbeat_at", list[0].HeartbeatAt),
+		LeaseExpiresAt: parse("lease_expires_at", list[0].LeaseExpiresAt),
+	}
+}
+
+// TestBdClaimLeaseHeartbeat pins the external bd contract that `gc bd
+// heartbeat` now depends on (gas-654): heartbeating a bead you hold pushes
+// lease_expires_at and heartbeat_at strictly forward, and heartbeating a bead
+// you do not hold fails non-zero instead of reporting success.
+//
+// gc's heartbeat used to stamp gc.last_heartbeat_at metadata and never renew
+// the lease, so a live agent's lease expired mid-flight and `bd reclaim` could
+// not tell it from a dead one. The fix routes renewal through bd's own
+// heartbeat; if that command's semantics ever change, this fails here rather
+// than silently freezing every worker's lease again.
+func TestBdClaimLeaseHeartbeat(t *testing.T) {
+	dir := initBeadsDir(t)
+	id := createBead(t, dir, "lease heartbeat contract")
+
+	requireBD(t, dir, "update", id, "--claim")
+	before := readLeaseFields(t, dir, id)
+	if before.LeaseExpiresAt.IsZero() {
+		t.Fatalf("claiming %s established no lease (lease_expires_at empty)", id)
+	}
+
+	// Lease timestamps are RFC3339 at second granularity, so wait past a full
+	// second: "strictly after" is the assertion, and equality is the bug.
+	time.Sleep(1100 * time.Millisecond)
+	requireBD(t, dir, "heartbeat", id)
+
+	after := readLeaseFields(t, dir, id)
+	if !after.LeaseExpiresAt.After(before.LeaseExpiresAt) {
+		t.Errorf("lease_expires_at did not advance across a heartbeat: before=%s after=%s",
+			before.LeaseExpiresAt.Format(time.RFC3339), after.LeaseExpiresAt.Format(time.RFC3339))
+	}
+	if !after.HeartbeatAt.After(before.HeartbeatAt) {
+		t.Errorf("heartbeat_at did not advance across a heartbeat: before=%s after=%s",
+			before.HeartbeatAt.Format(time.RFC3339), after.HeartbeatAt.Format(time.RFC3339))
+	}
+
+	t.Run("UnheldBeadFailsLoudly", func(t *testing.T) {
+		unclaimed := createBead(t, dir, "never claimed")
+		out, err := runBD(t, dir, "heartbeat", unclaimed)
+		if err == nil {
+			t.Fatalf("bd heartbeat on an unclaimed bead exited 0, want non-zero:\n%s", out)
+		}
+	})
 }

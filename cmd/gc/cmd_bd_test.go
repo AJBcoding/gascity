@@ -2034,6 +2034,107 @@ func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
 	}
 }
 
+// readCapturedBdCalls returns one entry per bd invocation recorded by an
+// appending fake bd, in call order.
+func readCapturedBdCalls(t *testing.T, path string) []string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading captured bd calls: %v", err)
+	}
+	var calls []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			calls = append(calls, line)
+		}
+	}
+	return calls
+}
+
+// appendingFakeBdScript records every bd invocation's args to CAPTURE_PATH,
+// one line per call, then runs perSubcommand (a `case` body keyed on $1).
+func appendingFakeBdScript(perSubcommand string) string {
+	return "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\n" + perSubcommand
+}
+
+// indexOfBdCall returns the position of the first captured bd call starting
+// with prefix, or -1. Callers assert on relative order rather than an exact
+// call count because doBd's exact-ID guard probes the store with its own
+// `bd show --json` before forwarding any mutation.
+func indexOfBdCall(calls []string, prefix string) int {
+	for i, call := range calls {
+		if strings.HasPrefix(call, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestGcBdHeartbeatRenewsClaimLeaseBeforeStampingMetadata pins gas-654: the
+// gc-only `heartbeat` subcommand rewrote itself into the dashboard metadata
+// write *alone*, so bd's own lease-renewing `heartbeat` never ran and
+// heartbeat_at/lease_expires_at never advanced — while the command still
+// printed bd's "✓ Updated issue" success line, so a worker whose lease had
+// silently expired had no signal. The two signals are not redundant: bd's
+// lease is node-local and ephemeral (it drives `bd reclaim`), while
+// gc.last_heartbeat_at is Dolt-committed and cross-machine (it drives the
+// dashboard). `gc bd heartbeat` must therefore do both, lease first.
+func TestGcBdHeartbeatRenewsClaimLeaseBeforeStampingMetadata(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "gc-bd-calls.txt")
+	silentFallbackTestSetup(t, appendingFakeBdScript("exit 0\n"))
+	t.Setenv("CAPTURE_PATH", capture)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(heartbeat) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+
+	calls := readCapturedBdCalls(t, capture)
+	leaseIdx := indexOfBdCall(calls, "heartbeat demo-abc")
+	stampIdx := indexOfBdCall(calls, "update demo-abc --set-metadata "+heartbeatMetadataKey+"=")
+	if leaseIdx < 0 {
+		t.Fatalf("bd calls %q include no \"heartbeat demo-abc\" — the lease must be renewed through bd's own heartbeat", calls)
+	}
+	if stampIdx < 0 {
+		t.Fatalf("bd calls %q include no %q stamp — the durable dashboard signal must survive", calls, heartbeatMetadataKey)
+	}
+	if leaseIdx > stampIdx {
+		t.Fatalf("bd calls %q stamped liveness metadata before renewing the lease; renewal must come first so a failed renewal never stamps", calls)
+	}
+}
+
+// TestGcBdHeartbeatFailsLoudlyWhenLeaseRenewalFails pins the other half of
+// gas-654's acceptance: a heartbeat that cannot renew (not the holder, bead
+// not in_progress, unknown id) must exit non-zero instead of printing the
+// success line, and must not stamp liveness metadata for a lease it does not
+// hold — that stamp is exactly what would tell the dashboard a dead worker is
+// alive.
+func TestGcBdHeartbeatFailsLoudlyWhenLeaseRenewalFails(t *testing.T) {
+	capture := filepath.Join(t.TempDir(), "gc-bd-calls.txt")
+	silentFallbackTestSetup(t, appendingFakeBdScript(
+		"case \"${1:-}\" in\n"+
+			"  heartbeat) echo 'heartbeat demo-abc: not held by this actor' >&2; exit 1 ;;\n"+
+			"  *) echo '✓ Updated issue: demo-abc'; exit 0 ;;\n"+
+			"esac\n"))
+	t.Setenv("CAPTURE_PATH", capture)
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"heartbeat", "demo-abc"}, &stdout, &stderr); got == 0 {
+		t.Fatalf("doBd(heartbeat) = 0, want non-zero when the lease cannot be renewed; stdout=%q stderr=%q",
+			stdout.String(), stderr.String())
+	}
+	calls := readCapturedBdCalls(t, capture)
+	if indexOfBdCall(calls, "heartbeat demo-abc") < 0 {
+		t.Fatalf("bd calls %q include no lease-renewal attempt", calls)
+	}
+	if idx := indexOfBdCall(calls, "update demo-abc --set-metadata "+heartbeatMetadataKey+"="); idx >= 0 {
+		t.Fatalf("bd calls %q stamped liveness metadata after the lease renewal failed — that stamp tells the dashboard a dead worker is alive", calls)
+	}
+	if strings.Contains(stdout.String(), "Updated issue") {
+		t.Fatalf("heartbeat printed a success line despite failing to renew; stdout=%q", stdout.String())
+	}
+}
+
 // TestRewriteBdHeartbeatArgs covers the arg-rewrite edge cases without the
 // full city/bd harness: exactly one issue id is required, and non-heartbeat
 // commands pass through untouched so the generic bd passthrough is intact.
@@ -2049,29 +2150,51 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 			{"heartbeat", "demo-abc "}, // trailing space
 			{"heartbeat", "demo abc"},  // internal space
 		} {
-			got, err := rewriteBdHeartbeatArgs(args)
+			got, id, err := rewriteBdHeartbeatArgs(args)
 			if err == nil {
-				t.Fatalf("rewriteBdHeartbeatArgs(%q) = (%q, nil), want usage error", args, got)
+				t.Fatalf("rewriteBdHeartbeatArgs(%q) = (%q, %q, nil), want usage error", args, got, id)
 			}
 		}
 	})
-	t.Run("rewrites a clean id to a set-metadata update", func(t *testing.T) {
-		out, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
+	t.Run("rewrites a clean id to a set-metadata update and reports the id", func(t *testing.T) {
+		out, id, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
 		if err != nil {
 			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
 		}
 		if len(out) != 4 || out[0] != "update" || out[1] != "demo-abc" || out[2] != "--set-metadata" {
 			t.Fatalf("rewriteBdHeartbeatArgs = %q, want [update demo-abc --set-metadata ...]", out)
 		}
+		// The id is what drives the claim-lease renewal; without it doBd
+		// would stamp liveness metadata and never touch the lease (gas-654).
+		if id != "demo-abc" {
+			t.Fatalf("rewriteBdHeartbeatArgs id = %q, want %q", id, "demo-abc")
+		}
+	})
+	t.Run("treats bd's hb alias identically", func(t *testing.T) {
+		// The two spellings must not diverge: `hb` falling through to bd
+		// while `heartbeat` was intercepted is what hid gas-654 for so long.
+		out, id, err := rewriteBdHeartbeatArgs([]string{"hb", "demo-abc"})
+		if err != nil {
+			t.Fatalf("rewriteBdHeartbeatArgs(hb) unexpected error: %v", err)
+		}
+		if len(out) != 4 || out[0] != "update" || out[1] != "demo-abc" || out[2] != "--set-metadata" {
+			t.Fatalf("rewriteBdHeartbeatArgs(hb) = %q, want the same rewrite as heartbeat", out)
+		}
+		if id != "demo-abc" {
+			t.Fatalf("rewriteBdHeartbeatArgs(hb) id = %q, want %q", id, "demo-abc")
+		}
 	})
 	t.Run("passes non-heartbeat args through unchanged", func(t *testing.T) {
 		in := []string{"list", "-s", "open"}
-		out, err := rewriteBdHeartbeatArgs(in)
+		out, id, err := rewriteBdHeartbeatArgs(in)
 		if err != nil {
 			t.Fatalf("rewriteBdHeartbeatArgs(%q) unexpected error: %v", in, err)
 		}
 		if len(out) != len(in) || out[0] != "list" || out[2] != "open" {
 			t.Fatalf("rewriteBdHeartbeatArgs(%q) = %q, want passthrough", in, out)
+		}
+		if id != "" {
+			t.Fatalf("rewriteBdHeartbeatArgs(%q) id = %q, want empty: only heartbeat renews a lease", in, id)
 		}
 	})
 }

@@ -86,11 +86,17 @@ city store and disables rig auto-detection (GC_RIG, cwd, bead prefix), so a
 deliberate city-scoped query is never silently downgraded to a rig store.
 
 All arguments after "gc bd" are forwarded to bd unchanged, except the
-gc-only "heartbeat <issue-id>" subcommand, which rewrites to
-"update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC now>"
-so long-running workers can signal liveness to the dashboard, and
+gc-only "heartbeat <issue-id>" subcommand (and bd's "hb" alias for it),
+which renews the claim lease through bd's own "heartbeat" and then stamps
+"gc.last_heartbeat_at=<RFC3339 UTC now>", and
 "release-if-current <issue-id> <assignee>", which conditionally resets an
 in-progress assignment only when the bead still has that assignee.
+
+Both heartbeat writes are needed: bd's lease is ephemeral and node-local and
+is what "bd reclaim" keys on, while gc.last_heartbeat_at is Dolt-committed
+and is the only liveness signal a dashboard on another machine can see. A
+heartbeat that cannot renew the lease (you are not the holder, the bead is
+not in_progress, the id is unknown) exits non-zero and stamps nothing.
 
 gc bd forces BD_EXPORT_AUTO=false to prevent bd's git auto-export hook
 from wedging the wrapper after printing command output. If you need
@@ -100,7 +106,7 @@ auto-export behavior, invoke bd directly.`,
   gc bd show my-project-abc          # auto-detects rig from bead prefix
   gc bd list --rig my-project -s open
   gc bd --city /path/to/city list    # pins the city (HQ) store, no rig auto-detect
-  gc bd heartbeat my-project-abc     # stamp gc.last_heartbeat_at=now
+  gc bd heartbeat my-project-abc     # renew the claim lease + stamp gc.last_heartbeat_at=now
   gc bd release-if-current my-project-abc worker-1`,
 		DisableFlagParsing: true,
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -171,19 +177,28 @@ func warnExternalBdOverrideDrift(stderr io.Writer, cityPath string, target execS
 }
 
 // rewriteBdHeartbeatArgs expands the gc-only `heartbeat <issue-id>`
-// subcommand into the bd command that performs the write:
+// subcommand into the bd command that performs the durable write:
 //
 //	update <issue-id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>
 //
-// Long-running workers call `gc bd heartbeat {{issue}}` periodically so the
-// dashboard can distinguish a live worker from a dead one
-// (gastownhall/gascity#1855). It reuses bd's existing metadata-write path
-// rather than adding a new store method, and leaves the issue id in place so
-// the generic scope resolver still routes the write to the correct rig store.
-// Args that do not begin with "heartbeat" pass through unchanged.
-func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
-	if len(bdArgs) == 0 || bdArgs[0] != "heartbeat" {
-		return bdArgs, nil
+// and reports the issue id so the caller can first renew bd's own claim lease
+// (see renewBdClaimLease). Both writes are required because the two liveness
+// signals have different reach: bd's lease lives in an ephemeral, node-local
+// table and is what `bd reclaim` keys on, while gc.last_heartbeat_at is
+// Dolt-committed and therefore the only signal visible to a dashboard on
+// another machine (gastownhall/gascity#1855; reader in dashboard #324).
+//
+// Long-running workers call `gc bd heartbeat {{issue}}` periodically. It
+// leaves the issue id in place so the generic scope resolver still routes the
+// write to the correct rig store. Args that do not begin with "heartbeat"
+// pass through unchanged, and heartbeatID is empty for them.
+func rewriteBdHeartbeatArgs(bdArgs []string) (rewritten []string, heartbeatID string, err error) {
+	// Match bd's own alias set. Handling only the long spelling is what let
+	// this defect hide: `hb` fell through to bd and renewed correctly while
+	// `heartbeat` was intercepted and did not, so the same command had two
+	// behaviors depending on how it was typed (gas-654).
+	if len(bdArgs) == 0 || (bdArgs[0] != "heartbeat" && bdArgs[0] != "hb") {
+		return bdArgs, "", nil
 	}
 	rest := bdArgs[1:]
 	// A bead id never contains whitespace; reject any (leading, trailing, or
@@ -191,16 +206,57 @@ func rewriteBdHeartbeatArgs(bdArgs []string) ([]string, error) {
 	// prefix-based rig auto-detection. Also reject empty and flag-shaped args.
 	if len(rest) != 1 || rest[0] == "" || strings.HasPrefix(rest[0], "-") ||
 		strings.IndexFunc(rest[0], unicode.IsSpace) >= 0 {
-		return nil, fmt.Errorf("usage: gc bd heartbeat <issue-id>")
+		return nil, "", fmt.Errorf("usage: gc bd heartbeat <issue-id>")
 	}
 	stamp := bdHeartbeatNow().UTC().Format(time.RFC3339)
-	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, nil
+	return []string{"update", rest[0], "--set-metadata", heartbeatMetadataKey + "=" + stamp}, rest[0], nil
+}
+
+// renewBdClaimLease runs bd's own `heartbeat <id>` so the claim lease that
+// `bd reclaim` keys on actually moves forward, and returns bd's exit code.
+//
+// Any non-zero result means the lease was NOT renewed — the caller no longer
+// holds the bead, it is not in_progress, or the id is unknown — and must
+// propagate. Reporting that as a successful heartbeat is the defect this
+// exists to prevent (gas-654): a worker whose lease has already been
+// reclaimed has to learn to stop, and must not go on stamping liveness
+// metadata that tells the dashboard a dead worker is alive.
+func renewBdClaimLease(bdPath, scopeRoot string, env []string, id string, stdout, stderr io.Writer) int {
+	leaseArgs := []string{"heartbeat", id}
+	cmd := exec.Command(bdPath, leaseArgs...)
+	cmd.Dir = scopeRoot
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+
+	traceStart := time.Now()
+	runErr := cmd.Run()
+	traceExit := 0
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			traceExit = exitErr.ExitCode()
+		} else {
+			traceExit = -1
+		}
+	}
+	beads.TraceBDCall("go:gc-bd-heartbeat-lease", scopeRoot, leaseArgs, traceStart, traceExit, runErr)
+
+	if runErr == nil {
+		return 0
+	}
+	fmt.Fprintf(stderr, "gc bd heartbeat: claim lease on %s was NOT renewed; not stamping liveness metadata\n", id) //nolint:errcheck // best-effort stderr
+	if traceExit > 0 {
+		return traceExit
+	}
+	fmt.Fprintf(stderr, "gc bd heartbeat: %v\n", runErr) //nolint:errcheck // best-effort stderr
+	return 1
 }
 
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
-	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
+	bdArgs, heartbeatID, err := rewriteBdHeartbeatArgs(bdArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -334,6 +390,25 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	env, err := bdCommandEnv(cityPath, cfg, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	// Renew the real claim lease before stamping the durable liveness
+	// metadata. Before gas-654 the gc-only heartbeat rewrote itself into the
+	// metadata stamp alone, so bd's lease never moved: heartbeat_at and
+	// lease_expires_at stayed frozen at their claim values while the command
+	// printed bd's "✓ Updated issue" line, leaving `bd reclaim` unable to
+	// tell a working agent from a dead one. Ordering matters — a renewal that
+	// fails must abort before the stamp, never advertise a lease it lost.
+	if heartbeatID != "" {
+		if code := renewBdClaimLease(bdPath, target.ScopeRoot, env, heartbeatID, stdout, stderr); code != 0 {
+			return code
+		}
+	}
+
 	cmd := exec.Command(bdPath, bdArgs...)
 	cmd.Dir = target.ScopeRoot
 	cmd.Stdin = os.Stdin
@@ -345,11 +420,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
-	env, err := bdCommandEnv(cityPath, cfg, target)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
 	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
 
 	traceStart := time.Now()
