@@ -20,10 +20,17 @@ import (
 )
 
 const (
-	sqliteStoreFilename               = "beads.sqlite"
-	sqliteDefaultPrefix               = "gc"
-	sqliteGraphPrefix                 = "gcg"
-	sqliteGraphSequenceFloorFilename  = "graph.seqfloor"
+	sqliteStoreFilename              = "beads.sqlite"
+	sqliteDefaultPrefix              = "gc"
+	sqliteGraphPrefix                = "gcg"
+	sqliteGraphSequenceFloorFilename = "graph.seqfloor"
+
+	// sqliteSequenceFloorLockSuffix names the sidecar that carries the
+	// cross-process sequence-floor lock, appended to the floor path. The floor
+	// file itself is replaced by rename and so cannot hold a stable lock, and
+	// the database inode must not be used — see persistSQLiteSequenceFloorAtLeast.
+	sqliteSequenceFloorLockSuffix = ".lock"
+
 	sqliteClaimFenceKVPrefix          = "gascity.claim-fence.v1/"
 	sqliteDefaultRetentionPeriod      = 4 * time.Hour
 	sqliteDefaultRetentionSweepPeriod = 30 * time.Second
@@ -667,7 +674,7 @@ func (s *SQLiteStore) SetSequenceFloor(n int64) error {
 	if s.sequenceFloorBeforePersist != nil {
 		s.sequenceFloorBeforePersist()
 	}
-	persisted, err := persistSQLiteSequenceFloorAtLeast(s.path, s.sequenceFloorPath, n)
+	persisted, err := persistSQLiteSequenceFloorAtLeast(s.sequenceFloorPath, n)
 	if err != nil {
 		return fmt.Errorf("setting sqlite sequence floor: %w", err)
 	}
