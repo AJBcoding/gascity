@@ -30,8 +30,18 @@ func TestGraphPathCanonicalizesRootSymlink(t *testing.T) {
 	if throughAlias != direct {
 		t.Fatalf("GraphPath(symlink root) = %q, want canonical path %q", throughAlias, direct)
 	}
-	if filepath.Dir(filepath.Dir(throughAlias)) != root {
-		t.Fatalf("GraphPath(symlink root) retained alias root: %q", throughAlias)
+	// t.TempDir() is not itself guaranteed to be symlink-free: on macOS it lands
+	// under /var/folders/..., and /var is a symlink to /private/var, so the raw
+	// root is a different spelling of the same directory GraphPath canonicalizes
+	// to. Compare against the resolved root instead of assuming the platform
+	// handed back an already-canonical one. The check keeps its teeth — a
+	// GraphPath that retained the alias still answers ...-alias here and fails.
+	realRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolving Graph root: %v", err)
+	}
+	if filepath.Dir(filepath.Dir(throughAlias)) != realRoot {
+		t.Fatalf("GraphPath(symlink root) = %q, want a path rooted at the real root %q", throughAlias, realRoot)
 	}
 }
 
