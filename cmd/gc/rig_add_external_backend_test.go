@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // ── gas-4cu: rig add on an external-server (mysql) city ──────────────────
@@ -173,5 +174,65 @@ func TestInitAndHookDirWritesInheritedMySQLMetadataForFreshRig(t *testing.T) {
 		if v, present := raw[key]; present {
 			t.Errorf("metadata carries %s = %v; a mysql rig must have no dolt keys", key, v)
 		}
+	}
+}
+
+// writePostgresBackendCity materializes a city whose ledger is Postgres-backed.
+func writePostgresBackendCity(t *testing.T, cityPath string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"test-city\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	meta := `{"database":"beads.db","backend":"postgres","postgres_host":"db.example.test",` +
+		`"postgres_port":"5432","postgres_user":"beads","postgres_database":"hq_beads"}`
+	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(meta), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestFreshPostgresRigInheritsCityBindingRatherThanNone pins what a fresh rig
+// on a Postgres city actually resolves to, because it is easy to read the
+// declining arm of inheritedExternalScopeMetadata and conclude such a rig is
+// left with no store binding at all. It is not: writing no metadata.json is
+// precisely what makes the scope uninitialized, and an uninitialized scope
+// inherits the city's binding by definition (bd_env.go's !ok arm).
+//
+// So the Postgres gap is NOT "bd has nothing to open" — it is that the rig
+// shares the city's database instead of getting its own, where a MySQL rig
+// gets <prefix>_beads (gas-4cu). Whether Postgres should match that is a
+// design decision; silently failing the add on this path is not the fix, and
+// would break the supported inherited-city Postgres rig.
+func TestFreshPostgresRigInheritsCityBindingRatherThanNone(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath := t.TempDir()
+	writePostgresBackendCity(t, cityPath)
+	rigPath := t.TempDir() // brand new rig: no .beads at all
+
+	// gc correctly declines to invent a per-rig binding...
+	if err := ensureInheritedExternalScopeMetadata(fsys.OSFS{}, cityPath, rigPath, "gas"); err != nil {
+		t.Fatalf("ensureInheritedExternalScopeMetadata on a postgres city: %v", err)
+	}
+	if _, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(rigPath)); err != nil {
+		t.Fatalf("LoadMetadataState: %v", err)
+	} else if ok {
+		t.Error("a metadata.json was derived for a postgres rig; gc has no credential to mint that database")
+	}
+
+	// ...and the rig still resolves a store: the city's.
+	meta, ok, err := externalBackendMetadataForScope(cityPath, rigPath)
+	if err != nil {
+		t.Fatalf("externalBackendMetadataForScope: %v", err)
+	}
+	if !ok {
+		t.Fatal("a fresh rig on a postgres city resolved no backend; it must inherit the city's")
+	}
+	if meta.Backend != "postgres" {
+		t.Errorf("Backend = %q, want postgres", meta.Backend)
+	}
+	if meta.PostgresDatabase != "hq_beads" {
+		t.Errorf("PostgresDatabase = %q, want the city's hq_beads (the shared-database gap, gas-c2t)", meta.PostgresDatabase)
 	}
 }
