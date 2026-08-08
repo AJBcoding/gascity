@@ -283,10 +283,10 @@ func canonicalScopeDoltTarget(cityPath, scopeRoot string) (contract.DoltConnecti
 
 // canonicalScopeDoltProjectionAuthoritative reports whether canonical
 // Dolt projection would resolve auth for the city scope: the scope
-// backend is not postgres and the scope config resolves authoritative —
-// the same ResolveScopeConfigState gate applyOrderExecCanonicalDoltEnv
-// and its managed fallback apply before calling
-// applyCanonicalDoltAuthEnv. Callers that feed ambient environments
+// backend is not an external server (postgres, mysql) and the scope config
+// resolves authoritative — the same ResolveScopeConfigState gate
+// applyOrderExecCanonicalDoltEnv and its managed fallback apply before
+// calling applyCanonicalDoltAuthEnv. Callers that feed ambient environments
 // into the projection use this to strip untrusted password mirrors
 // from the resolution input without breaking the strict no-op
 // pass-through for non-authoritative scopes.
@@ -439,6 +439,21 @@ func applyCityPostgresBackendEnv(env map[string]string, cityPath string) (bool, 
 	}
 }
 
+// applyResolvedScopeMySQLEnv clears every gc-projected backend key and
+// projects nothing for a MySQL scope: bd self-configures entirely from the
+// scope's own .beads/metadata.json (mysql_dsn + mysql_database), and any
+// password is resolved bd-side (BEADS_MYSQL_PASSWORD, never persisted).
+// Projecting nothing keeps gc free of a second MySQL credential path.
+func applyResolvedScopeMySQLEnv(env map[string]string) {
+	if env == nil {
+		return
+	}
+	clearProjectedBeadsBackendEnv(env)
+	clearProjectedDoltEnv(env)
+	mirrorBeadsDoltEnv(env)
+	clearProjectedPostgresEnv(env)
+}
+
 func scopeBackendIsDoltlite(cityPath, scopeRoot string) bool {
 	meta, ok, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(scopeRoot))
 	if err == nil && ok && meta.Backend != "" {
@@ -488,21 +503,6 @@ func scopeMetadataJSONPath(scopeRoot string) string {
 // On success emits a pg.credential_resolved event identifying the scope
 // and the resolution tier that supplied the value (best-effort; recorder
 // failures do not propagate).
-// applyResolvedScopeMySQLEnv clears every gc-projected backend key and
-// projects NOTHING for a mysql scope: bd self-configures entirely from the
-// scope's own .beads/metadata.json (mysql_dsn + mysql_database), and any
-// password is resolved bd-side (BEADS_MYSQL_PASSWORD, never persisted).
-// Projecting nothing keeps gc free of a second MySQL credential path.
-func applyResolvedScopeMySQLEnv(env map[string]string) {
-	if env == nil {
-		return
-	}
-	clearProjectedBeadsBackendEnv(env)
-	clearProjectedDoltEnv(env)
-	mirrorBeadsDoltEnv(env)
-	clearProjectedPostgresEnv(env)
-}
-
 func applyResolvedScopePostgresEnv(env map[string]string, cityPath, scopeRoot string, meta contract.MetadataState) error {
 	if env == nil {
 		return nil
@@ -628,6 +628,9 @@ func isExternalServerBackend(backend string) bool {
 	return backend == "postgres" || backend == "mysql"
 }
 
+// externalBackendMetadataForScope resolves the external-server metadata that
+// governs a scope, following the same inheritance the bead store does: the
+// scope's own metadata.json wins, otherwise the city's applies.
 func externalBackendMetadataForScope(cityPath, scopeRoot string) (contract.MetadataState, bool, error) {
 	if scopeRoot == "" {
 		scopeRoot = cityPath
@@ -647,6 +650,15 @@ func externalBackendMetadataForScope(cityPath, scopeRoot string) (contract.Metad
 	if samePath(scopeRoot, cityPath) {
 		return contract.MetadataState{}, false, nil
 	}
+	if !ok {
+		// No metadata.json at all: the scope is uninitialized, which is
+		// exactly where gc rig add starts. There is no scope-local endpoint
+		// state to resolve, so the city's backend governs by definition —
+		// without this arm a fresh rig on an external-server city falls
+		// through to the managed-Dolt path and gc writes Dolt metadata for
+		// a Dolt server that does not exist (gas-4cu).
+		return cityExternalBackendMetadata(cityPath, scopeRoot)
+	}
 	resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, scopeRoot, "")
 	if err != nil {
 		return contract.MetadataState{}, false, fmt.Errorf("resolving config for scope %s: %w", scopeRoot, err)
@@ -654,6 +666,12 @@ func externalBackendMetadataForScope(cityPath, scopeRoot string) (contract.Metad
 	if resolved.Kind != contract.ScopeConfigAuthoritative || resolved.State.EndpointOrigin != contract.EndpointOriginInheritedCity {
 		return contract.MetadataState{}, false, nil
 	}
+	return cityExternalBackendMetadata(cityPath, scopeRoot)
+}
+
+// cityExternalBackendMetadata returns the city's metadata when the city runs
+// on an external server backend, for a scope that inherits it.
+func cityExternalBackendMetadata(cityPath, scopeRoot string) (contract.MetadataState, bool, error) {
 	cityMeta, cityOK, cityErr := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(cityPath))
 	if cityErr != nil {
 		return contract.MetadataState{}, false, fmt.Errorf("loading city metadata for inherited scope %s: %w", scopeRoot, cityErr)

@@ -518,6 +518,9 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 	if usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, dir); err != nil {
 		return err
 	} else if usesExternal {
+		if err := ensureInheritedExternalScopeMetadata(fsys.OSFS{}, cityPath, dir, prefix); err != nil {
+			return fmt.Errorf("deriving bead store metadata for %s: %w", dir, err)
+		}
 		if err := installBeadHooks(dir, cityPath); err != nil {
 			return fmt.Errorf("install hooks at %s: %w", dir, err)
 		}
@@ -1611,6 +1614,72 @@ func ensureCanonicalDoltliteScopeMetadata(fs fsys.FS, scopeRoot, doltDatabase st
 	return err
 }
 
+// externalScopeDatabaseSuffix is the per-scope database naming convention on
+// an external server backend: every scope owns a separate <prefix>_beads
+// database on the shared server, so rigs never share a bead store.
+const externalScopeDatabaseSuffix = "_beads"
+
+// inheritedExternalScopeMetadata derives a rig scope's bead-store binding from
+// the city's external-server binding. The connection is copied verbatim — gc
+// treats the DSN as opaque and never parses or re-synthesizes it — while the
+// database is scoped to the rig's own prefix.
+//
+// Only the MySQL arm derives. A Postgres scope's database and role are
+// provisioned out of band (gc holds no PG credentials to create one with), so
+// gc declines rather than writing a binding that points at a database nobody
+// created; that scope keeps today's behavior of carrying no derived metadata.
+func inheritedExternalScopeMetadata(city contract.MetadataState, prefix string) (contract.MetadataState, bool) {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" || city.Backend != "mysql" || strings.TrimSpace(city.MySQLDSN) == "" {
+		return contract.MetadataState{}, false
+	}
+	database := strings.TrimSpace(city.Database)
+	if database == "" {
+		database = "beads.db"
+	}
+	return contract.MetadataState{
+		Database:      database,
+		Backend:       "mysql",
+		MySQLDSN:      strings.TrimSpace(city.MySQLDSN),
+		MySQLDatabase: prefix + externalScopeDatabaseSuffix,
+	}, true
+}
+
+// ensureInheritedExternalScopeMetadata gives a freshly added rig on an
+// external-server city the metadata.json it needs, derived from the city's
+// backend. It only ever creates: a scope that already carries metadata owns
+// its own binding and is left untouched, and the city scope is never derived
+// from itself.
+//
+// Without this, `gc rig add` on such a city left the new rig with no store
+// binding at all — or, before the managed-Dolt gates learned about external
+// backends, with hardcoded Dolt metadata pointing at a server that does not
+// exist (gas-4cu).
+func ensureInheritedExternalScopeMetadata(fs fsys.FS, cityPath, dir, prefix string) error {
+	if samePath(cityPath, dir) {
+		return nil
+	}
+	path := scopeMetadataJSONPath(dir)
+	if _, ok, err := contract.LoadMetadataState(fs, path); err != nil {
+		return err
+	} else if ok {
+		return nil
+	}
+	cityMeta, ok, err := contract.LoadMetadataState(fs, scopeMetadataJSONPath(cityPath))
+	if err != nil || !ok {
+		return err
+	}
+	state, derived := inheritedExternalScopeMetadata(cityMeta, prefix)
+	if !derived {
+		return nil
+	}
+	if err := ensureBeadsDir(fs, filepath.Dir(path)); err != nil {
+		return err
+	}
+	_, err = contract.EnsureCanonicalMetadata(fs, path, state)
+	return err
+}
+
 //nolint:unparam // keep fs seam for future testable FS injection
 func ensureCanonicalScopeMetadataForInit(fs fsys.FS, scopeRoot, doltDatabase string) error {
 	return ensureCanonicalScopeMetadata(fs, scopeRoot, doltDatabase, true)
@@ -1691,13 +1760,13 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 	}
 	resolveRigPaths(cityPath, rigs)
 	cityUsesBd := scopeUsesManagedBdStoreContract(cityPath, cityPath)
-	cityUsesPostgres := false
+	cityUsesExternalBackend := false
 	if cityUsesBd {
 		usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, cityPath)
 		if err != nil {
 			return fmt.Errorf("classifying city backend: %w", err)
 		}
-		cityUsesPostgres = usesExternal
+		cityUsesExternalBackend = usesExternal
 	}
 	anyRigUsesBd := false
 	for _, rig := range rigs {
@@ -1720,14 +1789,14 @@ func syncConfiguredDoltPortFiles(cityPath string, cityDolt config.DoltConfig, ci
 		return err
 	}
 	managedPort := ""
-	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityUsesPostgres {
+	if cityState.EndpointOrigin == contract.EndpointOriginManagedCity && !cityUsesExternalBackend {
 		managedPort = currentDoltPort(cityPath)
 	}
 	if cityUsesBd {
 		if err := normalizeScopeDoltConfig(cityPath, cityState); err != nil {
 			return err
 		}
-		if !cityUsesPostgres {
+		if !cityUsesExternalBackend {
 			if managedPort != "" {
 				writeDoltPortFile(cityPath, managedPort, "city", warn)
 			} else {
