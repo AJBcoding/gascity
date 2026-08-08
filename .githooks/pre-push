@@ -14,11 +14,14 @@ set -euo pipefail
 zero="0000000000000000000000000000000000000000"
 
 go_changed=0
-while read -r _local_ref local_sha _remote_ref remote_sha; do
+pushed_refs=""   # "<local ref> <local sha>" per line, non-deletions only
+while read -r local_ref local_sha _remote_ref remote_sha; do
   # Branch deletion — nothing to test.
   if [ "$local_sha" = "$zero" ]; then
     continue
   fi
+  pushed_refs="${pushed_refs}${local_ref} ${local_sha}
+"
   # New remote branch: no cheap base to diff against — run the suite.
   if [ "$remote_sha" = "$zero" ]; then
     go_changed=1
@@ -32,6 +35,58 @@ done
 if [ "$go_changed" -eq 0 ]; then
   exit 0
 fi
+
+# Wrong-worktree guard (gas-4pz): the suite below tests the CHECKED-OUT tree,
+# so a push run from a worktree parked on another branch (e.g. the repo root
+# on the deploy branch) produces a verdict about that branch and silently
+# attributes it to the pushed ref — that is how a fork-local test failure on
+# the parked deploy branch got a healthy fix branch's push filed as
+# "origin/main is RED". Require the tested HEAD to be contained in (ancestor
+# of, or equal to) at least one ref this push is sending; a HEAD behind the
+# pushed ref can under-test new commits, but it can never attribute a failure
+# from a tree the push does not contain. Bypass: `git push --no-verify`.
+head_sha="$(git rev-parse HEAD)"
+head_name="$(git rev-parse --abbrev-ref HEAD)"
+head_short="$(git rev-parse --short HEAD)"
+worktree="$(git rev-parse --show-toplevel)"
+head_in_push=0
+while read -r ref sha; do
+  [ -n "$ref" ] || continue
+  if git merge-base --is-ancestor "$head_sha" "$sha" 2>/dev/null; then
+    head_in_push=1
+    break
+  fi
+done <<EOF
+$pushed_refs
+EOF
+
+if [ "$head_in_push" -eq 0 ]; then
+  {
+    echo "pre-push: REFUSING to run the test gate from this worktree."
+    echo "pre-push: it has ${head_name}@${head_short} checked out ($worktree),"
+    echo "pre-push: which is not contained in any ref this push is sending:"
+    while read -r ref sha; do
+      [ -n "$ref" ] || continue
+      echo "pre-push:   ${ref}@$(git rev-parse --short "$sha")"
+    done <<EOF
+$pushed_refs
+EOF
+    echo "pre-push: a verdict from this tree would be about ${head_name}, not the pushed ref (gas-4pz)."
+    echo "pre-push: run the push from the worktree that has the pushed branch checked out"
+    echo "pre-push: (see: git worktree list), or bypass consciously with: git push --no-verify"
+  } >&2
+  exit 1
+fi
+
+# Verdict header (gas-4pz): name the tree the suite actually tests so a
+# misattributed verdict is visible in the output instead of invisible.
+echo "pre-push: testing ${head_name}@${head_short} ($worktree) for push of:"
+while read -r ref sha; do
+  [ -n "$ref" ] || continue
+  echo "pre-push:   ${ref}@$(git rev-parse --short "$sha")"
+done <<EOF
+$pushed_refs
+EOF
 
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
