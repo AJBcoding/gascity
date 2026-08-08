@@ -7,6 +7,14 @@
       "type": "string",
       "format": "date-time"
     },
+    "applicable": {
+      "description": "False when this city has no Dolt data plane to report on (its bead ledger is on another backend). The remaining fields are then zero-valued placeholders and carry no health signal: server.reachable=false means 'no Dolt server exists here', not 'the server is down'.",
+      "type": "boolean"
+    },
+    "reason": {
+      "description": "Why the report is not applicable. Present only when applicable is false.",
+      "type": "string"
+    },
     "server": {
       "type": "object",
       "required": ["running", "reachable", "external", "pid", "port", "latency_ms"],

@@ -10,6 +10,91 @@ set -e
 
 : "${GC_DOLT_USER:=root}"
 PACK_DIR="${GC_PACK_DIR:-$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)}"
+
+# Flags are parsed before runtime.sh is sourced. Sourcing it resolves
+# GC_DOLT_PORT and exits 78 when no port can be found, so anything that must
+# work without a running server — --help, and the not-applicable report below
+# — has to be decided first.
+json_output=false
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --json) json_output=true; shift ;;
+    -h|--help)
+      echo "Usage: gc dolt health [--json]"
+      echo ""
+      echo "Lightweight Dolt data-plane health report for patrol cycles."
+      echo ""
+      echo "Flags:"
+      echo "  --json    Output as JSON (consumed by health patrol automation)"
+      exit 0
+      ;;
+    *) echo "gc dolt health: unknown flag: $1" >&2; exit 1 ;;
+  esac
+done
+
+# city_beads_backend echoes the city ledger's configured backend ("dolt",
+# "mysql", ...), or nothing when metadata.json is absent or unreadable.
+city_beads_backend() {
+  meta="$GC_CITY_PATH/.beads/metadata.json"
+  [ -f "$meta" ] || return 0
+  if command -v jq >/dev/null 2>&1; then
+    jq -r '.backend // empty' "$meta" 2>/dev/null || true
+    return
+  fi
+  grep -o '"backend"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null | sed 's/.*: *"//;s/"$//' || true
+}
+
+# A city whose ledger is not Dolt-backed has no managed Dolt runtime to resolve
+# a port from, so runtime.sh would exit 78 before any payload is emitted. To a
+# patrol consumer that is indistinguishable from "nothing to report", which is
+# how commit bloat, stale backups, zombies and orphans went unreported on a
+# MySQL city with no signal that monitoring itself was blind (gas-e05).
+#
+# Report the inapplicability in-band instead. An explicit GC_DOLT_PORT or
+# GC_DOLT_HOST is a deliberate operator override — it still probes.
+city_backend=$(city_beads_backend)
+if [ -n "$city_backend" ] && [ "$city_backend" != "dolt" ] &&
+   [ -z "${GC_DOLT_PORT:-}" ] && [ -z "${GC_DOLT_HOST:-}" ]; then
+  reason="city beads backend is $city_backend; no managed Dolt runtime to probe"
+  if [ "$json_output" = true ]; then
+    # The backend name comes from metadata.json; escape backslash then quote
+    # so an unexpected value cannot produce a malformed payload — the one
+    # thing a monitoring consumer must never receive.
+    reason_esc=$(printf '%s' "$reason" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    cat <<JSONEOF
+{
+  "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "applicable": false,
+  "reason": "$reason_esc",
+  "server": {
+    "running": false,
+    "reachable": false,
+    "external": false,
+    "pid": 0,
+    "port": 0,
+    "latency_ms": 0
+  },
+  "databases": [],
+  "backups": {
+    "dolt_freshness": "n/a",
+    "dolt_age_sec": 0,
+    "dolt_stale": false
+  },
+  "orphans": [],
+  "quarantine": [],
+  "processes": {
+    "zombie_count": 0,
+    "zombie_pids": []
+  }
+}
+JSONEOF
+    exit 0
+  fi
+  echo "Dolt health: not applicable ($reason)"
+  exit 0
+fi
+
 . "$PACK_DIR/assets/scripts/runtime.sh"
 
 metadata_files() {
@@ -51,24 +136,7 @@ metadata_db() {
   grep -o '"dolt_database"[[:space:]]*:[[:space:]]*"[^"]*"' "$meta" 2>/dev/null | sed 's/.*: *"//;s/"$//' || true
 }
 
-json_output=false
 data_dir="$DOLT_DATA_DIR"
-
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --json) json_output=true; shift ;;
-    -h|--help)
-      echo "Usage: gc dolt health [--json]"
-      echo ""
-      echo "Lightweight Dolt data-plane health report for patrol cycles."
-      echo ""
-      echo "Flags:"
-      echo "  --json    Output as JSON (consumed by health patrol automation)"
-      exit 0
-      ;;
-    *) echo "gc dolt health: unknown flag: $1" >&2; exit 1 ;;
-  esac
-done
 
 # Note: run_bounded / TIMEOUT_BIN are provided by assets/scripts/runtime.sh.
 
@@ -475,6 +543,7 @@ if [ "$json_output" = true ]; then
   cat <<JSONEOF
 {
   "timestamp": "$timestamp",
+  "applicable": true,
   "server": {
     "running": $server_running,
     "reachable": $server_reachable,

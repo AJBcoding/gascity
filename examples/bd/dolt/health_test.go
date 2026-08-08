@@ -1999,3 +1999,151 @@ func TestHealthScriptJSONAlwaysExitsZero(t *testing.T) {
 		t.Errorf("JSON payload missing expected `\"reachable\": false`; got:\n%s", out)
 	}
 }
+
+// TestHealthScriptJSONReportsNotApplicableOnNonDoltBackend pins the
+// monitoring contract for a city whose bead ledger is not Dolt-backed.
+//
+// runtime.sh resolves GC_DOLT_PORT at source time and exits 78 when no
+// managed runtime state exists. health/run.sh sources it before parsing
+// --json, so on a MySQL-backend city — where a managed Dolt runtime never
+// exists and never will — the command died before emitting any payload.
+// To the deacon patrol that is indistinguishable from "nothing to report",
+// so commit bloat, stale backups, zombies and orphans went unreported every
+// cycle with no signal that monitoring itself was broken (gas-e05).
+//
+// The report must therefore be well-formed and exit 0 like every other
+// --json invocation, and must say *why* it has nothing to say, so an
+// automation consumer can tell "Dolt is not in use here" apart from both
+// "healthy" and "the check is broken".
+func TestHealthScriptJSONReportsNotApplicableOnNonDoltBackend(t *testing.T) {
+	cityPath := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// The shape gc writes for a MySQL-backed city: no dolt_database at all.
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"backend":"mysql","mysql_database":"anthony_beads"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	// No GC_DOLT_PORT and no GC_DOLT_HOST: nothing for the port resolver to
+	// find, which is the whole point — this is the state a MySQL city is
+	// permanently in.
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+	)
+
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("health.sh --json exited non-zero on a non-Dolt city: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Applicable *bool  `json:"applicable"`
+		Reason     string `json:"reason"`
+		Timestamp  string `json:"timestamp"`
+		Server     struct {
+			Reachable bool `json:"reachable"`
+		} `json:"server"`
+		Databases []struct{} `json:"databases"`
+		Processes struct {
+			ZombieCount int `json:"zombie_count"`
+		} `json:"processes"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if report.Applicable == nil {
+		t.Fatalf("payload omits `applicable`; a consumer cannot tell "+
+			"'Dolt not in use' from 'healthy'\n%s", out)
+	}
+	if *report.Applicable {
+		t.Errorf("applicable = true on a mysql-backend city; want false\n%s", out)
+	}
+	// The reason must name the backend — an operator reading the patrol log
+	// needs to know which city state produced the empty report.
+	if !strings.Contains(report.Reason, "mysql") {
+		t.Errorf("reason = %q; want it to name the mysql backend\n%s", report.Reason, out)
+	}
+	if report.Timestamp == "" {
+		t.Errorf("payload omits timestamp; schema requires it\n%s", out)
+	}
+}
+
+// TestHealthScriptNotApplicableStillReportsWhenOperatorSuppliesPort guards the
+// operator-override escape hatch: pointing the command at a server explicitly
+// is a deliberate act, so a non-Dolt backend must NOT short-circuit it. Without
+// this, `GC_DOLT_PORT=3309 gc dolt health` — the exact command an operator runs
+// to inspect a reachable server by hand (gas-e05) — would start reporting
+// "not applicable" and silently stop probing.
+func TestHealthScriptNotApplicableStillReportsWhenOperatorSuppliesPort(t *testing.T) {
+	cityPath := t.TempDir()
+	fakeBin := t.TempDir()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	port := strconv.Itoa(listener.Addr().(*net.TCPAddr).Port)
+
+	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"),
+		[]byte(`{"backend":"mysql","mysql_database":"anthony_beads"}`), 0o644); err != nil {
+		t.Fatalf("write metadata: %v", err)
+	}
+
+	writeExecutable(t, filepath.Join(fakeBin, "gc"), "#!/bin/sh\nexit 1\n")
+	writeExecutable(t, filepath.Join(fakeBin, "lsof"), "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(fakeBin, "nc"), `#!/bin/sh
+if [ "$1" = "-z" ] && [ "$2" = "127.0.0.1" ] && [ "$3" = "`+port+`" ]; then
+  exit 0
+fi
+exit 1
+`)
+	writeExecutable(t, filepath.Join(fakeBin, "dolt"), "#!/bin/sh\nexit 0\n")
+
+	root := repoRoot(t)
+	cmd := exec.Command("sh", filepath.Join(root, healthScript), "--json")
+	cmd.Env = append(filteredEnv("GC_CITY_PATH", "GC_PACK_DIR", "GC_DOLT_HOST", "GC_DOLT_PORT",
+		"GC_DOLT_USER", "GC_DOLT_PASSWORD", "GC_HEALTH_SKIP_ZOMBIE_SCAN", "PATH"),
+		"GC_CITY_PATH="+cityPath,
+		"GC_PACK_DIR="+root,
+		"GC_DOLT_HOST=127.0.0.1",
+		"GC_DOLT_PORT="+port,
+		"GC_DOLT_USER=root",
+		"GC_DOLT_PASSWORD=",
+		"GC_HEALTH_SKIP_ZOMBIE_SCAN=1",
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH"),
+	)
+
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("health.sh --json failed under an operator-supplied port: %v\n%s", err, out)
+	}
+
+	var report struct {
+		Applicable *bool `json:"applicable"`
+		Server     struct {
+			Running bool `json:"running"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(out, &report); err != nil {
+		t.Fatalf("health.sh --json returned invalid JSON: %v\n%s", err, out)
+	}
+	if report.Applicable != nil && !*report.Applicable {
+		t.Errorf("applicable = false despite an explicit GC_DOLT_PORT; "+
+			"the operator override must still probe\n%s", out)
+	}
+	if !report.Server.Running {
+		t.Errorf("server.running = false; want the probe to have run against "+
+			"the operator-supplied port\n%s", out)
+	}
+}
