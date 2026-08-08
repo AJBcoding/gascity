@@ -1925,6 +1925,11 @@ func installCaptureBdRunner(t *testing.T) *[]bdInvocation {
 				return []byte(`[]`), nil
 			case len(args) >= 2 && args[0] == "query" && args[1] == "--json":
 				return []byte(`[]`), nil
+			// The pre-route blocked-demand probe (gas-9wc) reads the routed
+			// bead's dependencies to check it against the predicate the pool
+			// demand query applies. A freshly minted inline bead has none.
+			case len(args) >= 2 && args[0] == "dep" && args[1] == "list":
+				return []byte(`[]`), nil
 			default:
 				t.Errorf("unexpected bd subcommand args=%v — fake must be extended if sling now invokes this", args)
 				return nil, fmt.Errorf("unexpected bd subcommand args=%v", args)

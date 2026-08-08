@@ -229,6 +229,33 @@ func resolveIdempotentShortCircuit(opts SlingOpts, a config.Agent, deps SlingDep
 	return true
 }
 
+// reportBlockedDemand records the routed bead's unclosed ready-blocking
+// dependencies on result so the caller can say that the route, though
+// correctly stamped, is invisible to the pool demand query until they close
+// (gas-9wc). It never changes routing and never fails the sling: pre-routing
+// work whose blocker is about to close is legitimate, and the demand query
+// picks the bead up the moment it becomes ready. --force does not suppress it
+// either — force means "route it anyway", not "hide the reason nothing will
+// pick it up", and silencing it there would restore the original silent
+// failure for exactly the operators most likely to hit it.
+//
+// A probe that cannot complete degrades to a visible warning rather than an
+// implicit "not blocked": an unreadable dependency graph reading as "ready" is
+// the same silence this check exists to break.
+func reportBlockedDemand(deps SlingDeps, beadID string, result *SlingResult) {
+	if deps.Store == nil {
+		return
+	}
+	blockers, err := UnclosedBlockers(beadID, deps.Store)
+	if err != nil {
+		result.BeadWarnings = append(result.BeadWarnings, fmt.Sprintf(
+			"warning: could not read dependencies of %s — cannot confirm the route is visible to pool demand: %v",
+			beadID, err))
+		return
+	}
+	result.BlockedBy = blockers
+}
+
 // rigSuspended reports whether the named rig is marked suspended in config.
 // The pool reconciler skips suspended rigs entirely, so a bead routed into
 // one stalls silently — no worker ever spawns to claim it.
@@ -620,6 +647,13 @@ func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingR
 // metadata, creates auto-convoy, pokes the controller, and signals nudge.
 func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
 	a := opts.Target
+
+	// beadID is by construction the bead that receives gc.routed_to on every
+	// demand-driven path, so this is the one place that can check the route
+	// against the predicate its consumer applies. Probing before the route
+	// runs means the report survives a routing failure too — printSlingWarnings
+	// is deliberately called ahead of error handling.
+	reportBlockedDemand(deps, beadID, &result)
 
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
 	slingEnv := ResolveSlingEnv(a, deps, beadID)

@@ -195,6 +195,7 @@ type SlingResult struct {
 	AgentSuspended bool     // target agent is suspended
 	SuspendedRig   string   // non-empty: name of the target's rig, which is suspended
 	PoolEmpty      bool     // pool max=0
+	BlockedBy      []string // unclosed ready-blocking deps hiding the routed bead from pool demand
 	AutoBurned     []string // IDs of auto-burned stale molecules
 	MetadataErrors []string // non-fatal metadata write failures
 	BeadWarnings   []string // pre-flight bead state warnings

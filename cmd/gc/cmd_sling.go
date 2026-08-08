@@ -143,7 +143,7 @@ Examples:
 	}
 	cmd.Flags().BoolVarP(&formula, "formula", "f", false, "treat argument as formula name")
 	cmd.Flags().BoolVar(&nudge, "nudge", false, "nudge target after routing")
-	cmd.Flags().BoolVar(&force, "force", false, "suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store")
+	cmd.Flags().BoolVar(&force, "force", false, "suppress pre-flight warnings other than unclosed blocking dependencies, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store")
 	cmd.Flags().StringVarP(&title, "title", "t", "", "wisp root bead title (with --formula or --on)")
 	cmd.Flags().StringArrayVar(&vars, "var", nil, "variable substitution for formula (key=value, repeatable)")
 	cmd.Flags().StringVar(&merge, "merge", "", "merge strategy: direct, mr, or local")
@@ -791,6 +791,10 @@ func printSlingWarnings(result sling.SlingResult, stderr io.Writer) {
 	if result.PoolEmpty {
 		fmt.Fprintf(stderr, "warning: session config %q has max_active_sessions=0 — bead routed but no sessions can claim it\n", result.Target) //nolint:errcheck
 	}
+	if len(result.BlockedBy) > 0 {
+		fmt.Fprintf(stderr, "warning: bead %s has unclosed blocking dependencies (%s) — routed to %s, but pool demand only counts ready work, so no session will spawn until they close\n", //nolint:errcheck
+			result.BeadID, strings.Join(result.BlockedBy, ", "), result.Target)
+	}
 	for _, w := range result.BeadWarnings {
 		fmt.Fprintln(stderr, w) //nolint:errcheck
 	}
@@ -1109,6 +1113,7 @@ type slingJSONResult struct {
 	Queued        bool                   `json:"queued"`
 	DryRun        bool                   `json:"dry_run"`
 	DashboardURL  string                 `json:"dashboard_url,omitempty"`
+	BlockedBy     []string               `json:"blocked_by,omitempty"`
 	Warnings      []string               `json:"warnings,omitempty"`
 	Batch         *slingJSONBatchSummary `json:"batch,omitempty"`
 }
@@ -1146,6 +1151,7 @@ func slingJSONFromResult(result sling.SlingResult) slingJSONResult {
 		Routed:        result.Routed > 0 || (!result.Idempotent && result.BeadID != "" && !result.DryRun),
 		Queued:        result.NudgeAgent != nil,
 		DryRun:        result.DryRun,
+		BlockedBy:     result.BlockedBy,
 		Warnings:      slingJSONWarnings(result),
 	}
 	if len(result.Children) > 0 || result.ContainerType != "" {
@@ -1171,6 +1177,9 @@ func slingJSONWarnings(result sling.SlingResult) []string {
 	}
 	if result.PoolEmpty {
 		warnings = append(warnings, "pool_empty")
+	}
+	if len(result.BlockedBy) > 0 {
+		warnings = append(warnings, "bead_blocked")
 	}
 	warnings = append(warnings, result.BeadWarnings...)
 	warnings = append(warnings, result.Deprecations...)
