@@ -349,6 +349,11 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.city != nil {
 		beadsCfg = p.city.Beads
 	}
+	// Resolved once and shared by the prompt and the session-setup context
+	// below: for a rig with no recorded default_branch this shells out to git,
+	// and the prompt an agent reads must name the same branch its pre_start
+	// worktree was cut from.
+	rigDefaultBranch := defaultBranchForRig(rigName, p.rigs, workDir)
 	prompt = renderPrompt(p.fs, p.cityPath, p.cityName, cfgAgent.PromptTemplate, PromptContext{
 		CityRoot:                p.cityPath,
 		AgentName:               qualifiedName,
@@ -359,7 +364,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		RigRoot:                 rigRoot,
 		WorkDir:                 workDir,
 		IssuePrefix:             findRigPrefix(rigName, p.rigs),
-		DefaultBranch:           defaultBranchForRig(rigName, p.rigs, workDir),
+		DefaultBranch:           rigDefaultBranch,
 		AssignedInProgressQuery: expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_in_progress_query", cfgAgent.EffectiveAssignedInProgressQueryForBeads(beadsCfg), p.stderr),
 		AssignedReadyQuery:      expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "assigned_ready_query", cfgAgent.EffectiveAssignedReadyQueryForBeads(beadsCfg), p.stderr),
 		RoutedPoolQuery:         expandAgentCommandTemplate(p.cityPath, p.cityName, cfgAgent, p.rigs, "routed_pool_query", cfgAgent.EffectiveRoutedPoolQueryForBeads(beadsCfg), p.stderr),
@@ -513,6 +518,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 		CityName:  p.cityName,
 		WorkDir:   workDir,
 		ConfigDir: configDir,
+		// Shares the prompt's resolution so a pre_start worktree script and
+		// the prompt rendered alongside it agree on the rig's mainline (gas-e6r).
+		DefaultBranch: rigDefaultBranch,
 	}
 	if strings.Contains(command, "{{") {
 		expanded := expandSessionSetup([]string{command}, setupCtx)
