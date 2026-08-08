@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/packman"
+	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
 func TestDoImportAddRemoteWritesConfigAndLock(t *testing.T) {
@@ -2679,10 +2680,11 @@ schema = 1
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(dir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", dir, err)
-	}
+	// Canonicalize the expectation through the production normalizer, not bare
+	// EvalSymlinks: on macOS the two pick different spellings of the temp root
+	// (/var/... vs /private/var/...), and resolveImportRoot returns the former.
+	// The comparison stays exact.
+	want := pathutil.NormalizePathForCompare(dir)
 	if got != want {
 		t.Fatalf("resolveImportRoot() = %q, want %q", got, want)
 	}
@@ -2754,10 +2756,8 @@ func TestResolveImportRootPrefersNearestPackUnderCity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveImportRoot: %v", err)
 	}
-	want, err := filepath.EvalSymlinks(packDir)
-	if err != nil {
-		t.Fatalf("EvalSymlinks(%q): %v", packDir, err)
-	}
+	// Same canonical-form alignment as the standalone-pack-dir test above.
+	want := pathutil.NormalizePathForCompare(packDir)
 	if got != want {
 		t.Fatalf("resolveImportRoot() = %q, want nearest pack %q", got, want)
 	}

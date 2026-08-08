@@ -16,8 +16,15 @@ import (
 
 // skipReasonsFor returns, in order, the reasons carried by every
 // bead.worktree.reap_skipped event the fake recorded for worktreePath.
+//
+// Paths are matched canonically, not by raw string equality. The reaper
+// discovers worktrees through `git worktree list --porcelain`, and git reports
+// a fully symlink-resolved path — on macOS the /private/var spelling of the
+// /var path these tests build from t.TempDir(). Both spellings name the same
+// worktree, so comparing them raw found nothing on that host.
 func skipReasonsFor(t *testing.T, fake *events.Fake, worktreePath string) []string {
 	t.Helper()
+	want := pathutil.NormalizePathForCompare(worktreePath)
 	var reasons []string
 	for _, e := range fake.Events {
 		if e.Type != events.BeadWorktreeReapSkipped {
@@ -27,7 +34,7 @@ func skipReasonsFor(t *testing.T, fake *events.Fake, worktreePath string) []stri
 		if err := json.Unmarshal(e.Payload, &p); err != nil {
 			t.Fatalf("unmarshal reap_skipped payload: %v", err)
 		}
-		if p.Path == worktreePath {
+		if pathutil.NormalizePathForCompare(p.Path) == want {
 			reasons = append(reasons, p.Reason)
 		}
 	}
@@ -37,10 +44,18 @@ func skipReasonsFor(t *testing.T, fake *events.Fake, worktreePath string) []stri
 // countStderrProtecting returns how many "protecting" lines the reaper wrote
 // for worktreePath, so the log sink can be asserted on the same edge as the
 // event sink.
+// Paths are compared canonically for the same reason as skipReasonsFor: the
+// logged path is git's symlink-resolved spelling, not the one the test built.
 func countStderrProtecting(stderr string, worktreePath string) int {
+	want := pathutil.NormalizePathForCompare(worktreePath)
 	n := 0
 	for _, line := range strings.Split(stderr, "\n") {
-		if strings.Contains(line, "protecting") && strings.Contains(line, worktreePath) {
+		_, rest, found := strings.Cut(line, "protecting ")
+		if !found {
+			continue
+		}
+		logged, _, _ := strings.Cut(rest, " (bead ")
+		if pathutil.NormalizePathForCompare(logged) == want {
 			n++
 		}
 	}

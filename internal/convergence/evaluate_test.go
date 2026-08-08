@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -20,7 +21,11 @@ func TestResolveEvaluateStep_DefaultPath(t *testing.T) {
 	if step.Name != EvaluateStepName {
 		t.Errorf("Name = %q, want %q", step.Name, EvaluateStepName)
 	}
-	want := filepath.Join("/home/user/city", DefaultEvaluatePromptPath)
+	// Build the expectation the way ResolveEvaluateStep does — canonicalize
+	// the city root, then join. A literal join would assume the root needs no
+	// resolution, which is false on macOS, where /home is a firmlink to
+	// /System/Volumes/Data/home (and /var, /tmp are symlinks besides).
+	want := filepath.Join(pathutil.NormalizePathForCompare("/home/user/city"), DefaultEvaluatePromptPath)
 	if step.PromptPath != want {
 		t.Errorf("PromptPath = %q, want %q", step.PromptPath, want)
 	}
@@ -39,7 +44,8 @@ func TestResolveEvaluateStep_CustomPath(t *testing.T) {
 	if step.Name != EvaluateStepName {
 		t.Errorf("Name = %q, want %q", step.Name, EvaluateStepName)
 	}
-	want := filepath.Join("/home/user/city", "custom/my-evaluate.md")
+	// Same canonicalize-then-join construction as the default-path test.
+	want := filepath.Join(pathutil.NormalizePathForCompare("/home/user/city"), "custom/my-evaluate.md")
 	if step.PromptPath != want {
 		t.Errorf("PromptPath = %q, want %q", step.PromptPath, want)
 	}
