@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"strings"
 	"time"
@@ -563,6 +564,10 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
+	diskFreeBytes           DiskFreeBytesFunc
+	diskMinFreeBytes        int64
+	diskWarnFreeBytes       int64
+	diskStderr              io.Writer
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -793,6 +798,20 @@ func WithStaleKeyDetectionWaiter(waiter StaleKeyDetectionWaiter) ManagerOption {
 	}
 }
 
+// WithDiskPreflight arms the free-space check that runs before a session is
+// started. A nil probe or a zero floor leaves the check off, which is the
+// default: callers that do not wire it keep today's behavior exactly.
+func WithDiskPreflight(probe DiskFreeBytesFunc, minFree, warnFree int64, stderr io.Writer) ManagerOption {
+	return func(m *Manager) {
+		m.diskFreeBytes = probe
+		m.diskMinFreeBytes = minFree
+		m.diskWarnFreeBytes = warnFree
+		if stderr != nil {
+			m.diskStderr = stderr
+		}
+	}
+}
+
 // NewManagerWithOptions creates a Manager backed by the given bead store and
 // session provider, applying any capability options. It is the canonical
 // constructor; the named NewManager* variants below are one-line presets.
@@ -831,6 +850,14 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 	}
 	explicitName, err = ValidateExplicitName(explicitName)
 	if err != nil {
+		return Info{}, err
+	}
+	// Before any bead, name lock, or runtime process exists, so a refusal
+	// leaves nothing half-created to reconcile. The session's own work
+	// directory is what matters: that is where its build caches and test
+	// output land. createBeadOnly deliberately does not check — it spawns
+	// nothing, and the disk it would need is only owed at start time.
+	if err := m.checkSpawnDisk(workDir); err != nil {
 		return Info{}, err
 	}
 	if title == "" {
