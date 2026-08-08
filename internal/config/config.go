@@ -2480,6 +2480,13 @@ type DaemonConfig struct {
 	GraphWorkflows bool `toml:"graph_workflows,omitempty"`
 	// PatrolInterval is the health patrol interval. Duration string (e.g., "30s", "5m", "1h"). Defaults to "30s".
 	PatrolInterval string `toml:"patrol_interval,omitempty" jsonschema:"default=30s"`
+	// ClaimLeaseTTL is the bead claim-lease TTL the bead backend enforces:
+	// a claim lease expires this long after its last heartbeat. It is the
+	// single value the controller derives its lease-renewal cadence from
+	// (renewals run at one third of the TTL), so the two cannot drift apart
+	// (gas-76r). Duration string (e.g., "5m"). Defaults to "5m", matching
+	// bd's claim-lease TTL; change it only if the bead backend's TTL changes.
+	ClaimLeaseTTL string `toml:"claim_lease_ttl,omitempty" jsonschema:"default=5m"`
 	// MaxRestarts is the maximum number of agent restarts within RestartWindow before
 	// the agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5.
 	MaxRestarts *int `toml:"max_restarts,omitempty" jsonschema:"default=5"`
@@ -2718,6 +2725,12 @@ func (d *DaemonConfig) AutoPruneWorkerDirEnabled() bool {
 // Defaults to 30s if empty or unparseable.
 func (d *DaemonConfig) PatrolIntervalDuration() time.Duration {
 	return durationOr(d.PatrolInterval, 30*time.Second)
+}
+
+// ClaimLeaseTTLDuration returns the bead claim-lease TTL as a time.Duration.
+// Defaults to 5m (bd's claim-lease TTL) if empty or unparseable.
+func (d *DaemonConfig) ClaimLeaseTTLDuration() time.Duration {
+	return durationOr(d.ClaimLeaseTTL, 5*time.Minute)
 }
 
 // TickDebounceDuration returns the tick-debounce window as a

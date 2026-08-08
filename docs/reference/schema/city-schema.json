@@ -1290,6 +1290,11 @@
           "description": "PatrolInterval is the health patrol interval. Duration string (e.g., \"30s\", \"5m\", \"1h\"). Defaults to \"30s\".",
           "default": "30s"
         },
+        "claim_lease_ttl": {
+          "type": "string",
+          "description": "ClaimLeaseTTL is the bead claim-lease TTL the bead backend enforces:\na claim lease expires this long after its last heartbeat. It is the\nsingle value the controller derives its lease-renewal cadence from\n(renewals run at one third of the TTL), so the two cannot drift apart\n(gas-76r). Duration string (e.g., \"5m\"). Defaults to \"5m\", matching\nbd's claim-lease TTL; change it only if the bead backend's TTL changes.",
+          "default": "5m"
+        },
         "max_restarts": {
           "type": "integer",
           "description": "MaxRestarts is the maximum number of agent restarts within RestartWindow before\nthe agent is quarantined. 0 means unlimited (no crash loop detection). Defaults to 5.",

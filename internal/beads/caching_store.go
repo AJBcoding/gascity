@@ -84,6 +84,7 @@ type CachingStore struct {
 var (
 	_ ConditionalAssignmentReleaser = (*CachingStore)(nil)
 	_ AtomicTxStore                 = (*CachingStore)(nil)
+	_ LeaseRenewer                  = (*CachingStore)(nil)
 )
 
 type cacheState int
