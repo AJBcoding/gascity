@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -310,8 +311,8 @@ func gitPublicationRemotes(repoDir string) (publication, configured []string) {
 			publication = append(publication, name)
 			continue
 		}
-		url := strings.TrimSpace(string(urlOut))
-		if isSelfRemoteURL(url, selfCommon) {
+		remoteURL := strings.TrimSpace(string(urlOut))
+		if isSelfRemoteURL(remoteURL, selfCommon) {
 			continue
 		}
 		publication = append(publication, name)
@@ -319,33 +320,66 @@ func gitPublicationRemotes(repoDir string) (publication, configured []string) {
 	return publication, configured
 }
 
-// isSelfRemoteURL reports whether a remote URL is a filesystem path that
-// resolves to the repository whose git common dir is selfCommon. Network URLs
-// (scheme://host/..., scp-style user@host:path) are never self-referential.
-func isSelfRemoteURL(url, selfCommon string) bool {
-	if url == "" || selfCommon == "" {
+// isSelfRemoteURL reports whether a remote URL resolves to the repository whose
+// git common dir is selfCommon. A same-disk remote — a plain path, a file://
+// URL, or a network URL pointed back at this machine — snapshots local branches
+// into refs/remotes/*, so counting one as a publication remote would read those
+// snapshots as delivery evidence (gas-6tc).
+//
+// Classification is by positive identification only: a URL is self-referential
+// solely when it resolves to a path that is this very repository. A URL naming
+// another host, or one whose path resolves nowhere, is reported as a real
+// remote — the direction that keeps the durability rule armed rather than
+// silently disabling it.
+func isSelfRemoteURL(remoteURL, selfCommon string) bool {
+	if remoteURL == "" || selfCommon == "" {
 		return false
 	}
-	if strings.Contains(url, "://") {
-		if !strings.HasPrefix(url, "file://") {
-			return false
-		}
-		url = strings.TrimPrefix(url, "file://")
-	} else if strings.Contains(url, "@") || looksLikeSCPRemote(url) {
+	path, ok := localPathForRemoteURL(remoteURL)
+	if !ok {
 		return false
 	}
-	common := gitCommonDir(url)
+	common := gitCommonDir(path)
 	return common != "" && common == selfCommon
 }
 
-// looksLikeSCPRemote reports whether url is scp-style (host:path) rather than a
-// local path: a colon before the first slash.
-func looksLikeSCPRemote(url string) bool {
-	colon := strings.Index(url, ":")
+// localPathForRemoteURL maps a remote URL to the filesystem path it addresses on
+// this machine, reporting false when the URL addresses another host. The path is
+// not required to exist or to be a repository — the caller decides what it
+// resolves to.
+func localPathForRemoteURL(remoteURL string) (string, bool) {
+	if strings.Contains(remoteURL, "://") {
+		u, err := url.Parse(remoteURL)
+		if err != nil || !remoteHostIsSelf(u) || u.Path == "" {
+			return "", false
+		}
+		return u.Path, true
+	}
+	// scp-style user@host:path addresses another machine. A bare filesystem
+	// path does not, even when one of its components contains '@'.
+	if looksLikeSCPRemote(remoteURL) {
+		return "", false
+	}
+	return remoteURL, true
+}
+
+// remoteHostIsSelf reports whether a remote URL's host names this machine. An
+// empty host is this machine by definition (file:///path); host names are
+// case-insensitive; and url.URL.Hostname strips the port, the IPv6 brackets,
+// and any user@ prefix before the loopback test.
+func remoteHostIsSelf(u *url.URL) bool {
+	host := u.Hostname()
+	return host == "" || isLoopbackHost(strings.ToLower(host))
+}
+
+// looksLikeSCPRemote reports whether remoteURL is scp-style (host:path) rather
+// than a local path: a colon before the first slash.
+func looksLikeSCPRemote(remoteURL string) bool {
+	colon := strings.Index(remoteURL, ":")
 	if colon < 0 {
 		return false
 	}
-	slash := strings.Index(url, "/")
+	slash := strings.Index(remoteURL, "/")
 	return slash < 0 || colon < slash
 }
 

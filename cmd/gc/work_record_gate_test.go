@@ -1142,6 +1142,101 @@ func TestEvaluateWorkRecordCloseGateSelfRemoteOnlyIsNotSilent(t *testing.T) {
 	}
 }
 
+// newBareRepoAt initializes a git repository at dir, creating dir (and any
+// parent) first. Unlike newGateRepo it takes the path, so a test can put a
+// repository somewhere with a chosen name — an '@' in a path component is
+// indistinguishable from scp-style user@host to a naive classifier.
+func newBareRepoAt(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	runGit(t, dir, "init", "--initial-branch=main")
+	return dir
+}
+
+// TestIsSelfRemoteURL pins the self-remote classifier (gas-6tc) against the two
+// ways a same-disk remote used to escape it (gas-f64): a network-shaped URL
+// whose host is this machine, and a plain local path containing '@'.
+//
+// Direction matters. Misreading a self-remote as a publication remote is the
+// unsafe error — its fetched refs then read as delivery evidence and the
+// durability rule is silently disarmed. Misreading a real remote as self only
+// costs a blocked close, so the classifier claims "self" solely when the URL
+// resolves to a path that positively *is* this repository.
+func TestIsSelfRemoteURL(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+	selfCommon := gitCommonDir(repoDir)
+	if selfCommon == "" {
+		t.Fatalf("precondition: gitCommonDir(%s) must resolve", repoDir)
+	}
+
+	// A second, unrelated repository: same host, different repo.
+	otherDir := newBareRepoAt(t, filepath.Join(t.TempDir(), "other"))
+
+	// A repository whose path legitimately contains '@'.
+	atDir := newBareRepoAt(t, filepath.Join(t.TempDir(), "no@such", "path"))
+	atCommon := gitCommonDir(atDir)
+	if atCommon == "" {
+		t.Fatalf("precondition: gitCommonDir(%s) must resolve", atDir)
+	}
+
+	tests := []struct {
+		name       string
+		url        string
+		selfCommon string
+		want       bool
+	}{
+		{"plain local path to self", repoDir, selfCommon, true},
+		{"local path containing @ to self", atDir, atCommon, true},
+		{"file URL to self", "file://" + repoDir, selfCommon, true},
+		{"file URL with localhost host to self", "file://localhost" + repoDir, selfCommon, true},
+		{"ssh loopback by name to self", "ssh://localhost" + repoDir, selfCommon, true},
+		{"ssh loopback by IPv4 to self", "ssh://127.0.0.1" + repoDir, selfCommon, true},
+		{"ssh loopback by IPv6 to self", "ssh://[::1]" + repoDir, selfCommon, true},
+		{"ssh loopback with user to self", "ssh://git@localhost" + repoDir, selfCommon, true},
+		{"ssh loopback with port to self", "ssh://localhost:2222" + repoDir, selfCommon, true},
+		{"git protocol loopback to self", "git://127.0.0.1" + repoDir, selfCommon, true},
+		{"loopback host is case-insensitive", "ssh://LocalHost" + repoDir, selfCommon, true},
+
+		{"ssh loopback to a different repo", "ssh://localhost" + otherDir, selfCommon, false},
+		{"local path to a different repo", otherDir, selfCommon, false},
+		{"ssh to a real host", "ssh://github.com/gastownhall/gascity.git", selfCommon, false},
+		{"scp-style real remote", "git@github.com:gastownhall/gascity.git", selfCommon, false},
+		{"https real remote", "https://github.com/gastownhall/gascity.git", selfCommon, false},
+		{"local path that is not a repo", filepath.Join(t.TempDir(), "nope"), selfCommon, false},
+		{"empty url", "", selfCommon, false},
+		{"empty selfCommon", repoDir, "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSelfRemoteURL(tc.url, tc.selfCommon); got != tc.want {
+				t.Errorf("isSelfRemoteURL(%q, %q) = %v, want %v", tc.url, tc.selfCommon, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitPublicationRemotesExcludesSameDiskRemotes drives the same fix through
+// the caller that actually gates a close. gitPublicationRemotes only reads the
+// remote table, so a loopback URL can be registered without a listening sshd.
+func TestGitPublicationRemotesExcludesSameDiskRemotes(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+
+	runGit(t, repoDir, "remote", "add", "self-path", repoDir)
+	runGit(t, repoDir, "remote", "add", "self-file", "file://"+repoDir)
+	runGit(t, repoDir, "remote", "add", "self-ssh", "ssh://localhost"+repoDir)
+	runGit(t, repoDir, "remote", "add", "self-ip", "ssh://127.0.0.1"+repoDir)
+	runGit(t, repoDir, "remote", "add", "upstream", "https://github.com/gastownhall/gascity.git")
+
+	got, _ := gitPublicationRemotes(repoDir)
+	want := []string{"origin", "upstream"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("gitPublicationRemotes = %v, want %v (same-disk remotes must not confer durability)", got, want)
+	}
+}
+
 func TestWorkRecordEnforceEnabled(t *testing.T) {
 	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
 		t.Setenv(workRecordEnforceEnvVar, v)
