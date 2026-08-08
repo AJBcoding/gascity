@@ -1,8 +1,6 @@
 package main
 
 import (
-	"os"
-	"strconv"
 	"time"
 )
 
@@ -20,12 +18,7 @@ const (
 // doltLeakSettleWindow returns the settle window, overridable with
 // GC_TEST_DOLT_LEAK_SETTLE_MS. Zero restores the old single-scan behavior.
 func doltLeakSettleWindow() time.Duration {
-	if v := os.Getenv("GC_TEST_DOLT_LEAK_SETTLE_MS"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
-			return time.Duration(n) * time.Millisecond
-		}
-	}
-	return doltLeakSettleDefaultWindow
+	return leakSettleWindow("GC_TEST_DOLT_LEAK_SETTLE_MS", doltLeakSettleDefaultWindow)
 }
 
 // settleDoltLeaks re-scans for dolt processes that appeared during the test
@@ -46,30 +39,8 @@ func doltLeakSettleWindow() time.Duration {
 // false failure this fixes. Waiting the window out costs time only on runs
 // that were going to fail anyway.
 func settleDoltLeaks(scan func() (map[int]DoltProcInfo, error), initial map[int]DoltProcInfo, window, interval time.Duration) ([]DoltProcInfo, error) {
-	final, err := scan()
-	if err != nil {
-		return nil, err
-	}
-	leaked := diffDoltProcessSnapshots(initial, final)
-	if len(leaked) == 0 || window <= 0 {
-		return leaked, nil
-	}
 	if interval <= 0 {
 		interval = doltLeakSettleInterval
 	}
-
-	deadline := time.Now().Add(window)
-	for time.Now().Before(deadline) {
-		time.Sleep(interval)
-		final, err = scan()
-		if err != nil {
-			return nil, err
-		}
-		next := diffDoltProcessSnapshots(initial, final)
-		if len(next) == 0 {
-			return next, nil
-		}
-		leaked = next
-	}
-	return leaked, nil
+	return settleLeaks(scan, initial, window, interval)
 }

@@ -2525,8 +2525,32 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}
 }
 
+// namedSessionTestSocketName is the tmux socket gc starts a server on when a
+// test drives the named-session fixture below: gc derives it from the city name.
+const namedSessionTestSocketName = "test-city"
+
+// killNamedSessionTmuxServerAfterTest tears down the tmux server gc starts when
+// a test drives a named session. Without it the server outlives the test binary
+// — 22 of them accumulated on one box before the TestMain tmux leak guard
+// existed to notice (gas-iio, gas-1fb).
+//
+// Killing by socket name is safe here and only here: the cleanup runs while
+// TMUX_TMPDIR still points at this run's isolated socket root, so it cannot
+// reach the operator's default server. Once TestMain removes that root the
+// socket is an unlinked inode and a name-based kill fails, which is why the
+// TestMain guard reaps by PID instead.
+func killNamedSessionTmuxServerAfterTest(t *testing.T) {
+	t.Helper()
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(ctx, "tmux", "-L", namedSessionTestSocketName, "kill-server").Run()
+	})
+}
+
 func writeNamedSessionCityTOML(t *testing.T, dir string) {
 	t.Helper()
+	killNamedSessionTmuxServerAfterTest(t)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}

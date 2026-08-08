@@ -287,6 +287,9 @@ func TestMain(m *testing.M) {
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
 	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
+	// Wrapped outside the dolt guard but inside the socket-root cleanup, so the
+	// sockets this run created still exist when the tmux scan reads them.
+	testRunner = newTmuxLeakGuardedTestingM(testRunner, tmuxSocketRoot)
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}

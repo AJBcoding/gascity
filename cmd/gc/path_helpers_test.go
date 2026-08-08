@@ -329,17 +329,7 @@ func snapshotDoltProcessesForConfigRoot(enumerate func() ([]DoltProcInfo, error)
 }
 
 func diffDoltProcessSnapshots(initial, final map[int]DoltProcInfo) []DoltProcInfo {
-	leaked := make([]DoltProcInfo, 0, len(final))
-	for pid, proc := range final {
-		if _, ok := initial[pid]; ok {
-			continue
-		}
-		leaked = append(leaked, proc)
-	}
-	sort.Slice(leaked, func(i, j int) bool {
-		return leaked[i].PID < leaked[j].PID
-	})
-	return leaked
+	return diffProcessSnapshots(initial, final)
 }
 
 func writeDoltLeakReport(w io.Writer, leaked []DoltProcInfo) {
