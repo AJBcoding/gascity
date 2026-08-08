@@ -30,6 +30,29 @@ func bdReadyIncludeEphemeralArg(includeEphemeralReady bool) string {
 	return ""
 }
 
+// holdLabelMatchCondsJQ renders the jq boolean expression that tests whether
+// the label currently in scope (`.`) is one of the beadmeta.DispatchHoldLabels
+// values, e.g. `. == "hold:mayor" or . == "hold:external"`. Shared by every
+// jq-based hold filter so the label set is spelled exactly once.
+func holdLabelMatchCondsJQ() string {
+	conds := make([]string, len(beadmeta.DispatchHoldLabels))
+	for i, label := range beadmeta.DispatchHoldLabels {
+		conds[i] = `. == "` + label + `"`
+	}
+	return strings.Join(conds, " or ")
+}
+
+// heldLabelCountJQ counts how many beadmeta.DispatchHoldLabels values the FIRST
+// row of a work-query result carries. The in_progress serve gate reads it off
+// the candidate row it already holds, so the hold check costs no extra bd call.
+// `.[0].labels // []` absorbs both an absent row and bd's null-valued labels
+// field; a non-JSON payload makes jq fail and the gate falls back to 0, which is
+// the fail-open behavior TestInProgressTierServesUnparseableHeldCandidateFailOpen
+// pins.
+func heldLabelCountJQ() string {
+	return `[ (.[0].labels // [])[] | select(` + holdLabelMatchCondsJQ() + `) ] | length`
+}
+
 // jqMeta renders the jq expression that reads a bead-metadata key with an
 // empty-string default, e.g. (.metadata["gc.routed_to"] // ""). Shell/jq
 // builders use it so embedded key spellings stay anchored to the beadmeta
@@ -184,9 +207,85 @@ func standardAssignedInProgressWorkQueryScript(includeEphemeralReady bool) strin
 	return `for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$id" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("id", includeEphemeralReady) +
 		`done; `
+}
+
+// inProgressBlockedByEnrichmentScript hardens the in_progress "crash recovery"
+// work-query tier against re-serving a bead that cannot progress.
+//
+// `bd list --status in_progress` does no readiness computation: unlike
+// `bd ready` it emits neither blocked_by nor is_blocked. That makes the
+// defensive hook-side filter (filterUnreadyHookCandidates ->
+// isDepBlockedHookCandidate) a structural no-op for this tier, because an
+// absent blocked_by is correctly read as "not blocked". A step that is
+// in_progress + assigned but held by an open gate or an unclosed blocking
+// dependency is therefore re-served on every hook tick, forever.
+//
+// `bd ready` cannot be substituted here: it excludes in_progress by design,
+// so it would return nothing and defeat crash recovery entirely. Instead we
+// read the candidate's own dependency rows and attach the blocked_by array
+// the rest of the pipeline already knows how to interpret. When the candidate
+// is blocked we skip it and fall through to the ready-gated tier, so a session
+// holding one blocked step can still be served its other ready assigned work.
+//
+// Only ready-blocking dependency types are considered, matching
+// beads.IsReadyBlockingDependencyType; parent-child and tracks edges never
+// block readiness. Status interpretation is left to the shared Go filter:
+// any non-closed blocker counts.
+//
+// The same serve gate also skips a candidate parked on a canonical dispatch
+// hold (beadmeta.DispatchHoldLabels), read off the candidate row this tier
+// already holds — no extra bd call (gas-kg6). A held bead has no blocking
+// dependency, so the blocked_by gate alone let it through and the tier
+// re-served it on every tick; because the tier short-circuits with `exit 0`,
+// that also starved the ready tiers below it, and a worker that correctly
+// parked its bead could never reach its own ready queue. The hold dimension is
+// the same defect class as the dependency dimension above, so it shares the
+// same fall-through.
+//
+// Scope (ga-5736js): this is the WORK-SERVING decision only. The assignee-scoped
+// probes that answer "does a session still need to exist" —
+// ephemeralAssignedReadyProbeScript here and filterReadyByAssignee in
+// cmd/gc/dispatch_control_ready.go — stay hold-transparent by design so a held
+// assignment still keeps its owner visible to demand and recovery accounting.
+//
+// Enrichment is fail-open: a failed or unparseable `bd show` / `bd list`
+// degrades to the stock behavior of serving the candidate unchanged, never to
+// dropping it, so a malformed or log-prefixed bd stdout can never disable
+// crash recovery. The hold count fails open the same way.
+func inProgressBlockedByEnrichmentScript(shellVar string) string {
+	const blockingDepsJQ = `[.[0].dependencies[]? | ` +
+		`select(.dependency_type == "blocks" or .dependency_type == "waits-for" or ` +
+		`.dependency_type == "conditional-blocks") | {id, status}]`
+	const openBlockerCountJQ = `[.[] | select(((.status // "") | ascii_downcase) != "closed")] | length`
+
+	const enrichJQ = `map(. + {blocked_by: $bb})`
+
+	v := `$` + shellVar
+	// The enriched payload lands in a scratch var derived from shellVar so the
+	// candidate itself is never clobbered: if jq fails (non-JSON or
+	// log-prefixed `bd list` stdout) the original is served unchanged.
+	enrichedVar := shellVar + `_enriched`
+	e := `$` + enrichedVar
+	return `bid=$(printf "%s" "` + v + `" | jq -r ".[0].id // empty" 2>/dev/null); ` +
+		`bb="[]"; ` +
+		`[ -n "$bid" ] && bb=$(bd show "$bid" --json 2>/dev/null | ` +
+		`jq -c ` + shellquote.Quote(blockingDepsJQ) + ` 2>/dev/null); ` +
+		`[ -z "$bb" ] && bb="[]"; ` +
+		`nblocked=$(printf "%s" "$bb" | jq -r ` + shellquote.Quote(openBlockerCountJQ) + ` 2>/dev/null); ` +
+		`[ -z "$nblocked" ] && nblocked=0; ` +
+		`nheld=$(printf "%s" "` + v + `" | jq -r ` + shellquote.Quote(heldLabelCountJQ()) + ` 2>/dev/null); ` +
+		`[ -z "$nheld" ] && nheld=0; ` +
+		`if [ "$nblocked" = "0" ] && [ "$nheld" = "0" ]; then ` +
+		enrichedVar + `=$(printf "%s" "` + v + `" | jq -c --argjson bb "$bb" ` +
+		shellquote.Quote(enrichJQ) + ` 2>/dev/null); ` +
+		`[ -n "` + e + `" ] && [ "` + e + `" != "[]" ] && ` + shellVar + `="` + e + `"; ` +
+		`printf "%s" "` + v + `" && exit 0; ` +
+		`fi; `
 }
 
 func standardAssignedReadyWorkQueryScript(includeEphemeralReady bool) string {
@@ -210,7 +309,9 @@ func legacyControlAssignedInProgressWorkQueryScript(includeEphemeralReady bool) 
 		`for cand in "$id" "$legacy"; do ` +
 		`[ -z "$cand" ] && continue; ` +
 		`r=$(bd list --status in_progress --assignee="$cand" --json --limit=1 2>/dev/null); ` +
-		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; ` +
+		`if [ -n "$r" ] && [ "$r" != "[]" ]; then ` +
+		inProgressBlockedByEnrichmentScript("r") +
+		`fi; ` +
 		ephemeralAssignedInProgressProbeScript("cand", includeEphemeralReady) +
 		`done; ` +
 		`done; `

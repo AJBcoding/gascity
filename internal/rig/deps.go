@@ -57,9 +57,13 @@ type Deps struct {
 	// collectRigRoutes + writeAllRoutes). Required — it runs after the config
 	// write, so a nil here would panic past the topology rollback.
 	WriteRoutes func(cityPath string, cfg *config.City) error
-	// ProbeBranch returns the rig's git default branch, or "" when unknown.
+	// ProbeBranch returns the rig's git default branch and the remote whose
+	// HEAD supplied it. An empty remote with a non-empty branch means the
+	// branch was inferred from the checked-out branch rather than read from a
+	// remote HEAD, which the banner reports so the operator can catch a rig
+	// registered against a feature branch. Both empty = unknown.
 	// nil = skip the probe.
-	ProbeBranch func(rigPath string) string
+	ProbeBranch func(rigPath string) (branch, remote string)
 	// CloneGitURL populates staging dir dstDir from gitURL with the hardened
 	// clone (C3/G15). nil = the caller does not support --git-url (the CLI local
 	// path, or config-append-only), so the clone step is skipped and the flow

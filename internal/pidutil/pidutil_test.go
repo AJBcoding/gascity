@@ -49,9 +49,6 @@ func TestPSReportsZombieReturnsWhenPSHangs(t *testing.T) {
 }
 
 func TestStartTimeStableForLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time reads /proc/<pid>/stat on linux")
-	}
 	first, err := StartTime(os.Getpid())
 	if err != nil {
 		t.Fatalf("StartTime(%d): %v", os.Getpid(), err)
@@ -79,9 +76,6 @@ func TestStartTimeRejectsInvalidPID(t *testing.T) {
 // one (the recycled-PID case) reports dead even though the PID is live, and an
 // empty start time falls back to plain liveness.
 func TestAliveWithStartTimeDisambiguatesRecycledPID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("start-time identity uses /proc on linux")
-	}
 	self := os.Getpid()
 	st, err := StartTime(self)
 	if err != nil {
@@ -114,10 +108,6 @@ func TestAliveWithStartTimeDeadPID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if AliveWithCmdline(os.Getpid(), func(_ []string) bool {
 		return false
 	}) {
@@ -126,10 +116,6 @@ func TestAliveWithCmdlineRejectsUnrelatedLivePID(t *testing.T) {
 }
 
 func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	if !AliveWithCmdline(os.Getpid(), func(argv []string) bool {
 		return len(argv) > 0 && strings.Contains(filepath.Base(argv[0]), "pidutil")
 	}) {
@@ -138,10 +124,6 @@ func TestAliveWithCmdlineAcceptsMatchingLivePID(t *testing.T) {
 }
 
 func TestCmdlineReturnsOwnArgv(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("cmdline detection uses /proc on linux")
-	}
-
 	argv, err := Cmdline(os.Getpid())
 	if err != nil {
 		t.Fatalf("Cmdline(%d): %v", os.Getpid(), err)

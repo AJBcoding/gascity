@@ -3296,7 +3296,7 @@ gc rig
 | [gc rig add](#gc-rig-add) | Register a project as a rig |
 | [gc rig list](#gc-rig-list) | List registered rigs |
 | [gc rig remove](#gc-rig-remove) | Remove a rig from the city |
-| [gc rig restart](#gc-rig-restart) | Restart all agents in a rig |
+| [gc rig restart](#gc-rig-restart) | Restart all agents in a rig (kills running sessions) |
 | [gc rig resume](#gc-rig-resume) | Resume a suspended rig |
 | [gc rig set-endpoint](#gc-rig-set-endpoint) | Set the canonical endpoint ownership for a rig |
 | [gc rig status](#gc-rig-status) | Show rig status and agent running state |
@@ -3400,6 +3400,11 @@ Kill all agent sessions belonging to a rig.
 
 The reconciler will restart the agents on its next tick. This is a
 quick way to force-refresh all agents working on a particular project.
+
+WARNING: this kills every running agent session in the rig, including
+worker sessions that are mid-task; their uncommitted and unpushed
+in-flight work is destroyed. To start a single stopped session without
+touching its siblings, use "gc session wake &lt;session&gt;" instead.
 
 ```
 gc rig restart [name]

@@ -217,6 +217,19 @@ type SessionSetupContext struct {
 	CityName  string // workspace name
 	WorkDir   string // agent working directory
 	ConfigDir string // source directory where agent config was defined
+	// DefaultBranch is the rig's mainline branch, resolved by
+	// defaultBranchForRig: the rig's recorded default_branch when set,
+	// otherwise a runtime probe that ends at git.DefaultBranch's "main"
+	// backstop. So on the session paths it is a concrete branch name, not
+	// a maybe-empty one; it is empty only where no rig context exists to
+	// resolve from (see expandScriptTemplate's pack-command context).
+	//
+	// pre_start is where packs create agent worktrees, and a worktree's
+	// base ref is otherwise invisible to them — a script can only probe
+	// origin/HEAD, which ignores a rig deliberately pinned to a
+	// non-default branch. Exposing it here lets the pack pass the base
+	// explicitly instead of guessing (gas-e6r).
+	DefaultBranch string
 }
 
 // expandSessionSetup expands Go text/template strings in session_setup commands.

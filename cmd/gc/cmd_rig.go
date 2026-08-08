@@ -303,7 +303,7 @@ func doRigAddWithResult(fs fsys.FS, cityPath, rigPath string, includes []string,
 		WriteRoutes: func(cp string, c *config.City) error {
 			return writeAllRigRoutes(collectRigRoutes(cp, c))
 		},
-		ProbeBranch: func(p string) string { return git.New(p).ProbeDefaultBranch() },
+		ProbeBranch: func(p string) (string, string) { return git.New(p).ProbeDefaultBranchFrom() },
 		NormalizeScopes: func(cp string, c *config.City) error {
 			return normalizeCanonicalBdScopeFiles(cp, c, io.Discard)
 		},

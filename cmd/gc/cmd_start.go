@@ -1178,7 +1178,7 @@ func stageHookFiles(copyFiles []runtime.CopyEntry, cityPath, workDir string, hoo
 			if _, err := os.Stat(abs); err == nil {
 				copyFiles = append(copyFiles, runtime.CopyEntry{
 					Src: abs, RelDst: path.Join(relWorkDir, rel),
-					Probed: true, ContentHash: runtime.HashPathContent(abs),
+					Probed: true, ContentHash: runtime.HashHookSettingsContent(abs, rel),
 				})
 			}
 		}
@@ -1313,6 +1313,9 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 		RigRoot:   ctx.RigRoot,
 		CityRoot:  cityPath,
 		CityName:  cityName,
+		// Probe the rig root rather than the work dir: callers fill WorkDir
+		// in after construction, so it is not available here yet.
+		DefaultBranch: defaultBranchForRig(ctx.Rig, rigs, ctx.RigRoot),
 	}
 }
 

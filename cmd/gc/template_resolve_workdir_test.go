@@ -265,6 +265,103 @@ func TestResolveTemplatePreStartResolvesRigRootForCityLevelRigScopedAgent(t *tes
 	}
 }
 
+// TestResolveTemplatePreStartExposesRigDefaultBranch guards gas-e6r: a rig's
+// configured default_branch must reach pre_start templates. Agent worktrees
+// are created by a pack pre_start script, and that script has no other way to
+// learn the rig's mainline — so without {{.DefaultBranch}} in the session-setup
+// context every worktree is cut from whatever origin/HEAD happens to point at.
+// A rig pinned to a non-default integration branch then gets worktrees based
+// on main, and agents debug a tree that does not match the deployed binary.
+func TestResolveTemplatePreStartExposesRigDefaultBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	rigRoot := filepath.Join(cityPath, "rigs", "gascity")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "gascity", Path: rigRoot, DefaultBranch: "feat/mysql-first-class-backend"}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{
+		Name:     "worker",
+		Scope:    "rig",
+		WorkDir:  ".gc/worktrees/worker",
+		PreStart: []string{"worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --base {{.DefaultBranch}}"},
+	}
+	tp, err := resolveTemplate(params, agent, "gascity/worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	if len(tp.Hints.PreStart) != 1 {
+		t.Fatalf("PreStart = %v, want one expanded command", tp.Hints.PreStart)
+	}
+	want := "worktree-setup.sh " + rigRoot + " " + filepath.Join(cityPath, ".gc", "worktrees", "worker") +
+		" worker --base feat/mysql-first-class-backend"
+	if tp.Hints.PreStart[0] != want {
+		t.Fatalf("PreStart[0] = %q, want %q", tp.Hints.PreStart[0], want)
+	}
+}
+
+// TestResolveTemplatePreStartDefaultBranchFallsBackToProbe pins the
+// no-configured-branch edge. Two properties matter to callers:
+//
+//   - The template still expands. A missing struct field makes tmpl.Execute
+//     error, and expandSessionSetup's graceful fallback then keeps the RAW
+//     command — handing the literal "{{.DefaultBranch}}" to the shell.
+//   - The value falls through to defaultBranchFor's probe, which ends at the
+//     git.DefaultBranch "main" backstop. So a pre_start script always receives
+//     a concrete branch name, never an empty argument it has to special-case.
+func TestResolveTemplatePreStartDefaultBranchFallsBackToProbe(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+	rigRoot := filepath.Join(cityPath, "rigs", "nobranch")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		rigs:       []config.Rig{{Name: "nobranch", Path: rigRoot}},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	agent := &config.Agent{
+		Name:     "worker",
+		Scope:    "rig",
+		WorkDir:  ".gc/worktrees/worker",
+		PreStart: []string{"setup.sh --base {{.DefaultBranch}}"},
+	}
+	tp, err := resolveTemplate(params, agent, "nobranch/worker", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+	if len(tp.Hints.PreStart) != 1 {
+		t.Fatalf("PreStart = %v, want one expanded command", tp.Hints.PreStart)
+	}
+	if got := tp.Hints.PreStart[0]; got != "setup.sh --base main" {
+		t.Fatalf("PreStart[0] = %q, want %q (expanded to the probe fallback, not raw)", got, "setup.sh --base main")
+	}
+}
+
 func TestResolveTemplateRigScopedEnvCarriesRigRoots(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")
