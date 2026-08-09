@@ -283,6 +283,29 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, req NudgeRequest) (result Nud
 	}
 }
 
+// SendKeys delivers bare key events to the live runtime session.
+//
+// It exists so a worker parked on a modal widget stays reachable: Message and
+// Nudge type literal text and then press Enter, which a select menu consumes
+// and discards. Like Message, it is excluded from invocation telemetry.
+func (h *RuntimeHandle) SendKeys(ctx context.Context, req KeysRequest) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationSendKeys)
+	defer func() { event.finish(err) }()
+
+	if err = validateKeys(req.Keys); err != nil {
+		return err
+	}
+	// Providers treat SendKeys as best-effort and return nil for a session that
+	// is gone, so the liveness check has to happen here or a dead target would
+	// report a delivery that never happened.
+	if !h.provider.IsRunning(h.sessionName) {
+		err = fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
+		return err
+	}
+	err = h.provider.SendKeys(h.sessionName, req.Keys...)
+	return err
+}
+
 // Transcript reports unavailable because runtime-only handles have no transcript adapter.
 func (h *RuntimeHandle) Transcript(context.Context, TranscriptRequest) (*TranscriptResult, error) {
 	return nil, ErrHistoryUnavailable

@@ -979,6 +979,39 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 	})
 }
 
+// SendKeys delivers bare key events to a session's live runtime.
+//
+// It types no text and appends no Enter, which is what makes it the only way to
+// reach a session whose runtime has a modal widget focused: a select menu
+// consumes literal text and reads Enter as its own activate key, so a submitted
+// message is destroyed rather than delivered. Callers choose the keys; this
+// method neither interprets them nor inspects what the runtime is displaying.
+//
+// Providers implement SendKeys best-effort and report success for a session
+// that is gone, so an inactive target is rejected here rather than reported as
+// a delivery.
+func (m *Manager) SendKeys(id string, keys ...string) error {
+	return withSessionMutationLock(id, func() error {
+		_, sessName, err := m.sessionBead(id)
+		if err != nil {
+			return err
+		}
+		if !m.sp.IsRunning(sessName) {
+			return fmt.Errorf("%w: %s", ErrSessionInactive, id)
+		}
+		if err := m.sp.SendKeys(sessName, keys...); err != nil {
+			if errors.Is(err, runtime.ErrInteractionUnsupported) {
+				return ErrInteractionUnsupported
+			}
+			if errors.Is(err, runtime.ErrSessionNotFound) {
+				return fmt.Errorf("%w: %s", ErrSessionInactive, id)
+			}
+			return fmt.Errorf("sending keys: %w", err)
+		}
+		return nil
+	})
+}
+
 // TranscriptPath resolves the best available session transcript file.
 // It prefers session-key-specific lookup and falls back to workdir-based
 // discovery for providers that do not expose a stable session key.

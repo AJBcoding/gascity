@@ -45,7 +45,7 @@ continuity.`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
 			if len(args) == 0 {
-				fmt.Fprintln(stderr, "gc session: missing subcommand (new, list, attach, submit, suspend, pin, unpin, reset, close, rename, prune, peek, kill, nudge, logs, wake, wait)") //nolint:errcheck // best-effort stderr
+				fmt.Fprintln(stderr, "gc session: missing subcommand (new, list, attach, submit, key, suspend, pin, unpin, reset, close, rename, prune, peek, kill, nudge, logs, wake, wait)") //nolint:errcheck // best-effort stderr
 			} else {
 				fmt.Fprintf(stderr, "gc session: unknown subcommand %q\n", args[0]) //nolint:errcheck // best-effort stderr
 			}
@@ -57,6 +57,7 @@ continuity.`,
 		newSessionListCmd(stdout, stderr),
 		newSessionAttachCmd(stdout, stderr),
 		newSessionSubmitCmd(stdout, stderr),
+		newSessionKeyCmd(stdout, stderr),
 		newSessionSuspendCmd(stdout, stderr),
 		newSessionPinCmd(stdout, stderr),
 		newSessionUnpinCmd(stdout, stderr),
@@ -104,6 +105,126 @@ according to the selected semantic intent.`,
 	cmd.Flags().StringVar(&intent, "intent", string(session.SubmitIntentDefault), "submit intent: default, follow_up, or interrupt_now")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
 	return cmd
+}
+
+func newSessionKeyCmd(stdout, stderr io.Writer) *cobra.Command {
+	var jsonOutput bool
+	cmd := &cobra.Command{
+		Use:   "key <id-or-alias> <key...>",
+		Short: "Send bare key events to a session",
+		Long: `Send bare key events to a session's runtime, typing no text and
+appending no Enter.
+
+This is how a session blocked on a modal widget — a question menu, a
+selection list, a confirmation dialog — gets answered. Those widgets
+consume literal text and read Enter as their own activate key, so
+"gc session submit" cannot deliver a message into one: the text is
+discarded and the Enter lands on whatever row has focus.
+
+Keys are passed through to the runtime verbatim. For tmux-backed
+sessions they are tmux key names ("Enter", "Escape", "Down", "Up",
+"Space", "Tab", "C-c"); an unknown name is delivered as literal text.
+Use "gc session peek" to read the widget before and after.`,
+		Example: `  gc session peek furiosa
+  gc session key furiosa Down Space Enter
+  gc session key furiosa Escape`,
+		Args: cobra.MinimumNArgs(2),
+		RunE: func(_ *cobra.Command, args []string) error {
+			if cmdSessionKey(args, jsonOutput, stdout, stderr) != 0 {
+				return errExit
+			}
+			return nil
+		},
+		ValidArgsFunction: completeSessionIDs,
+	}
+	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
+	return cmd
+}
+
+// parseSessionKeys validates the key arguments without interpreting them. A
+// blank key would reach the provider as a no-op that still reports success,
+// which is the false-delivery shape this command exists to avoid.
+func parseSessionKeys(args []string) ([]string, error) {
+	if len(args) == 0 {
+		return nil, fmt.Errorf("at least one key is required")
+	}
+	keys := make([]string, 0, len(args))
+	for i, arg := range args {
+		if strings.TrimSpace(arg) == "" {
+			return nil, fmt.Errorf("key %d is blank", i+1)
+		}
+		keys = append(keys, arg)
+	}
+	return keys, nil
+}
+
+type sessionKeyJSON struct {
+	SchemaVersion string   `json:"schema_version"`
+	OK            bool     `json:"ok"`
+	Target        string   `json:"target"`
+	Keys          []string `json:"keys"`
+}
+
+func cmdSessionKey(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
+	target := args[0]
+	keys, err := parseSessionKeys(args[1:])
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session key: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session key: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cfg, err := loadCityConfig(cityPath, configWarnWriter(jsonOutput, stderr))
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session key: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	store, code := openCityStore(stderr, "gc session key")
+	if store == nil {
+		return code
+	}
+	// Session-ID resolution and the session worker handle are both
+	// session-class store consumers, so route the flow through the session
+	// coordination-class store for relocation-safety (as gc session submit does).
+	sessStore := cliSessionStore(store, cfg, cityPath)
+
+	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session key: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	sp, err := newSessionProvider()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session key: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session key: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if err := handle.SendKeys(context.Background(), worker.KeysRequest{Keys: keys}); err != nil {
+		fmt.Fprintf(stderr, "gc session key: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	return emitSessionKeyResult(stdout, stderr, target, keys, jsonOutput)
+}
+
+func emitSessionKeyResult(stdout, stderr io.Writer, target string, keys []string, jsonOutput bool) int {
+	if jsonOutput {
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc session key", sessionKeyJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			Target:        target,
+			Keys:          keys,
+		})
+	}
+	fmt.Fprintf(stdout, "Sent %s to %s\n", strings.Join(keys, " "), target) //nolint:errcheck // best-effort stdout
+	return 0
 }
 
 // newSessionNewCmd creates the "gc session new <template>" command.

@@ -30,6 +30,7 @@ const (
 	workerOperationMessage       workerOperation = "message"
 	workerOperationInterrupt     workerOperation = "interrupt"
 	workerOperationNudge         workerOperation = "nudge"
+	workerOperationSendKeys      workerOperation = "send_keys"
 	workerOperationHistory       workerOperation = "history"
 )
 

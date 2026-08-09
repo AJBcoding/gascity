@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/gastownhall/gascity/internal/events"
@@ -47,6 +49,7 @@ type MessagingHandle interface {
 	Message(context.Context, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
 	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
+	SendKeys(context.Context, KeysRequest) error
 }
 
 // HistoryHandle exposes normalized transcript history reads.
@@ -145,6 +148,21 @@ type MessageResult struct {
 	Queued bool `json:"queued"`
 }
 
+// KeysRequest delivers bare key events to a live worker session.
+//
+// Unlike [MessageRequest], no text is typed and no Enter is appended: each key
+// is delivered as its own key event. It is the only delivery shape that can
+// reach a worker whose runtime has a modal widget focused — a select menu
+// consumes literal text and interprets Enter as its own activate key, so a
+// message submitted into one is destroyed rather than delivered.
+//
+// Keys are provider key names (for tmux: "Enter", "Escape", "Down", "Space",
+// "C-c", …) and are passed through verbatim; the boundary does not interpret
+// them beyond rejecting blanks.
+type KeysRequest struct {
+	Keys []string `json:"keys"`
+}
+
 // CreateMode controls how a worker session should be materialized.
 type CreateMode string
 
@@ -198,6 +216,21 @@ func normalizeNudgeWakePolicy(policy NudgeWakePolicy) NudgeWakePolicy {
 		return policy
 	}
 	return NudgeWakeIfNeeded
+}
+
+// validateKeys rejects a key request that would reach the provider as a no-op.
+// Providers deliver keys best-effort, so an empty or blank key would be
+// reported as a successful delivery that never happened.
+func validateKeys(keys []string) error {
+	if len(keys) == 0 {
+		return fmt.Errorf("at least one key is required")
+	}
+	for i, key := range keys {
+		if strings.TrimSpace(key) == "" {
+			return fmt.Errorf("key %d is blank", i+1)
+		}
+	}
+	return nil
 }
 
 // HistoryRequest scopes transcript loading for a worker.
