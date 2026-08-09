@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/doltorphan"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/testutil"
@@ -70,6 +71,33 @@ func clearInheritedBeadsEnv(t *testing.T) {
 			continue
 		}
 		t.Setenv(key, "")
+	}
+}
+
+// useMemSessionProviderStore points the session-provider snapshot read at an
+// in-memory store for the duration of the test.
+//
+// Tests that materialize a named session against a bare t.TempDir() city pass
+// their own store for the assertions, but newSessionProviderForCity does not
+// use it: loadProviderSessionSnapshot opens its own city store for cityPath.
+// A bare temp dir resolves to the bd store, and building that store's runtime
+// env health-checks the managed dolt provider. The health check fails, because
+// an empty temp city has no beads metadata, so auto-recovery runs
+// gc-beads-bd.sh recover, which starts a detached `nohup dolt sql-server`
+// rooted in the temp dir. Nothing stops it: the test returns, t.TempDir() is
+// deleted, and the server survives on a deleted data dir until TestMain's
+// guard reports and kills it — failing the package even when every test
+// passed (gas-yhx).
+//
+// Stubbing the seam keeps these tests off the bd path entirely. The underlying
+// production side effect — provider construction triggering managed-dolt
+// recovery — is tracked separately in gas-0v3m.
+func useMemSessionProviderStore(t *testing.T) {
+	t.Helper()
+	prev := openSessionProviderStore
+	t.Cleanup(func() { openSessionProviderStore = prev })
+	openSessionProviderStore = func(string) (beads.Store, error) {
+		return beads.NewMemStore(), nil
 	}
 }
 

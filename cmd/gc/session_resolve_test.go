@@ -519,6 +519,7 @@ func TestResolveSessionIDWithConfig_ReservedNamedTargetConflictsWithLiveAlias(t 
 }
 
 func TestResolveSessionIDMaterializingNamed_QualifiedAliasBasenameDoesNotStealNamedTarget(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -586,6 +587,7 @@ func TestResolveSessionIDAllowClosedWithConfig_ReservedNamedTargetIgnoresClosedH
 }
 
 func TestResolveSessionIDMaterializingNamed_MaterializesConfiguredNamedSession(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -617,6 +619,7 @@ func TestResolveSessionIDMaterializingNamed_MaterializesConfiguredNamedSession(t
 }
 
 func TestResolveSessionIDMaterializingNamedIgnoresAgentTmuxAlias(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -841,6 +844,7 @@ func TestResolveConfiguredNamedSessionID_AdoptsCanonicalRuntimeSessionNameBeadWi
 }
 
 func TestResolveSessionIDMaterializingNamed_DoesNotAdoptOrdinaryPoolSessionForSameTemplate(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -959,6 +963,7 @@ func TestResolveSessionIDMaterializingNamed_RuntimeSessionNameWrongTemplateConfl
 }
 
 func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSession(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -1010,6 +1015,7 @@ func TestResolveSessionIDMaterializingNamed_RecreatesClosedConfiguredNamedSessio
 
 func TestResolveSessionIDMaterializingNamed_UsesQualifiedNamedTarget(t *testing.T) {
 	t.Setenv("GC_SESSION", "fake")
+	useMemSessionProviderStore(t)
 
 	store := beads.NewMemStore()
 	cfg := &config.City{
@@ -1112,6 +1118,7 @@ func TestResolveSessionIDMaterializingNamed_PrefersReopenableCanonicalClosedBead
 }
 
 func TestResolveSessionIDMaterializingNamed_RejectsTemplatePrefixOnSessionSurface(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()

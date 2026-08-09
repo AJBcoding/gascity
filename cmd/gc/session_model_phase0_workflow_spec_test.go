@@ -83,6 +83,7 @@ func TestPhase0WorkflowRouting_TemplateAssigneeRejected(t *testing.T) {
 }
 
 func TestPhase0WorkflowRouting_DirectNamedSessionAssigneeMaterializesToConcreteBead(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	cityPath := t.TempDir()

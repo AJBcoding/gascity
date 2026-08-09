@@ -4953,6 +4953,7 @@ func TestSlingFormulaRepoDirUsesCanonicalRigRoot(t *testing.T) {
 }
 
 func TestCLIDirectSessionResolverMaterializesNamedSessionAliasShadow(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -4987,6 +4988,7 @@ func TestCLIDirectSessionResolverMaterializesNamedSessionAliasShadow(t *testing.
 }
 
 func TestResolveGraphDirectSessionBindingMaterializesNamedSessionAliasShadow(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
