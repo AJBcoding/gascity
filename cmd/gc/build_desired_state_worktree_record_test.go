@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -33,6 +34,82 @@ func TestPoolTriggerWorkDirNonPackUsesConfiguredBase(t *testing.T) {
 	})
 	if got != want {
 		t.Fatalf("ordinary non-pack work dir = %q, want configured base %q", got, want)
+	}
+}
+
+// TestPoolTriggerWorkDirDoesNotCreateDirectory pins the invariant that computing
+// a trigger-binding work_dir is a pure metadata question. bindPoolSessionTriggerBead
+// and poolTriggerMetadata both reach this with realizePoolDesiredSessions'
+// cfgAgent.QualifiedName() — the agent's TEMPLATE identity, not the slot the
+// session actually runs in — so materializing here mints a directory nobody ever
+// runs in. That husk is not a linked worktree and has no .git, so
+// `git rev-parse --show-toplevel` inside it walks up and answers with the
+// operator's CITY checkout, aiming any later salvage or git-write path that
+// trusts the bound metadata.work_dir at the operator's own repo (gas-m7h).
+func TestPoolTriggerWorkDirDoesNotCreateDirectory(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "fixture"},
+		Agents: []config.Agent{{
+			Name:              "worker",
+			StartCommand:      "true",
+			WorkDir:           ".gc/workspaces/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	bp := newAgentBuildParams("fixture", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), &bytes.Buffer{})
+	want := filepath.Join(bp.cityPath, ".gc", "workspaces", "worker")
+
+	got := poolTriggerWorkDir(bp, &cfg.Agents[0], "worker", SessionRequest{
+		WorkBeadID:    "ga-123",
+		WorkBeadTitle: "ordinary repository work",
+	})
+	if got != want {
+		t.Fatalf("work dir = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Fatalf("poolTriggerWorkDir materialized %q on disk (stat err = %v); "+
+			"binding metadata must not create directories", want, err)
+	}
+}
+
+// TestPoolTriggerWorkDirRigScopedDoesNotCreateDirectory is the same invariant on
+// the shape the fleet audit actually found: a rig-scoped agent whose work_dir
+// carries the pack template `.gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}`
+// (packs/gastown/agents/polecat/agent.toml). Resolved under the template
+// identity, {{.AgentBase}} expands to the generic agent base rather than a slot,
+// which is precisely the husk path the audit swept 26 of.
+func TestPoolTriggerWorkDirRigScopedDoesNotCreateDirectory(t *testing.T) {
+	cityDir := t.TempDir()
+	rigDir := filepath.Join(cityDir, "myrig")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(rig): %v", err)
+	}
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "fixture"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			StartCommand:      "true",
+			Scope:             "rig",
+			Dir:               "myrig",
+			WorkDir:           ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(1),
+		}},
+		Rigs: []config.Rig{{Name: "myrig", Path: rigDir}},
+	}
+	bp := newAgentBuildParams("fixture", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), beads.NewMemStore(), &bytes.Buffer{})
+	want := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecats", "polecat")
+
+	got := poolTriggerWorkDir(bp, &cfg.Agents[0], "myrig/polecat", SessionRequest{
+		WorkBeadID: "gas-1",
+	})
+	if got != want {
+		t.Fatalf("rig-scoped work dir = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Fatalf("poolTriggerWorkDir materialized the generic agent work_dir %q "+
+			"(stat err = %v); a husk here git-walks up to the operator's city repo", want, err)
 	}
 }
 
