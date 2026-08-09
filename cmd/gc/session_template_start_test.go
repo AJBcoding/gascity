@@ -12,6 +12,7 @@ import (
 )
 
 func TestEnsureSessionForTemplate_CreatesFreshSessionForTemplateFallback(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	store := beads.NewMemStore()
@@ -113,6 +114,7 @@ func TestEnsureSessionForTemplate_ReopensClosedNamedSessionWithCleanMetadata(t *
 }
 
 func TestEnsureSessionForTemplate_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	cityPath := t.TempDir()
@@ -183,6 +185,7 @@ func TestEnsureSessionForTemplate_PoolTemplateWithoutAliasUsesGeneratedWorkDirId
 }
 
 func TestEnsureSessionForTemplate_RebrandedSingletonKeepsTemplateWorkDirIdentity(t *testing.T) {
+	useMemSessionProviderStore(t)
 	t.Setenv("GC_SESSION", "fake")
 
 	cityPath := t.TempDir()
