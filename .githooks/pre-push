@@ -78,6 +78,46 @@ EOF
   exit 1
 fi
 
+# Disk preflight (gas-wnq / gas-9nx): the fan-out below compiles multi-GiB test
+# binaries per job, so it is one of the largest disk consumers on the host. When
+# it hits ENOSPC partway through, it does not fail as "out of disk" — it fails as
+# an inscrutable build or link error, or the agent running it parks at a prompt
+# it cannot get past. That is the shape of the original incident: a polecat
+# committed its fix, could not push, and from outside was indistinguishable from
+# a hung session for an hour while holding a pool slot.
+#
+# Refuse up front with the actual number instead. Fails open on a probe that
+# cannot answer, matching the session-spawn preflight in internal/session: a
+# check that cannot measure the disk must never be why a push stops working.
+#
+# The floor is evidence-backed rather than round: the incident host had 6.9 GiB
+# free and that was NOT enough. Override with GC_PREPUSH_MIN_FREE_GIB; 0 disables.
+min_free_gib="${GC_PREPUSH_MIN_FREE_GIB:-10}"
+if [ "$min_free_gib" != "0" ]; then
+  # -P for POSIX single-line output, -k for KiB units: portable across the
+  # macOS and Linux hosts this repo builds on. The `|| true` is load-bearing:
+  # this script runs under `set -euo pipefail`, so without it a df that cannot
+  # stat the worktree aborts the hook and REFUSES the push — the exact opposite
+  # of the fail-open contract documented above.
+  free_kib="$(df -Pk "$worktree" 2>/dev/null | awk 'NR==2 {print $4}' || true)"
+  if [ -n "$free_kib" ] && [ "$free_kib" -eq "$free_kib" ] 2>/dev/null; then
+    min_free_kib=$((min_free_gib * 1024 * 1024))
+    if [ "$free_kib" -lt "$min_free_kib" ]; then
+      {
+        echo "pre-push: REFUSING to run the test gate: not enough free disk."
+        echo "pre-push:   $((free_kib / 1024 / 1024)) GiB free on $worktree, floor ${min_free_gib} GiB."
+        echo "pre-push: the sharded suite compiles multi-GiB test binaries per job; starting it"
+        echo "pre-push: here would fail partway through as a build error, not as 'disk full' (gas-wnq)."
+        echo "pre-push: free space, then retry. To lower the floor: GC_PREPUSH_MIN_FREE_GIB=<n> git push"
+        echo "pre-push: (0 disables). To skip the gate entirely: git push --no-verify"
+      } >&2
+      exit 1
+    fi
+  else
+    echo "pre-push: disk pre-flight could not read df for $worktree (fail-open); continuing" >&2
+  fi
+fi
+
 # Verdict header (gas-4pz): name the tree the suite actually tests so a
 # misattributed verdict is visible in the output instead of invisible.
 echo "pre-push: testing ${head_name}@${head_short} ($worktree) for push of:"
