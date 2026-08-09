@@ -7,9 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -713,16 +715,89 @@ type WorkQueryRunner func(command, dir string) (string, error)
 // per-rig `bd ready`/`gc ready` paths are optimized.
 var hookWorkQueryTimeout = 60 * time.Second
 
-// shellWorkQueryWithEnv runs a work query command via sh -c and returns
-// stdout. If env is non-nil it is used as the subprocess environment
-// (including any rig-scoped BEADS_DIR / GC_RIG_ROOT overrides); otherwise
-// the child inherits the parent process environment. Times out after a
-// short bounded interval so startup hooks cannot strand sessions behind a
-// wedged data-plane command.
+// workQueryPipefailPrelude makes a failing stage of a piped work query
+// propagate. A shell pipeline reports the status of its LAST stage, so without
+// it a piped work_query — the natural shape, e.g. `bd ready --json | jq ...` —
+// masks a dying bd completely: bd exits 137, the filter exits 0 with empty
+// stdout, and the hook reads an empty candidate list as genuine no-work and
+// stands a live agent down mid-incident (gas-znj, the last open door onto the
+// gas-zaa fail-open). The newline separator keeps a work_query whose first line
+// is a comment intact.
+//
+// It applies to the command gc runs directly. Shell options do not cross an
+// exec, so pipelines nested inside a command that itself invokes `sh -c` — the
+// shape of the built-in probes in internal/config/workquery.go — are unaffected,
+// which is also why this change cannot regress them.
+//
+// Caveat: a stage that exits non-zero because a later stage closed the pipe
+// early (`... | head -1` producing SIGPIPE/141) now fails the query too. A
+// work_query that wants that shape should bound its output in the producer.
+const workQueryPipefailPrelude = "set -o pipefail\n"
+
+// workQueryShellCandidates are the shells probed, in order, for `set -o
+// pipefail` support. sh is first so the common case costs one probe and keeps
+// the historical interpreter; bash and zsh cover hosts whose /bin/sh is a plain
+// dash, which not only rejects pipefail but — `set` being a special builtin —
+// exits on it, so an unconditional prelude would kill every work query there.
+var workQueryShellCandidates = []string{"sh", "bash", "zsh"}
+
+// workQueryShellProbeTimeout bounds one `set -o pipefail` probe so a wedged
+// shell cannot stall the hook before its own work-query budget starts.
+const workQueryShellProbeTimeout = 5 * time.Second
+
+// workQueryShell resolves the pipefail-capable shell once per process, and warns
+// when the host has none — the work query then keeps running unprotected, and an
+// operator debugging a silent stand-down needs that stated rather than inferred.
+var workQueryShell = sync.OnceValue(func() string {
+	shell := resolveWorkQueryShellFrom(workQueryShellCandidates)
+	if shell == "" {
+		slog.Warn("work_query_pipefail_unavailable",
+			"candidates", strings.Join(workQueryShellCandidates, ","),
+			"impact", "a piped work_query whose producer dies can read as no work")
+	}
+	return shell
+})
+
+// resolveWorkQueryShellFrom returns the resolved path of the first candidate on
+// PATH that accepts `set -o pipefail`, or "" when no candidate does.
+func resolveWorkQueryShellFrom(candidates []string) string {
+	for _, name := range candidates {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), workQueryShellProbeTimeout)
+		err = exec.CommandContext(ctx, path, "-c", "set -o pipefail").Run()
+		cancel()
+		if err == nil {
+			return path
+		}
+	}
+	return ""
+}
+
+// workQueryShellCommandFor builds the interpreter and argv for command under
+// shell, the resolved pipefail-capable shell. An empty shell means the host has
+// none, so the command runs unprefixed under sh rather than under a prelude that
+// shell would reject.
+func workQueryShellCommandFor(shell, command string) (string, []string) {
+	if shell == "" {
+		return "sh", []string{"-c", command}
+	}
+	return shell, []string{"-c", workQueryPipefailPrelude + command}
+}
+
+// shellWorkQueryWithEnv runs a work query command via a pipefail-capable shell
+// (see workQueryPipefailPrelude) and returns stdout. If env is non-nil it is
+// used as the subprocess environment (including any rig-scoped BEADS_DIR /
+// GC_RIG_ROOT overrides); otherwise the child inherits the parent process
+// environment. Times out after a short bounded interval so startup hooks cannot
+// strand sessions behind a wedged data-plane command.
 func shellWorkQueryWithEnv(command, dir string, env []string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), hookWorkQueryTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", "-c", command)
+	shell, args := workQueryShellCommandFor(workQueryShell(), command)
+	cmd := exec.CommandContext(ctx, shell, args...)
 	cmd.WaitDelay = 2 * time.Second
 	prepareProviderOpCommand(cmd)
 	if dir != "" {
