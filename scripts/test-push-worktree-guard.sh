@@ -40,6 +40,13 @@ export GIT_COMMITTER_NAME="Test Pusher" GIT_COMMITTER_EMAIL="pusher@example.com"
 export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
 unset GIT_DIR GIT_WORK_TREE 2>/dev/null || true
 
+# The hook also carries a free-disk preflight (gas-9nx). Every scenario below
+# except the disk ones is about the worktree guard, and would otherwise take a
+# real verdict from however much space the host happens to have — a low-disk CI
+# box would fail the whole file for the wrong reason. Disable it by default so
+# these stay hermetic; the disk scenarios set the floor explicitly.
+export GC_PREPUSH_MIN_FREE_GIB=0
+
 # ---------------------------------------------------------------------------
 # Repo/remote helpers (mirrors scripts/test-push-ownership-guard.sh's
 # harness on main; kept standalone because that harness is not on every
@@ -258,6 +265,82 @@ test_guard_and_header_precede_suite_exec() {
 }
 
 # ---------------------------------------------------------------------------
+# Free-disk preflight (gas-wnq / gas-9nx). The sharded suite compiles multi-GiB
+# test binaries per job; started on a full disk it dies partway through as an
+# inscrutable build error, or parks the agent running it at a prompt it cannot
+# get past. These pin that it refuses first, with the number, and that it never
+# becomes the reason a push cannot happen.
+# ---------------------------------------------------------------------------
+
+test_disk_preflight_blocks_push_below_floor() {
+    local remote work out rc
+    read -r remote work <<<"$(setup_scenario)"
+    git -C "$work" checkout -q wb
+    # A floor no host can satisfy, so the scenario is about the refusal, not
+    # about this machine's actual free space.
+    out="$(cd "$work" && GC_PREPUSH_MIN_FREE_GIB=999999 git push origin wb 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && [[ -z "$(remote_sha "$remote" "refs/heads/wb")" ]] \
+        && grep -q "REFUSING" <<<"$out" \
+        && grep -q "999999 GiB" <<<"$out" \
+        && grep -q -- "--no-verify" <<<"$out" \
+        && ! grep -q "SUITE-RAN" <<<"$out"; then
+        record_pass "disk/blocks-push-below-floor (refused before the suite, names the floor + bypass)"
+    else
+        record_fail "disk/blocks-push-below-floor" "expected refusal naming the floor with no SUITE-RAN, got rc=$rc output: $out"
+    fi
+    rm -rf "$remote" "$work"
+}
+
+test_disk_preflight_zero_floor_disables() {
+    local remote work out rc
+    read -r remote work <<<"$(setup_scenario)"
+    git -C "$work" checkout -q wb
+    out="$(cd "$work" && GC_PREPUSH_MIN_FREE_GIB=0 git push origin wb 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "SUITE-RAN" <<<"$out" && ! grep -q "REFUSING" <<<"$out"; then
+        record_pass "disk/zero-floor-disables (documented escape hatch works)"
+    else
+        record_fail "disk/zero-floor-disables" "expected the suite to run with the check disabled, got rc=$rc output: $out"
+    fi
+    rm -rf "$remote" "$work"
+}
+
+# Regression test for a real bug in the first cut of this check: the hook runs
+# under `set -euo pipefail`, so `free_kib="$(df ... | awk ...)"` with a df that
+# cannot stat the worktree aborted the hook and REFUSED the push — inverting the
+# fail-open contract. A preflight that cannot measure the disk must never be why
+# a push stops working.
+test_disk_preflight_fails_open_when_df_unreadable() {
+    local remote work stub out rc
+    read -r remote work <<<"$(setup_scenario)"
+    git -C "$work" checkout -q wb
+    stub="$(mktemp -d "${TMPDIR:-/tmp}/gc-pwg-stub.XXXXXX")"
+    printf '#!/bin/sh\nexit 1\n' > "$stub/df"
+    chmod +x "$stub/df"
+    out="$(cd "$work" && PATH="$stub:$PATH" GC_PREPUSH_MIN_FREE_GIB=10 git push origin wb 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] \
+        && grep -q "SUITE-RAN" <<<"$out" \
+        && grep -q "fail-open" <<<"$out" \
+        && ! grep -q "REFUSING" <<<"$out"; then
+        record_pass "disk/fails-open-when-df-unreadable (unmeasurable disk does not block the push)"
+    else
+        record_fail "disk/fails-open-when-df-unreadable" "expected fail-open reaching the suite, got rc=$rc output: $out"
+    fi
+    rm -rf "$remote" "$work" "$stub"
+}
+
+test_disk_preflight_precedes_suite_exec() {
+    local disk_line exec_line
+    disk_line="$(grep -n "GC_PREPUSH_MIN_FREE_GIB" "$HOOK" 2>/dev/null | head -1 | cut -d: -f1)"
+    exec_line="$(grep -n "exec make test-fast-parallel" "$HOOK" 2>/dev/null | tail -1 | cut -d: -f1)"
+    if [[ -n "$disk_line" && -n "$exec_line" && "$disk_line" -lt "$exec_line" ]]; then
+        record_pass "wiring/disk-preflight-precedes-suite-exec"
+    else
+        record_fail "wiring/disk-preflight-precedes-suite-exec" "disk_line=$disk_line exec_line=$exec_line (the disk check must run before the suite it is protecting)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
 
@@ -271,6 +354,10 @@ run_all() {
     test_docs_only_push_from_parked_worktree_allowed
     test_verdict_header_names_tested_head_and_pushed_refs
     test_guard_and_header_precede_suite_exec
+    test_disk_preflight_blocks_push_below_floor
+    test_disk_preflight_zero_floor_disables
+    test_disk_preflight_fails_open_when_df_unreadable
+    test_disk_preflight_precedes_suite_exec
 
     echo
     echo "pass=$pass fail=$fail"
