@@ -1265,6 +1265,19 @@ func openCityStoreResultAt(cityPath string) (beads.StoreOpenResult, error) {
 	return openStoreResultAtForCity(cityPath, cityPath)
 }
 
+// openCityStoreAtNoRecovery is openCityStoreAt for best-effort readers that
+// discard their errors: it never attempts managed-dolt recovery, so a scope
+// whose health check fails yields a fast failure instead of a detached
+// `dolt sql-server` the caller neither owns nor stops (gascity gas-0v3m).
+func openCityStoreAtNoRecovery(cityPath string) (beads.Store, error) {
+	result, err := openStoreResultAtForCityWithConfig(
+		cityPath, cityPath, nil, gate.ModeUnset, false, false, false)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
 const fileStoreLayoutScopedV1 = "scope-local-v1"
 
 func fileStoreLayoutMarkerPath(cityPath string) string {
@@ -1338,7 +1351,7 @@ func openStoreAtForCity(storePath, cityPath string) (beads.Store, error) {
 // builtin-cache readiness and pack expansion included — again inside the open.
 // A nil config keeps the loading behavior, matching nativeDoltOpenEnvForScope.
 func openStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
-	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false)
+	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, false, true)
 	if err != nil {
 		return nil, err
 	}
@@ -1372,14 +1385,25 @@ func openStoreResultAtForCityWithMode(storePath, cityPath string, modeOverride g
 }
 
 func openStoreResultAtForCityWithAuthority(storePath, cityPath string, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
-	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative)
+	return openStoreResultAtForCityWithConfig(storePath, cityPath, nil, modeOverride, haveMode, authoritative, true)
 }
 
 // openStoreResultAtForCityWithConfig is openStoreResultAtForCityWithAuthority
 // with the city config supplied by a caller that already loaded it. A nil
 // config is loaded here, which is what every caller outside the bd scope
 // resolution path passes.
-func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative bool) (beads.StoreOpenResult, error) {
+//
+// allowRecovery=false skips managed-dolt recovery while resolving the bd
+// runtime env, so a best-effort caller that discards its errors fails fast
+// instead of starting a `dolt sql-server` it neither owns nor stops (gascity
+// gas-0v3m). Every owning caller passes true.
+//
+// The parameter is threaded into this function rather than a delegating
+// wrapper on purpose: TestOpenNativeStoreReusesTheLoadedCityConfig parses
+// main.go and asserts the OpenNativeStore closure *in this function's body*
+// forwards the loaded cfg, so moving the body behind a wrapper silently
+// retires that guard.
+func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.City, modeOverride gate.Mode, haveMode, authoritative, allowRecovery bool) (beads.StoreOpenResult, error) {
 	runtimeCityPath := cityPath
 	if runtimeCityPath == "" {
 		runtimeCityPath = cityForStoreDir(storePath)
@@ -1427,7 +1451,7 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			if _, err := exec.LookPath("bd"); err != nil {
 				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
 			}
-			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg)
+			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, allowRecovery)
 		},
 		OpenExecStore: func() (beads.Store, error) {
 			return openExecStoreAtForCityWithConfig(provider, scopeRoot, runtimeCityPath, cfg)
@@ -1526,9 +1550,14 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 // openBdStoreAtWithConfig opens the bd-backed store at storePath for a city.
 // A caller that already holds this city's config passes it to avoid reloading
 // it; a nil config is loaded here.
-func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+//
+// allowRecovery=false resolves the bd runtime env without managed-dolt
+// recovery; see bdCommandRunnerForCityRecovery. Only the city-scoped branch
+// honors it — a rig-scoped open resolves through the rig env path, which has
+// no best-effort caller today.
+func openBdStoreAtWithConfig(storePath, cityPath string, cfg *config.City, allowRecovery bool) (beads.Store, error) {
 	if filepath.Clean(storePath) == filepath.Clean(cityPath) {
-		store := bdStoreForCity(storePath, cityPath)
+		store := bdStoreForCityRecovery(storePath, cityPath, allowRecovery)
 		if optimized, ok := openOptimizedDoltliteStore(storePath, store); ok {
 			return optimized, nil
 		}

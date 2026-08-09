@@ -73,7 +73,10 @@ func sessionProviderContextForCity(cfg *config.City, cityPath, providerOverride 
 }
 
 var (
-	openSessionProviderStore   = openCityStoreAt
+	// Best-effort snapshot reader: loadProviderSessionSnapshot discards every
+	// error it gets, so it must never pay — or leak — a managed-dolt recovery
+	// just to construct a provider (gascity gas-0v3m).
+	openSessionProviderStore   = openCityStoreAtNoRecovery
 	buildSessionProviderByName = newSessionProviderForCityByName
 )
 
