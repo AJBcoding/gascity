@@ -132,7 +132,10 @@ managed_runtime_listener_pid() (
     return 0
   fi
 
-  lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
+  # Bounded: a wedged lsof yields no holder, and the caller falls through to
+  # the TCP reachability probe rather than blocking on it.
+  run_probe_bounded "$GC_DOLT_PORT_PROBE_TIMEOUT_SECS" \
+    lsof -nP -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null \
     | while IFS= read -r holder_pid; do
         case "$holder_pid" in
           ''|*[!0-9]*)
@@ -156,7 +159,10 @@ managed_runtime_tcp_reachable() (
   esac
 
   if command -v nc >/dev/null 2>&1; then
-    nc -z 127.0.0.1 "$port" >/dev/null 2>&1
+    # Bounded for the same reason as the lsof probe: a connect that never
+    # returns must read as "unreachable", not stall port resolution.
+    run_probe_bounded "$GC_DOLT_PORT_PROBE_TIMEOUT_SECS" \
+      nc -z 127.0.0.1 "$port" >/dev/null 2>&1
     return $?
   fi
 
@@ -215,12 +221,6 @@ managed_runtime_port() (
   printf '%s\n' "$port"
 )
 
-# Resolve GC_DOLT_PORT. The shared helper prefers validated live managed
-# runtime state over stale inherited env, then falls back to GC_DOLT_PORT as an
-# operator seed, and exits 78 if neither yields a port.
-. "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/port_resolve.sh"
-GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?
-
 # Resolve a bounded-execution helper. Prefer gtimeout (coreutils on
 # macOS), fall back to timeout (coreutils on Linux), then to running
 # the command directly if neither is installed. Running unbounded is
@@ -244,6 +244,16 @@ _run_bounded_warned_no_timeout=""
 # (gascity#2740).
 GC_DOLT_RIG_LIST_TIMEOUT_SECS="${GC_DOLT_RIG_LIST_TIMEOUT_SECS:-30}"
 
+# Wall-clock bound (seconds) for the managed-runtime port probes (lsof, nc),
+# tunable via GC_DOLT_PORT_PROBE_TIMEOUT_SECS. Both probes answer in
+# milliseconds on a healthy host, but lsof walks every process on the box, so
+# its cost tracks system-wide load rather than this database — it has been
+# observed hanging for minutes at load 27 against an IO-toxic directory, which
+# stalled every concurrent pack script at once. The bound is generous enough to
+# absorb an ordinary busy host and short enough that a wedged probe degrades to
+# the next fallback instead of parking the caller (gas-2jc).
+GC_DOLT_PORT_PROBE_TIMEOUT_SECS="${GC_DOLT_PORT_PROBE_TIMEOUT_SECS:-10}"
+
 # run_bounded SECS CMD...  — Run CMD with a wall-clock timeout. Exits
 # 124 on timeout (coreutils convention). Uses --kill-after=2 so an
 # uncooperative child that ignores SIGTERM (e.g. a dolt client stuck
@@ -256,24 +266,79 @@ run_bounded() {
   if [ -n "$TIMEOUT_BIN" ]; then
     "$TIMEOUT_BIN" --kill-after=2 "$_t" "$@"
   elif command -v python3 >/dev/null 2>&1; then
+    # The child inherits stdout/stderr so its output STREAMS, exactly as it
+    # does under gtimeout/timeout. Capturing it instead would withhold every
+    # byte until the child exits, which silently changes what callers observe:
+    # a reader that acts on the first line while the writer is still alive
+    # (managed_runtime_listener_pid's liveness check) would instead act on it
+    # after the writer had exited, and reach the opposite conclusion (gas-2jc).
     python3 - "$_t" "$@" <<'PY'
+import os
+import signal
 import subprocess
 import sys
 
 limit = float(sys.argv[1])
 cmd = sys.argv[2:]
+
+# Own process group, so the timeout can signal the whole tree the way
+# gtimeout/timeout does. Signalling only the direct child leaves its own
+# children alive holding the inherited stdout, and the caller's command
+# substitution then blocks on that pipe until they exit — which is the
+# unbounded wait this helper exists to prevent (gas-2jc).
+proc = subprocess.Popen(cmd, start_new_session=True)
+
+
+def signal_group(sig):
+    try:
+        os.killpg(os.getpgid(proc.pid), sig)
+    except OSError:
+        try:
+            proc.send_signal(sig)
+        except OSError:
+            pass
+
+
 try:
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=limit)
-except subprocess.TimeoutExpired as exc:
-    sys.stdout.write(exc.stdout or "")
-    sys.stderr.write(exc.stderr or "")
+    sys.exit(proc.wait(timeout=limit))
+except subprocess.TimeoutExpired:
+    signal_group(signal.SIGTERM)
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        signal_group(signal.SIGKILL)
+        proc.wait()
     sys.exit(124)
-sys.stdout.write(proc.stdout)
-sys.stderr.write(proc.stderr)
-sys.exit(proc.returncode)
 PY
   else
     printf 'dolt runtime: timeout/gtimeout/python3 not found; cannot run bounded command\n' >&2
     return 124
   fi
 }
+
+# run_probe_bounded SECS CMD... — run_bounded for the read-only port probes.
+#
+# run_bounded fails closed, which is right for a Dolt client but wrong here: a
+# probe that reports 124 reads as "no listener", so on a host with no bounding
+# mechanism at all (no coreutils, no python3) failing closed would downgrade a
+# perfectly resolvable port to exit 78. Such a host cannot bound anything
+# anyway, so run the probe directly there and keep the previous behavior.
+run_probe_bounded() {
+  if [ -z "$TIMEOUT_BIN" ] && ! command -v python3 >/dev/null 2>&1; then
+    shift
+    "$@"
+    return $?
+  fi
+  run_bounded "$@"
+}
+
+# Resolve GC_DOLT_PORT. The shared helper prefers validated live managed
+# runtime state over stale inherited env, then falls back to GC_DOLT_PORT as an
+# operator seed, and exits 78 if neither yields a port.
+#
+# This must stay BELOW run_bounded. Resolution shells out to lsof and nc, and
+# when it ran above the helper those probes were unboundable by construction —
+# no caller-supplied timeout could reach them, because the only helper that
+# applies one did not exist yet (gas-2jc).
+. "${GC_PACK_DIR:-${PACK_DIR:-${GC_SYSTEM_PACKS_DIR:-$GC_CITY_PATH/.gc/system/packs}/dolt}}/assets/scripts/port_resolve.sh"
+GC_DOLT_PORT=$(resolve_dolt_port_or_die "$DOLT_STATE_FILE" "$DOLT_PROVIDER_STATE_FILE" "$DOLT_DATA_DIR" "$GC_CITY_PATH") || exit $?

@@ -25,6 +25,27 @@ import (
 // is the difference between a debuggable result and a dead suite.
 const compactScriptRunTimeout = 90 * time.Second
 
+// compactScriptWaitDelay bounds the gap between killing the script and giving
+// up on its output pipe.
+//
+// The context kill above reaches only the shell. Any descendant that outlives
+// it still holds the stdout/stderr pipe it inherited, and CombinedOutput
+// cannot return until that pipe closes — so on its own the run timeout does
+// not bound anything: the fixture parks in exec.Cmd.Wait for as long as the
+// wedged grandchild lives, which is the package-wide hang the timeout was
+// added to convert into a named failure (gas-3mf). WaitDelay is what actually
+// closes it (gas-2jc).
+const compactScriptWaitDelay = 10 * time.Second
+
+// boundedScriptCommand builds the exec.Cmd used to run a pack script under
+// test: killed when ctx expires, and released by WaitDelay even when a
+// descendant survives the kill still holding the output pipe.
+func boundedScriptCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.WaitDelay = compactScriptWaitDelay
+	return cmd
+}
+
 func runDogScriptCommand(t *testing.T, scriptName, binDir, cityPath, dataDir string, extraEnv ...string) (string, error) {
 	t.Helper()
 	root := repoRoot(t)
@@ -190,7 +211,7 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 	scriptArgs := append([]string{filepath.Join(f.root, "commands", "compact", "run.sh")}, args...)
 	ctx, cancel := context.WithTimeout(context.Background(), compactScriptRunTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sh", scriptArgs...)
+	cmd := boundedScriptCommand(ctx, "sh", scriptArgs...)
 	cmd.Env = append(filteredEnv(
 		"PATH",
 		"GC_CITY_PATH",
@@ -1096,6 +1117,72 @@ exit 0
 	}
 	if strings.Contains(out, "falling back to local filesystem metadata scan") {
 		t.Fatalf("rig list answering within 30s must not trigger the filesystem fallback:\n%s", out)
+	}
+}
+
+func TestBoundedScriptCommandReleasesOnAWedgedGrandchild(t *testing.T) {
+	t.Parallel()
+	// Killing the shell does not close the stdout/stderr pipe a surviving
+	// descendant still holds, so CombinedOutput blocks past the context
+	// deadline — for as long as that descendant lives. A wedged lsof left
+	// eight compact scripts parked in exec.Cmd.Wait this way and took the
+	// whole package down with no failing test named (gas-2jc / gas-3mf).
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// The shell exits promptly; the backgrounded child holds the pipe open
+	// well past both the context deadline and the WaitDelay.
+	cmd := boundedScriptCommand(ctx, "sh", "-c", "sleep 300 & sleep 300")
+
+	done := make(chan struct{})
+	start := time.Now()
+	go func() {
+		_, _ = cmd.CombinedOutput()
+		close(done)
+	}()
+
+	// Context deadline plus WaitDelay, with slack for a loaded host.
+	limit := 2*time.Second + compactScriptWaitDelay + 30*time.Second
+	select {
+	case <-done:
+		if elapsed := time.Since(start); elapsed > limit {
+			t.Fatalf("CombinedOutput took %s, want under %s", elapsed, limit)
+		}
+	case <-time.After(limit):
+		t.Fatalf("CombinedOutput still blocked after %s: the run timeout does not bound the fixture", limit)
+	}
+}
+
+func TestCompactScriptBoundsTheManagedPortListenerProbe(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	// Port resolution probes the managed runtime's listener with lsof, and it
+	// runs before the bounded-execution helper exists, so no per-operation
+	// bound wraps it: GC_DOLT_COMPACT_CALL_TIMEOUT_SECS and
+	// GC_DOLT_COMPACT_PUSH_TIMEOUT_SECS are both set here and neither one
+	// covers this call. lsof walks every process on the host, so its cost
+	// scales with system-wide load rather than with this database — it has
+	// been observed hanging for minutes at load 27, which parks every
+	// concurrent compact script at once and takes the package down with it
+	// (gas-2jc, root cause behind gas-3mf).
+	//
+	// A wedged lsof must degrade to the TCP reachability fallback, not block
+	// the run.
+	writeExecutable(t, filepath.Join(fixture.binDir, "lsof"), `#!/bin/sh
+sleep 60
+`)
+
+	start := time.Now()
+	out, err := fixture.run(t, "success", "GC_DOLT_PORT_PROBE_TIMEOUT_SECS=2")
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("compact failed: %v\n%s", err, out)
+	}
+	if elapsed > 40*time.Second {
+		t.Fatalf("a wedged lsof must not block compaction: run took %s (the fake lsof sleeps 60s)\n%s",
+			elapsed, out)
+	}
+	if !strings.Contains(out, "below_threshold=2000") {
+		t.Fatalf("compaction should still run normally after the probe degrades:\n%s", out)
 	}
 }
 
