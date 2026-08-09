@@ -1319,9 +1319,20 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 	}
 }
 
-func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+// resolveConfiguredWorkDirPath resolves an agent's configured work dir without
+// touching the filesystem. Every caller that only needs the *value* — trigger
+// metadata binding, fingerprinting — must use this rather than the
+// materializing variant below.
+//
+// Resolution used to imply creation, which made an ordinary metadata question
+// mint directories: asked under an agent's template (generic) identity, it left
+// a husk — a plain dir that is neither a linked worktree nor a repo, so
+// `git rev-parse --show-toplevel` inside it walks up and answers with the
+// operator's CITY checkout, aiming any later git-write path that trusts the
+// bound work_dir at the operator's own repo (gas-m7h).
+func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
 	if a == nil {
-		return resolveAgentDir(cityPath, "")
+		return resolveAgentDirPath(cityPath, ""), nil
 	}
 	if strings.TrimSpace(qualifiedName) == "" {
 		qualifiedName = a.QualifiedName()
@@ -1331,14 +1342,27 @@ func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *confi
 		return "", err
 	}
 	// Guard against spawning into a path whose ancestor has a stale
-	// worktree pointer — see gascity#1556. Fails closed before MkdirAll
-	// so the operator sees the broken ancestor instead of a structurally
-	// orphaned spawn. workDir is already absolute (ResolveWorkDirPathStrict
-	// returns through ResolveDirPath), so no further resolution is needed.
+	// worktree pointer — see gascity#1556. Fails closed before any
+	// materialization so the operator sees the broken ancestor instead of a
+	// structurally orphaned spawn. workDir is already absolute
+	// (ResolveWorkDirPathStrict returns through ResolveDirPath), so no further
+	// resolution is needed.
 	if err := workdirutil.ValidateAncestorWorktreesNotStale(workDir); err != nil {
 		return "", err
 	}
-	return resolveAgentDir(cityPath, workDir)
+	return resolveAgentDirPath(cityPath, workDir), nil
+}
+
+// resolveConfiguredWorkDir resolves an agent's work dir and materializes it.
+// Reserved for the session-start path, where a concrete session is about to run
+// in the directory; callers needing only the path must use
+// resolveConfiguredWorkDirPath.
+func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
+	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
+	if err != nil {
+		return "", err
+	}
+	return resolveAgentDir(cityPath, dir)
 }
 
 // configuredRigName returns the rig associated with an agent, preferring the
