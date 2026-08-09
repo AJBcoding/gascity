@@ -256,9 +256,21 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			reportHookClaimRejected(candidate, claimed, opts, ops)
 			continue
 		}
+		// The reported route comes from the CANONICAL readback, and is captured
+		// BEFORE the snapshot merge below. A route CLEARED since the work-query
+		// snapshot is absent from the readback rather than conflicting with it, so
+		// the merge cannot distinguish "cleared" from "not projected" and the stale
+		// value survives maps.Copy. Reporting that stale value announced a pool
+		// route for work already handed off to a named session (gas-q07); routing
+		// is the one metadata dimension where a snapshot is never safe to fall back
+		// on, so it is read canonically and the merge below is left to the
+		// projection-tolerant keys it exists for.
+		route := hookClaimRoute(claimed)
 		if len(candidate.Metadata) > 0 {
 			// bd update --claim can return a partial metadata projection. Retain
-			// candidate fields while preferring values returned by the mutation.
+			// candidate fields — notably the continuation context read by
+			// preassignHookContinuationGroup — while preferring values returned by
+			// the mutation.
 			metadata := maps.Clone(candidate.Metadata)
 			maps.Copy(metadata, claimed.Metadata)
 			claimed.Metadata = metadata
@@ -271,7 +283,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			Reason:        "claimed",
 			BeadID:        claimed.ID,
 			Assignee:      claimed.Assignee,
-			Route:         hookClaimRoute(claimed),
+			Route:         route,
 		}
 		if result.BeadID == "" {
 			result.BeadID = candidate.ID
