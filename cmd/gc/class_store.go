@@ -61,18 +61,17 @@ func (cs *controllerState) nudgesBeadStore() beads.NudgesStore {
 }
 
 // ordersBeadStore returns the store that owns order-tracking bookkeeping beads
-// for the given scope (rig name, or "" for the city): the configured orders class
-// store when [beads.classes.orders] relocates orders, else the work store. The
-// scope is accepted so a future per-scope orders backend can route without a
-// call-site change. Identity to the work store at the default bd backend;
-// returned as the strongly-typed beads.OrdersStore so the orders class stays
-// statically visible. This is the city-scope simple case; per-order scope
-// (rig/pool-routed orders) resolves PER ORDER through resolveOrderStoreTarget
-// (the federated dispatch/sweep paths in order_store.go / order_dispatch.go).
+// for the given scope (rig name, or "" for the city). It delegates to the
+// exported OrdersBeadStore() accessor so the api.State surface and the
+// controller's own callers share one resolver. The scope is accepted so a future
+// per-scope orders backend can route without a call-site change. Identity to the
+// work store at the default bd backend; returned as the strongly-typed
+// beads.OrdersStore so the orders class stays statically visible. This is the
+// city-scope simple case; per-order scope (rig/pool-routed orders) resolves PER
+// ORDER through resolveOrderStoreTarget (the federated dispatch/sweep paths in
+// order_store.go / order_dispatch.go).
 func (cs *controllerState) ordersBeadStore(_ string) beads.OrdersStore {
-	cs.mu.RLock()
-	defer cs.mu.RUnlock()
-	return beads.OrdersStore{Store: resolveOrderStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
+	return cs.OrdersBeadStore()
 }
 
 // cityWorkStore returns the city-level store for ordinary WORK-class beads that
@@ -144,6 +143,16 @@ func (cr *CityRuntime) nudgesBeadStore() beads.NudgesStore {
 // in the federated dispatch/sweep paths.
 func (cr *CityRuntime) ordersBeadStore(_ string) beads.OrdersStore {
 	return beads.OrdersStore{Store: resolveOrderStore(cr.storageRoutes, cr.cityBeadStore(), cr.cfg, cr.cityPath, cr.rec)}
+}
+
+// relocatedOrdersStore returns the runtime's ORDERS-class binding store when
+// [storage] relocates the orders class, and nil when it does not — the
+// controller-side twin of relocatedOrdersClassStore (order_store.go), resolved
+// through the routes this process opened at boot rather than the one-shot CLI
+// funnel. nil is what keeps a federation on a single-store city byte-identical:
+// there is no second store to add.
+func (cr *CityRuntime) relocatedOrdersStore() beads.Store {
+	return resolveOrderStore(cr.storageRoutes, nil, cr.cfg, cr.cityPath, cr.rec)
 }
 
 // cityWorkStore returns the runtime's city-level WORK-class bead store. Work is
@@ -304,6 +313,17 @@ func resolveSessionStore(routes *storageRoutes, workStore beads.Store, cfg *conf
 // parity with the other resolve*Store helpers and ignored here).
 func resolveGraphStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath string, rec events.Recorder) beads.Store {
 	return resolveClassStore(routes, workStore, cfg, cityPath, config.BeadClassGraph, rec)
+}
+
+// graphClassBinding returns the store these routes serve the graph class from,
+// and whether they relocate it at all — the same question resolveClassStore asks
+// to choose its branch, exposed for the callers that must BEHAVE differently
+// rather than merely read elsewhere. A reader that answers by shelling `bd` in
+// the work directory cannot follow a relocated class, so it has to know it must
+// go in-process instead; resolveGraphStore alone cannot tell it, because a
+// relocated store and an unrelocated one are both just a beads.Store.
+func graphClassBinding(routes *storageRoutes) (beads.Store, bool) {
+	return routes.storeFor(coordclassFor(config.BeadClassGraph))
 }
 
 // newCityMailProvider builds the controller's mail provider as a two-store mail
