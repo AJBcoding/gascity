@@ -1,9 +1,12 @@
 package session
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 const spawnDiskGiB = float64(1 << 30)
@@ -14,9 +17,39 @@ const spawnDiskGiB = float64(1 << 30)
 // both preflights share one production implementation and one fake in tests.
 type DiskFreeBytesFunc func(path string) (int64, error)
 
-// checkSpawnDisk applies the Manager's configured disk floors to dir. It is a
-// no-op on a Manager that was never given a probe.
+// startRuntime is the one place in this package that spawns a runtime process.
+// Every path that brings a session's process into existence — create, resume,
+// reconciler respawn, stale-key retry — goes through here, so the disk
+// preflight applies by construction rather than by remembering to call it.
+//
+// gas-wnq guarded only creation, and the wake paths it left uncovered could
+// still start a session onto a full disk and reproduce the incident it fixed
+// (gas-9nx). A chokepoint plus the gate in
+// TestEveryProviderStartRoutesThroughTheSpawnChokepoint makes the next spawn
+// path added fail the build instead of shipping unguarded.
+func (m *Manager) startRuntime(ctx context.Context, sessName string, cfg runtime.Config) error {
+	if err := m.checkSpawnDisk(cfg.WorkDir); err != nil {
+		return err
+	}
+	return m.sp.Start(ctx, sessName, cfg)
+}
+
+// checkSpawnDisk applies the Manager's configured disk floors to dir, warning
+// when free space is inside the warn band. It is a no-op on a Manager that was
+// never given a probe.
 func (m *Manager) checkSpawnDisk(dir string) error {
+	return m.checkSpawnDiskWithWarn(dir, m.diskWarnFreeBytes)
+}
+
+// checkSpawnDiskRefusalOnly applies the refusal floor without the warn band. It
+// is for callers that check early to avoid half-creating a session and would
+// otherwise emit the same WARN the spawn itself emits moments later — one start
+// under disk pressure should read as one event, not two.
+func (m *Manager) checkSpawnDiskRefusalOnly(dir string) error {
+	return m.checkSpawnDiskWithWarn(dir, 0)
+}
+
+func (m *Manager) checkSpawnDiskWithWarn(dir string, warnFree int64) error {
 	if dir == "" {
 		dir = m.cityPath
 	}
@@ -24,7 +57,7 @@ func (m *Manager) checkSpawnDisk(dir string) error {
 	if stderr == nil {
 		stderr = os.Stderr
 	}
-	return checkSpawnDiskPreflight(dir, m.diskMinFreeBytes, m.diskWarnFreeBytes, m.diskFreeBytes, stderr)
+	return checkSpawnDiskPreflight(dir, m.diskMinFreeBytes, warnFree, m.diskFreeBytes, stderr)
 }
 
 // checkSpawnDiskPreflight reports whether a session may be started on a host
