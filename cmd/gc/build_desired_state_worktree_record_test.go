@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,7 +12,96 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 )
+
+// TestRealizePoolDesiredSessionsRebindsInstanceWorkDirNotTemplate pins the
+// work_dir a pool session re-derives when it picks up a NEW trigger bead to the
+// instance that will actually run in it, not to the pool template.
+//
+// A namepool'd pool expands into per-instance worktrees (rictus, nux, ...), but
+// the pool loop binds every instance's trigger with the loop-invariant TEMPLATE
+// identity, so {{.AgentBase}} resolves to the template. Every re-triggered
+// instance is then stamped with one shared path — which is what sends several
+// live sessions into a single checkout, where one session's `git checkout`
+// moves HEAD out from under another's uncommitted work (gas-u1f6).
+func TestRealizePoolDesiredSessionsRebindsInstanceWorkDirNotTemplate(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "fixture"},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "rig",
+			StartCommand:      "true",
+			WorkDir:           ".gc/worktrees/{{.AgentBase}}",
+			MinActiveSessions: intPtr(0),
+			MaxActiveSessions: intPtr(3),
+			NamepoolNames:     []string{"rictus", "nux"},
+		}},
+	}
+	var stderr bytes.Buffer
+	store := beads.NewMemStore()
+	bp := newAgentBuildParams("fixture", t.TempDir(), cfg, runtime.NewFake(), time.Now().UTC(), store, &stderr)
+
+	instanceWorkDir := filepath.Join(bp.cityPath, ".gc", "worktrees", "nux")
+	templateWorkDir := filepath.Join(bp.cityPath, ".gc", "worktrees", "polecat")
+
+	// An asleep instance session, already sitting in its own worktree from the
+	// bead it last ran. Asleep is the re-derive path: it is not a live-resume
+	// continuation, so the bind recomputes work_dir from config.
+	asleep, err := store.Create(beads.Bead{
+		Title:  "rig/nux",
+		Type:   sessionBeadType,
+		Status: "open",
+		Labels: []string{sessionBeadLabel, "agent:rig/nux", "template:rig/polecat"},
+		Metadata: map[string]string{
+			"template":                        "rig/polecat",
+			"agent_name":                      "rig/nux",
+			"alias":                           "rig/nux",
+			"session_name":                    "s-polecat-nux",
+			"state":                           "asleep",
+			"pool_slot":                       "2",
+			poolManagedMetadataKey:            boolMetadata(true),
+			beadmeta.TriggerBeadIDMetadataKey: "ga-old",
+			beadmeta.WorkDirMetadataKey:       instanceWorkDir,
+			beadmeta.LegacyWorkDirMetadataKey: instanceWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create asleep instance session: %v", err)
+	}
+	info, err := sessionFrontDoor(store).Get(asleep.ID)
+	if err != nil {
+		t.Fatalf("get asleep session: %v", err)
+	}
+	snapshot := &sessionBeadSnapshot{}
+	snapshot.addInfo(sessiontest.SeedBead(t, asleep))
+	bp.sessionBeads = snapshot
+
+	realizePoolDesiredSessions(bp, &cfg.Agents[0], PoolDesiredState{
+		Template: "rig/polecat",
+		Requests: []SessionRequest{{
+			Template:      "rig/polecat",
+			Tier:          "resume",
+			SessionBeadID: info.ID,
+			WorkBeadID:    "ga-new",
+		}},
+	}, map[string]TemplateParams{}, &stderr)
+
+	rebound, err := store.Get(asleep.ID)
+	if err != nil {
+		t.Fatalf("re-read session bead: %v", err)
+	}
+	got := strings.TrimSpace(rebound.Metadata[beadmeta.WorkDirMetadataKey])
+	if got == templateWorkDir {
+		t.Fatalf("re-triggered instance %q was stamped the pool TEMPLATE work_dir %q; every instance collapses onto one checkout", asleep.Metadata["agent_name"], got)
+	}
+	if got != instanceWorkDir {
+		t.Fatalf("re-triggered gc.work_dir = %q, want instance worktree %q; stderr=%q", got, instanceWorkDir, stderr.String())
+	}
+	if legacy := strings.TrimSpace(rebound.Metadata[beadmeta.LegacyWorkDirMetadataKey]); legacy != instanceWorkDir {
+		t.Fatalf("re-triggered work_dir mirror = %q, want %q", legacy, instanceWorkDir)
+	}
+}
 
 func TestPoolTriggerWorkDirNonPackUsesConfiguredBase(t *testing.T) {
 	cfg := &config.City{

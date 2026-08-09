@@ -2750,11 +2750,6 @@ func realizePoolDesiredSessions(
 		// directly (W-pool), so the former raw pool-loop projection is gone; the
 		// bind fold and every downstream identity read flow through Info.
 		sbInfo := item.sessionInfo
-		if bound, err := bindPoolSessionTriggerBead(bp, cfgAgent, qualifiedName, sbInfo, item.request); err != nil {
-			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
-		} else {
-			sbInfo = bound
-		}
 		slot := item.slot
 		manualSession := isManualSessionInfoForAgent(sbInfo, cfgAgent)
 		var (
@@ -2767,6 +2762,23 @@ func realizePoolDesiredSessions(
 			resolveAgent = sessionBeadConfigAgent(cfgAgent, qualifiedInstance)
 		} else {
 			resolveAgent, qualifiedInstance, poolSlot = poolDesiredRequestIdentity(cfgAgent, slot)
+		}
+		// Bind the trigger with the INSTANCE identity, not the loop-invariant
+		// pool template. work_dir is a template expanded against the identity
+		// passed here, so binding as the template resolves every instance to the
+		// template's own directory — collapsing a namepool'd pool onto a single
+		// shared checkout, where one session's checkout moves HEAD out from under
+		// another's uncommitted work (gas-u1f6). This is the identity the spawn
+		// below already resolves its worktree with, so the stamp now records the
+		// directory the session actually runs in.
+		bindAgent, bindName := resolveAgent, qualifiedInstance
+		if bindAgent == nil || strings.TrimSpace(bindName) == "" {
+			bindAgent, bindName = cfgAgent, qualifiedName
+		}
+		if bound, err := bindPoolSessionTriggerBead(bp, bindAgent, bindName, sbInfo, item.request); err != nil {
+			fmt.Fprintf(stderr, "buildDesiredState: pool %q session %s trigger bead %s: %v (continuing without trigger env)\n", qualifiedName, sbInfo.ID, item.request.WorkBeadID, err) //nolint:errcheck
+		} else {
+			sbInfo = bound
 		}
 		fpExtra := buildFingerprintExtra(resolveAgent)
 		tp, err := resolveTemplateForSessionBeadInfo(bp, resolveAgent, qualifiedInstance, fpExtra, sbInfo)
