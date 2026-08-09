@@ -2932,7 +2932,10 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	if bp == nil || cfgAgent == nil || strings.TrimSpace(request.WorkBeadID) == "" {
 		return ""
 	}
-	base, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	// Value-only: both callers (bindPoolSessionTriggerBead, poolTriggerMetadata)
+	// arrive with the agent's TEMPLATE identity, so materializing here mints a
+	// husk dir no session runs in (gas-m7h).
+	base, err := resolveConfiguredWorkDirPath(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
