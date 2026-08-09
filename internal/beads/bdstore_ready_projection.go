@@ -3,11 +3,60 @@ package beads
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/deps"
 )
 
 const bdReadyProjectionMinVersion = "1.0.5"
+
+// readyProjectionCapability is one store directory's verdict on whether
+// `bd sql` can serve the ready projection there: the memoized version-gate
+// answer plus the consecutive-failure latch.
+//
+// The verdict is deliberately scoped to the directory and the process rather
+// than to a BdStore instance (gas-x5k4). Whether bd can answer `bd sql` is a
+// property of that directory's beads backend, and short-lived stores are the
+// norm on the hot paths: the control dispatcher opens a brand-new store on
+// every drain sweep (cmd/gc's controlReadyCacheFor reuses a primed snapshot
+// only for controlReadyCacheTTL). An instance-scoped latch therefore never
+// survived long enough to reach its threshold, and each sweep re-paid a doomed
+// `bd version` plus `bd sql` on MySQL-backed rigs — forever.
+type readyProjectionCapability struct {
+	mu       sync.Mutex
+	checked  bool
+	enabled  bool
+	failures int
+}
+
+// readyProjectionCapabilities memoizes one capability per store directory. The
+// registry mutex covers only the map lookup, never a subprocess call, so stores
+// for different rigs probe concurrently while stores sharing a directory
+// serialize behind that directory's own mutex and probe bd just once between
+// them. Keys are store directories, so the map is bounded by the number of rigs
+// a process opens.
+//
+// One directory therefore means one verdict for the whole process: in
+// production that is exactly right (a directory has one beads backend), but a
+// test that stubs `bd version` or `bd sql` must give its store its own
+// directory rather than sharing a fixture path with its neighbors.
+var readyProjectionCapabilities = struct {
+	mu    sync.Mutex
+	byDir map[string]*readyProjectionCapability
+}{byDir: make(map[string]*readyProjectionCapability)}
+
+// readyProjectionCapabilityFor returns dir's capability record, creating it on
+// first use.
+func readyProjectionCapabilityFor(dir string) *readyProjectionCapability {
+	readyProjectionCapabilities.mu.Lock()
+	defer readyProjectionCapabilities.mu.Unlock()
+	capability, ok := readyProjectionCapabilities.byDir[dir]
+	if !ok {
+		capability = &readyProjectionCapability{}
+		readyProjectionCapabilities.byDir[dir] = capability
+	}
+	return capability
+}
 
 type bdReadyProjectionRow struct {
 	ID        string       `json:"id"`
@@ -69,12 +118,14 @@ func (s *BdStore) enrichReadyProjectionForCache(items []Bead) ([]Bead, error) {
 }
 
 func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
-	s.readyProjectionMu.Lock()
-	defer s.readyProjectionMu.Unlock()
-	// Probe the bd version once per process. Operators must restart gc after
-	// changing bd versions to re-evaluate ready-projection support.
-	if s.readyProjectionChecked {
-		return s.readyProjectionEnabled, nil
+	capability := readyProjectionCapabilityFor(s.dir)
+	capability.mu.Lock()
+	defer capability.mu.Unlock()
+	// Probe the bd version once per store directory per process. Operators must
+	// restart gc after changing bd versions to re-evaluate ready-projection
+	// support.
+	if capability.checked {
+		return capability.enabled, nil
 	}
 	out, err := s.runner(s.dir, "bd", "version")
 	if err != nil {
@@ -84,17 +135,18 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("bd ready projection version gate: %w", err)
 	}
-	s.readyProjectionEnabled = deps.CompareVersions(version, bdReadyProjectionMinVersion) >= 0
-	s.readyProjectionChecked = true
-	return s.readyProjectionEnabled, nil
+	capability.enabled = deps.CompareVersions(version, bdReadyProjectionMinVersion) >= 0
+	capability.checked = true
+	return capability.enabled, nil
 }
 
 // bdReadyProjectionMaxFailures bounds how many consecutive projection failures
 // are tolerated before the gate latches off for the rest of the process.
 const bdReadyProjectionMaxFailures = 3
 
-// noteReadyProjectionFailure records a failed projection fetch and latches the
-// gate off once failures are clearly structural rather than transient.
+// noteReadyProjectionFailure records a failed projection fetch against the
+// store's directory and latches its gate off once failures are clearly
+// structural rather than transient.
 //
 // The version gate cannot decide this on its own: `bd sql` runs "against the
 // underlying database (SQLite or Dolt)", so on a MySQL-backed city a bd new
@@ -106,21 +158,28 @@ const bdReadyProjectionMaxFailures = 3
 // one-off blip still recovers via noteReadyProjectionSuccess. The projection is
 // a cost optimisation, not a correctness gate, so losing it is safe: callers
 // already treat a disabled projection as the no-op it is.
+//
+// The count lives on the directory's readyProjectionCapability, not on this
+// store, so a caller that rebuilds its store between ticks still converges on
+// the latch instead of restarting the count each time (gas-x5k4).
 func (s *BdStore) noteReadyProjectionFailure() {
-	s.readyProjectionMu.Lock()
-	defer s.readyProjectionMu.Unlock()
-	s.readyProjectionFailures++
-	if s.readyProjectionFailures >= bdReadyProjectionMaxFailures {
-		s.readyProjectionEnabled = false
+	capability := readyProjectionCapabilityFor(s.dir)
+	capability.mu.Lock()
+	defer capability.mu.Unlock()
+	capability.failures++
+	if capability.failures >= bdReadyProjectionMaxFailures {
+		capability.enabled = false
 	}
 }
 
-// noteReadyProjectionSuccess clears the consecutive-failure count so a transient
-// error never accumulates toward the latch across an otherwise healthy process.
+// noteReadyProjectionSuccess clears the directory's consecutive-failure count so
+// a transient error never accumulates toward the latch across an otherwise
+// healthy process.
 func (s *BdStore) noteReadyProjectionSuccess() {
-	s.readyProjectionMu.Lock()
-	defer s.readyProjectionMu.Unlock()
-	s.readyProjectionFailures = 0
+	capability := readyProjectionCapabilityFor(s.dir)
+	capability.mu.Lock()
+	defer capability.mu.Unlock()
+	capability.failures = 0
 }
 
 func (s *BdStore) fetchReadyProjection(ids []string) (map[string]bool, error) {

@@ -2954,7 +2954,7 @@ func TestCachingStoreBdPrimeAndReconcileSkipFullDepScan(t *testing.T) {
 		}
 		return []byte(`[]`), nil
 	}
-	cache := NewCachingStore(NewBdStore("/city", runner), nil)
+	cache := NewCachingStore(NewBdStore("/city/"+t.Name(), runner), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3002,7 +3002,7 @@ func TestCachingStoreBdPrimeActiveUsesListDependenciesForCachedReady(t *testing.
 		}
 		return []byte(`[]`), nil
 	}
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore("/city/"+t.Name(), runner), nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
@@ -3381,7 +3381,7 @@ func TestCachingStoreBdPrimeActiveUsesReadyProjectionForBD105(t *testing.T) {
 		}
 		return []byte(`[]`), nil
 	}
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore("/city/"+t.Name(), runner), nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
@@ -3434,7 +3434,7 @@ func TestCachingStoreBdReconcileAppliesFreshListWhenReadyProjectionErrors(t *tes
 		return []byte(`[]`), nil
 	}
 
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore("/city/"+t.Name(), runner), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3502,7 +3502,7 @@ func TestCachingStoreBdReconcileDropsPreservedReadyProjectionWhenDepsChange(t *t
 		return []byte(`[]`), nil
 	}
 
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore("/city/"+t.Name(), runner), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3585,7 +3585,7 @@ func TestCachingStoreBdReconcileDropsPreservedReadyProjectionWhenDepTargetStatus
 		return []byte(`[]`), nil
 	}
 
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore("/city/"+t.Name(), runner), nil)
 	blockerStatus = "open"
 	projectionBlocked = true
 	if err := cache.Prime(context.Background()); err != nil {
@@ -3686,7 +3686,7 @@ func TestCachingStoreBdReconcilePreservesReadyProjectionForRacedClosedRowBD105(t
 	}
 
 	var events []string
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), func(eventType, beadID string, _ json.RawMessage) {
+	cache := NewCachingStoreForTest(NewBdStore("/city/"+t.Name(), runner), func(eventType, beadID string, _ json.RawMessage) {
 		events = append(events, eventType+":"+beadID)
 	})
 	if err := cache.Prime(context.Background()); err != nil {
@@ -3755,7 +3755,7 @@ func TestCachingStoreBdPrimeActiveToleratesMissingReadyProjectionRowsBD105(t *te
 		}
 		return []byte(`[]`), nil
 	}
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore("/city/"+t.Name(), runner), nil)
 	if err := cache.PrimeActive(); err != nil {
 		t.Fatalf("PrimeActive: %v", err)
 	}
@@ -3828,7 +3828,7 @@ func TestCachingStoreBdPrimeProjectsIsBlockedForAllBDRowsBD105(t *testing.T) {
 		return []byte(`[]`), nil
 	}
 
-	cache := NewCachingStoreForTest(NewBdStore("/city", runner), nil)
+	cache := NewCachingStoreForTest(NewBdStore("/city/"+t.Name(), runner), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3897,7 +3897,7 @@ func TestCachingStoreBdReconcileRefreshesListDependenciesForCachedReady(t *testi
 	t.Parallel()
 
 	runner := newCachingStoreBdDepRunner(t)
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore("/city/"+t.Name(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3937,7 +3937,7 @@ func TestCachingStoreBdReconcileClearsCachedDepsWhenListOmitsDependencies(t *tes
 
 	runner := newCachingStoreBdDepRunner(t)
 	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore("/city/"+t.Name(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -3962,7 +3962,7 @@ func TestCachingStoreBdIncompleteDepsUseBackingForDownDepList(t *testing.T) {
 	t.Parallel()
 
 	runner := newCachingStoreBdDepRunner(t)
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore("/city/"+t.Name(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -4032,7 +4032,7 @@ func TestCachingStoreBdIncompleteDepsDepAddDoesNotDropExistingBackingDeps(t *tes
 
 	runner := newCachingStoreBdDepRunner(t)
 	runner.deps["bd-1"] = []Dep{{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"}}
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore("/city/"+t.Name(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}
@@ -4058,7 +4058,7 @@ func TestCachingStoreBdIncompleteDepsDepRemoveDoesNotDropExternalBackingDeps(t *
 		{IssueID: "bd-1", DependsOnID: "bd-2", Type: "blocks"},
 		{IssueID: "bd-1", DependsOnID: "bd-3", Type: "blocks"},
 	}
-	cache := NewCachingStore(NewBdStore("/city", runner.run), nil)
+	cache := NewCachingStore(NewBdStore("/city/"+t.Name(), runner.run), nil)
 	if err := cache.Prime(context.Background()); err != nil {
 		t.Fatalf("Prime: %v", err)
 	}

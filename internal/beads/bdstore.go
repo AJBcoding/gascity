@@ -299,10 +299,10 @@ type BdStore struct {
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
-	readyProjectionMu       sync.Mutex
-	readyProjectionChecked  bool
-	readyProjectionEnabled  bool
-	readyProjectionFailures int
+	// Ready-projection capability (the `bd sql` version gate and its failure
+	// latch) is NOT held here: it is keyed by store directory in
+	// readyProjectionCapabilities so it survives the short-lived stores the
+	// control-dispatcher path rebuilds every drain sweep (gas-x5k4).
 
 	// Conditional-write (ConditionalWriter) capability state, populated lazily on
 	// the first conditional write (bdstore_conditional.go). condWriteProbed/
