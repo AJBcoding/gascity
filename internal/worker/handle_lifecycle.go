@@ -295,6 +295,26 @@ func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 	return err
 }
 
+// SendKeys delivers bare key events to the worker's live runtime.
+//
+// It exists so a worker parked on a modal widget stays reachable: Message and
+// Nudge type literal text and then press Enter, which a select menu consumes
+// and discards.
+func (h *SessionHandle) SendKeys(ctx context.Context, req KeysRequest) (err error) {
+	event := h.beginOperationEvent(ctx, workerOperationSendKeys)
+	defer func() { event.finish(err) }()
+
+	if err = validateKeys(req.Keys); err != nil {
+		return err
+	}
+	id, err := h.ensureSessionID()
+	if err != nil {
+		return err
+	}
+	err = h.manager.SendKeys(id, req.Keys...)
+	return err
+}
+
 // Nudge sends a best-effort redirect message to the worker.
 func (h *SessionHandle) Nudge(ctx context.Context, req NudgeRequest) (result NudgeResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationNudge)

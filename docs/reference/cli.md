@@ -3761,6 +3761,7 @@ gc session
 |------------|-------------|
 | [gc session attach](#gc-session-attach) | Attach to (or resume) a chat session |
 | [gc session close](#gc-session-close) | Close a session permanently |
+| [gc session key](#gc-session-key) | Send bare key events to a session |
 | [gc session kill](#gc-session-kill) | Force-kill session runtime (reconciler restarts) |
 | [gc session list](#gc-session-list) | List chat sessions |
 | [gc session logs](#gc-session-logs) | Show session logs for a session |
@@ -3804,6 +3805,38 @@ gc session close <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+
+## gc session key
+
+Send bare key events to a session's runtime, typing no text and
+appending no Enter.
+
+This is how a session blocked on a modal widget — a question menu, a
+selection list, a confirmation dialog — gets answered. Those widgets
+consume literal text and read Enter as their own activate key, so
+"gc session submit" cannot deliver a message into one: the text is
+discarded and the Enter lands on whatever row has focus.
+
+Keys are passed through to the runtime verbatim. For tmux-backed
+sessions they are tmux key names ("Enter", "Escape", "Down", "Up",
+"Space", "Tab", "C-c"); an unknown name is delivered as literal text.
+Use "gc session peek" to read the widget before and after.
+
+```
+gc session key <id-or-alias> <key...> [flags]
+```
+
+**Example:**
+
+```
+gc session peek furiosa
+gc session key furiosa Down Space Enter
+gc session key furiosa Escape
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | JSON output |
 
 ## gc session kill
 

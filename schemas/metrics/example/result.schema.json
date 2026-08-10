@@ -206,7 +206,8 @@
               "logout",
               "whoami",
               "runtime-heartbeat",
-              "beads-city-use-mysql"
+              "beads-city-use-mysql",
+              "session-key"
             ]
           },
           "event_id": {
