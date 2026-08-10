@@ -295,6 +295,80 @@ func TestProbeDefaultBranch_FromOriginHEAD(t *testing.T) {
 	}
 }
 
+// gas-4cu: a repo whose remote is not named "origin" still has a mainline.
+// Probing only origin/HEAD silently registered the checked-out feature branch
+// as the rig's default branch, pointing every worktree at the wrong target.
+func TestProbeDefaultBranch_FromNonOriginRemoteHEAD(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	// The real-world shape: the remote is named "ajb", not "origin", and the
+	// checked-out branch is a feature branch.
+	runGit(t, clone, "remote", "rename", "origin", "ajb")
+	runGit(t, clone, "checkout", "-b", "fix/some-feature")
+
+	target := "refs/remotes/ajb/main"
+	runGit(t, clone, "update-ref", target, "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/ajb/HEAD", target)
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "main" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want %q", branch, "main")
+	}
+	if remote != "ajb" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want %q", remote, "ajb")
+	}
+	if got := g.ProbeDefaultBranch(); got != "main" {
+		t.Errorf("ProbeDefaultBranch() = %q, want %q", got, "main")
+	}
+}
+
+// origin stays the preferred remote when several are configured.
+func TestProbeDefaultBranch_PrefersOriginOverOtherRemotes(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "remote", "add", "ajb", bare)
+
+	runGit(t, clone, "update-ref", "refs/remotes/origin/master", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/master")
+	runGit(t, clone, "update-ref", "refs/remotes/ajb/trunk", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/ajb/HEAD", "refs/remotes/ajb/trunk")
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "master" || remote != "origin" {
+		t.Errorf("ProbeDefaultBranchFrom() = (%q, %q), want (master, origin)", branch, remote)
+	}
+}
+
+// The current-branch fallback reports no remote, so callers can tell the
+// operator the mainline was guessed rather than read from a remote HEAD.
+func TestProbeDefaultBranchFrom_CurrentBranchFallbackHasNoRemote(t *testing.T) {
+	repo := initTestRepo(t)
+	runGit(t, repo, "checkout", "-b", "develop")
+
+	g := New(repo)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "develop" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want develop", branch)
+	}
+	if remote != "" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want empty for the current-branch fallback", remote)
+	}
+}
+
 func TestProbeDefaultBranch_FallsBackToCurrentBranch(t *testing.T) {
 	repo := initTestRepo(t)
 	// Force a known branch name; the test repo's default may be "main"
