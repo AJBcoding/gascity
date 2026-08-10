@@ -1,11 +1,9 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -13,13 +11,10 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 const (
-	// tmuxLeakCommandTimeout caps each tmux/ps invocation the sweep makes, so
-	// one wedged server cannot stall the end of the test run.
-	tmuxLeakCommandTimeout = 2 * time.Second
-
 	// tmuxLeakSettleDefaultWindow bounds how long the guard waits for tmux
 	// servers that are still shutting down. Shorter than the dolt window: a
 	// tmux server exits as soon as its last session dies, so a server still
@@ -28,10 +23,6 @@ const (
 
 	// tmuxLeakSettleInterval is the gap between re-scans inside the window.
 	tmuxLeakSettleInterval = 250 * time.Millisecond
-
-	// tmuxLeakSettleEnv overrides the settle window in milliseconds. Zero
-	// restores single-scan behavior, which is what the unit tests want.
-	tmuxLeakSettleEnv = "GC_TEST_TMUX_LEAK_SETTLE_MS"
 )
 
 // TmuxProcInfo describes one live tmux server discovered through its socket.
@@ -48,7 +39,7 @@ type TmuxProcInfo struct {
 // tmuxLeakSettleWindow returns the settle window, overridable with
 // GC_TEST_TMUX_LEAK_SETTLE_MS. Zero restores the old single-scan behavior.
 func tmuxLeakSettleWindow() time.Duration {
-	if v := os.Getenv(tmuxLeakSettleEnv); v != "" {
+	if v := os.Getenv(tmuxtest.LeakSettleEnv); v != "" {
 		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
 			return time.Duration(n) * time.Millisecond
 		}
@@ -85,47 +76,18 @@ func discoverTmuxServersForSocketRoot(socketRoot string) ([]TmuxProcInfo, error)
 		if err != nil || info.Mode()&os.ModeSocket == 0 {
 			continue
 		}
-		pid, ok := tmuxServerPID(socket)
+		pid, ok := tmuxtest.ServerPID(socket)
 		if !ok {
 			continue
 		}
 		out = append(out, TmuxProcInfo{
 			PID:        pid,
 			SocketPath: socket,
-			Argv:       tmuxServerArgv(pid),
+			Argv:       tmuxtest.ServerArgv(pid),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].PID < out[j].PID })
 	return out, nil
-}
-
-// tmuxServerPID asks the server on socketPath for its own PID. A socket with
-// no server behind it fails here, which is how stale inodes are filtered out.
-func tmuxServerPID(socketPath string) (int, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxLeakCommandTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "tmux", "-S", socketPath, "display-message", "-p", "#{pid}").Output()
-	if err != nil {
-		return 0, false
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(out)))
-	if err != nil || pid <= 0 {
-		return 0, false
-	}
-	return pid, true
-}
-
-// tmuxServerArgv reports the server's command line for the leak report. It is
-// diagnostic only — scoping never depends on it — so a failure yields nil
-// rather than dropping the leak.
-func tmuxServerArgv(pid int) []string {
-	ctx, cancel := context.WithTimeout(context.Background(), tmuxLeakCommandTimeout)
-	defer cancel()
-	out, err := exec.CommandContext(ctx, "ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
-	if err != nil {
-		return nil
-	}
-	return strings.Fields(strings.TrimSpace(string(out)))
 }
 
 // snapshotTmuxServersForSocketRoot maps PID to server for every enumerated

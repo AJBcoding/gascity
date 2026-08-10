@@ -5,10 +5,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -141,7 +139,7 @@ func TestSettleTmuxLeaksReportsServerThatOutlivesWindow(t *testing.T) {
 }
 
 func TestLeakGuardFailsAndReapsLeakedTmuxServer(t *testing.T) {
-	t.Setenv(tmuxLeakSettleEnv, "0")
+	tmuxtest.DisableLeakSettleWindow(t)
 	socketRoot := filepath.Join(t.TempDir(), "tmux")
 	leaked := TmuxProcInfo{
 		PID:        2001,
@@ -182,7 +180,7 @@ func TestLeakGuardFailsAndReapsLeakedTmuxServer(t *testing.T) {
 func TestLeakGuardNeverTouchesTmuxServerOutsideRunRoot(t *testing.T) {
 	// Acceptance: a server belonging to another checkout or to the operator's
 	// own tmux is never reported and never reaped.
-	t.Setenv(tmuxLeakSettleEnv, "0")
+	tmuxtest.DisableLeakSettleWindow(t)
 	socketRoot := filepath.Join(t.TempDir(), "tmux")
 	foreign := TmuxProcInfo{
 		PID:        2002,
@@ -298,14 +296,13 @@ func TestDiscoverTmuxServersForSocketRootFindsLiveServer(t *testing.T) {
 
 	// -S pins the socket path, so this server is discoverable without
 	// mutating TMUX_TMPDIR for the whole test process.
-	start := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "probe", "sleep 120")
-	if out, err := start.CombinedOutput(); err != nil {
+	if out, err := tmuxtest.StartDetachedSessionOnSocketPath(socket, "probe"); err != nil {
 		t.Skipf("starting isolated tmux server: %v: %s", err, out)
 	}
 	// Register the reaper from the PID resolved at spawn time, before any
 	// assertion can abort the test: a cleanup that depended on the assertions
 	// passing would leak a server whenever this test fails.
-	spawnedPID, ok := tmuxServerPID(socket)
+	spawnedPID, ok := tmuxtest.ServerPID(socket)
 	registerTmuxTestServerReaper(t, spawnedPID)
 	if !ok {
 		t.Fatalf("resolving pid of the server on %s", socket)
@@ -335,7 +332,7 @@ func TestDiscoverTmuxServersForSocketRootFindsLiveServer(t *testing.T) {
 // server left running under this run's socket root fails the package.
 func TestTmuxLeakGuardCatchesRealLeakedServer(t *testing.T) {
 	tmuxtest.RequireTmux(t)
-	t.Setenv(tmuxLeakSettleEnv, "0")
+	tmuxtest.DisableLeakSettleWindow(t)
 	socketRoot := shortSocketTempDir(t, "gctmuxguard")
 	socket := tmuxLeakTestSocket(socketRoot, "gctest-leaked")
 	if err := os.MkdirAll(filepath.Dir(socket), 0o700); err != nil {
@@ -354,11 +351,10 @@ func TestTmuxLeakGuardCatchesRealLeakedServer(t *testing.T) {
 	code := g.runWith(
 		func() int {
 			// Stand in for a test that forgets to tear its server down.
-			start := exec.Command("tmux", "-S", socket, "new-session", "-d", "-s", "leaked", "sleep 120")
-			if out, err := start.CombinedOutput(); err != nil {
+			if out, err := tmuxtest.StartDetachedSessionOnSocketPath(socket, "leaked"); err != nil {
 				t.Skipf("starting isolated tmux server: %v: %s", err, out)
 			}
-			spawnedPID, _ = tmuxServerPID(socket)
+			spawnedPID, _ = tmuxtest.ServerPID(socket)
 			registerTmuxTestServerReaper(t, spawnedPID)
 			return 0
 		},
@@ -394,11 +390,10 @@ func TestTmuxLeakGuardWatchesTheProcessSocketRoot(t *testing.T) {
 	}
 
 	socketName := fmt.Sprintf("gctest-wiring-%d", os.Getpid())
-	start := exec.Command("tmux", "-L", socketName, "new-session", "-d", "-s", "probe", "sleep 120")
-	if out, err := start.CombinedOutput(); err != nil {
+	if out, err := tmuxtest.StartDetachedSessionOnSocketName(socketName, "probe"); err != nil {
 		t.Skipf("starting tmux server on the process socket root: %v: %s", err, out)
 	}
-	spawnedPID, _ := tmuxServerPID(tmuxLeakTestSocket(socketRoot, socketName))
+	spawnedPID, _ := tmuxtest.ServerPID(tmuxLeakTestSocket(socketRoot, socketName))
 	registerTmuxTestServerReaper(t, spawnedPID)
 
 	got, err := discoverTmuxServersForSocketRoot(socketRoot)
@@ -451,11 +446,10 @@ func TestNamedSessionFixtureLeavesNoTmuxServerBehind(t *testing.T) {
 	t.Run("test that uses the named-session fixture", func(t *testing.T) {
 		writeNamedSessionCityTOML(t, t.TempDir())
 
-		start := exec.Command("tmux", "-L", namedSessionTestSocketName, "new-session", "-d", "-s", "mayor", "sleep 120")
-		if out, err := start.CombinedOutput(); err != nil {
+		if out, err := tmuxtest.StartDetachedSessionOnSocketName(namedSessionTestSocketName, "mayor"); err != nil {
 			t.Skipf("starting tmux server on the fixture socket: %v: %s", err, out)
 		}
-		spawnedPID, _ = tmuxServerPID(socket)
+		spawnedPID, _ = tmuxtest.ServerPID(socket)
 		if spawnedPID <= 0 {
 			t.Fatalf("no server answered on %s after starting one", socket)
 		}
@@ -482,18 +476,6 @@ func TestNamedSessionFixtureLeavesNoTmuxServerBehind(t *testing.T) {
 // the test, by PID, whether or not the assertions that follow pass.
 func registerTmuxTestServerReaper(t *testing.T, pid int) {
 	t.Helper()
-	t.Cleanup(func() {
-		if pid <= 0 {
-			return
-		}
-		// By PID only: never a bare kill-server, never the default socket.
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-		deadline := time.Now().Add(2 * time.Second)
-		for pidAlive(pid) && time.Now().Before(deadline) {
-			time.Sleep(20 * time.Millisecond)
-		}
-		if pidAlive(pid) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-	})
+	// By PID only: never a bare kill-server, never the default socket.
+	t.Cleanup(func() { tmuxtest.TerminateAndWait(pid) })
 }
