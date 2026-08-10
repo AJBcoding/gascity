@@ -89,22 +89,21 @@ func (c DoltConfig) DisableEventFlushEnabled() bool {
 //
 // Backend determines which backend-specific fields are meaningful. When
 // returned from LoadMetadataState the populated backend-specific fields are
-// guaranteed consistent with Backend — i.e. a state with Backend == "postgres"
-// always has every Postgres field non-empty and PostgresPort already verified
-// as a TCP-port-shaped string, and a state with Backend == "mysql" always has
-// MySQLDSN and MySQLDatabase non-empty (the DSN is treated as opaque; bd owns
-// its format and credential handling).
+// guaranteed consistent with Backend — i.e. a state with Backend == "mysql"
+// always has MySQLDSN and MySQLDatabase non-empty (the DSN is treated as
+// opaque; bd owns its format and credential handling).
+//
+// The postgres quartet lived here until 2026-08-10 (gas-1oou). With postgres
+// retired, postgres_* keys are no longer modeled: they are foreign residue,
+// left untouched like any other key belonging to a backend gc does not
+// implement. See crossBackendKeysToScrub.
 type MetadataState struct {
-	Database         string `json:"database"`
-	Backend          string `json:"backend"`
-	DoltMode         string `json:"dolt_mode,omitempty"`
-	DoltDatabase     string `json:"dolt_database,omitempty"`
-	PostgresHost     string `json:"postgres_host,omitempty"`
-	PostgresPort     string `json:"postgres_port,omitempty"`
-	PostgresUser     string `json:"postgres_user,omitempty"`
-	PostgresDatabase string `json:"postgres_database,omitempty"`
-	MySQLDSN         string `json:"mysql_dsn,omitempty"`
-	MySQLDatabase    string `json:"mysql_database,omitempty"`
+	Database      string `json:"database"`
+	Backend       string `json:"backend"`
+	DoltMode      string `json:"dolt_mode,omitempty"`
+	DoltDatabase  string `json:"dolt_database,omitempty"`
+	MySQLDSN      string `json:"mysql_dsn,omitempty"`
+	MySQLDatabase string `json:"mysql_database,omitempty"`
 }
 
 // MetadataParseError reports a failure to parse or validate metadata.json.
@@ -154,13 +153,6 @@ var doltBackendKeys = []string{
 	"dolt_database",
 }
 
-var postgresBackendKeys = []string{
-	"postgres_host",
-	"postgres_port",
-	"postgres_user",
-	"postgres_database",
-}
-
 var mysqlBackendKeys = []string{
 	"mysql_dsn",
 	"mysql_database",
@@ -176,19 +168,22 @@ var mysqlBackendKeys = []string{
 // tell an inert leftover from live configuration, and a scope bound to such a
 // backend never reaches this function at all.
 //
-// This assembly registers mysql and postgres (backend_bundle.go), so their keys
-// ARE gc's to scrub — an OSS build, which registers neither, correctly leaves
-// them alone. Keep this switch in step with compiledBackendNames().
+// This assembly registers mysql (backend_bundle.go), so its keys ARE gc's to
+// scrub — an OSS build, which does not register it, correctly leaves them
+// alone. Keep this switch in step with compiledBackendNames().
+//
+// postgres was registered here until 2026-08-10 (gas-1oou). Retiring it moved
+// postgres_* into the "backend gc does not implement" class described above, so
+// those keys are deliberately no longer scrubbed from any arm — the rule stated
+// two paragraphs up now applies to them like any other foreign key.
 func crossBackendKeysToScrub(backend string) []string {
 	switch backend {
 	case "dolt":
-		return append(append([]string{}, postgresBackendKeys...), mysqlBackendKeys...)
+		return append([]string{}, mysqlBackendKeys...)
 	case "doltlite":
-		return append(append([]string{"dolt_mode"}, postgresBackendKeys...), mysqlBackendKeys...)
-	case "postgres":
-		return append(append([]string{}, doltBackendKeys...), mysqlBackendKeys...)
+		return append([]string{"dolt_mode"}, mysqlBackendKeys...)
 	case "mysql":
-		return append(append([]string{}, doltBackendKeys...), postgresBackendKeys...)
+		return append([]string{}, doltBackendKeys...)
 	default:
 		return nil
 	}
@@ -413,12 +408,13 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 //
 // Validation order is deterministic: the operator always sees the same
 // top-most message when several things are wrong. Order is JSON parse (E1) →
-// mixed-backend (E3) → unknown backend (E2) → postgres-required (E4) →
-// postgres-port-format (E5) → mysql-required (E4). The order is pinned by
-// TestLoadMetadataStateRejectionOrderIsPinned.
+// mixed-backend (E3) → unknown backend (E2) → mysql-required (E4). The order is
+// pinned by TestLoadMetadataStateRejectionOrderIsPinned. The postgres-required
+// and postgres-port-format rungs were removed with postgres (gas-1oou,
+// 2026-08-10); backend="postgres" is now refused one rung earlier, at E2.
 //
 // The connection-shape rungs after E2 survive here because this assembly does
-// implement mysql and postgres; an OSS build registers neither and stops at
+// implement mysql; an OSS build does not register it and stops at
 // E2. E2 asks the compiled backend-name registry (backend_bundle.go) rather
 // than a literal allowlist, so its refusal enumerates what this build actually
 // registers. An empty Backend is permitted — it is a registered name — and
@@ -457,22 +453,6 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 		return MetadataState{}, false, &MetadataParseError{Path: abs, Reason: err.Error(), Err: err}
 	}
 
-	if state.Backend == "postgres" {
-		if state.PostgresHost == "" || state.PostgresPort == "" || state.PostgresUser == "" || state.PostgresDatabase == "" {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
-			}
-		}
-		port, err := strconv.Atoi(state.PostgresPort)
-		if err != nil || port < 1 || port > 65535 {
-			return MetadataState{}, false, &MetadataParseError{
-				Path:   abs,
-				Reason: fmt.Sprintf("postgres_port must be a TCP port (1..65535), got %q", state.PostgresPort),
-			}
-		}
-	}
-
 	if state.Backend == "mysql" {
 		if state.MySQLDSN == "" || state.MySQLDatabase == "" {
 			return MetadataState{}, false, &MetadataParseError{
@@ -488,7 +468,7 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 // backendFieldFamilies is the declaration order of backend field families,
 // matching the JSON-key declaration order on MetadataState. Error messages
 // name families in this order regardless of which one state.Backend selects.
-var backendFieldFamilies = []string{"dolt", "postgres", "mysql"}
+var backendFieldFamilies = []string{"dolt", "mysql"}
 
 // backendFamily maps a backend name to the field family whose keys it owns.
 // Returns "" for empty or unknown backends.
@@ -496,8 +476,6 @@ func backendFamily(backend string) string {
 	switch backend {
 	case "dolt", "doltlite":
 		return "dolt"
-	case "postgres":
-		return "postgres"
 	case "mysql":
 		return "mysql"
 	default:
@@ -512,11 +490,10 @@ func backendFamily(backend string) string {
 // fields from two or more families are populated.
 //
 // Field-iteration order is the JSON-key declaration order on MetadataState
-// (dolt_mode, dolt_database, postgres_host, postgres_port, postgres_user,
-// postgres_database, mysql_dsn, mysql_database). When state.Backend is empty
-// or unknown and several families appear, the first populated field across
-// all families wins (Dolt preferred per declaration order) and the first two
-// populated families are reported.
+// (dolt_mode, dolt_database, mysql_dsn, mysql_database). When state.Backend is
+// empty or unknown and several families appear, the first populated field
+// across all families wins (Dolt preferred per declaration order) and the first
+// two populated families are reported.
 func mixedBackendField(state MetadataState) (string, [2]string, bool) {
 	type entry struct {
 		name    string
@@ -526,10 +503,6 @@ func mixedBackendField(state MetadataState) (string, [2]string, bool) {
 	fields := []entry{
 		{"dolt_mode", state.DoltMode, "dolt"},
 		{"dolt_database", state.DoltDatabase, "dolt"},
-		{"postgres_host", state.PostgresHost, "postgres"},
-		{"postgres_port", state.PostgresPort, "postgres"},
-		{"postgres_user", state.PostgresUser, "postgres"},
-		{"postgres_database", state.PostgresDatabase, "postgres"},
 		{"mysql_dsn", state.MySQLDSN, "mysql"},
 		{"mysql_database", state.MySQLDatabase, "mysql"},
 	}
@@ -698,16 +671,12 @@ func EnsureCanonicalMetadata(fs fsys.FS, path string, state MetadataState) (bool
 
 	changed := false
 	defaults := map[string]string{
-		"database":          strings.TrimSpace(state.Database),
-		"backend":           strings.TrimSpace(state.Backend),
-		"dolt_mode":         strings.TrimSpace(state.DoltMode),
-		"dolt_database":     strings.TrimSpace(state.DoltDatabase),
-		"postgres_host":     strings.TrimSpace(state.PostgresHost),
-		"postgres_port":     strings.TrimSpace(state.PostgresPort),
-		"postgres_user":     strings.TrimSpace(state.PostgresUser),
-		"postgres_database": strings.TrimSpace(state.PostgresDatabase),
-		"mysql_dsn":         strings.TrimSpace(state.MySQLDSN),
-		"mysql_database":    strings.TrimSpace(state.MySQLDatabase),
+		"database":       strings.TrimSpace(state.Database),
+		"backend":        strings.TrimSpace(state.Backend),
+		"dolt_mode":      strings.TrimSpace(state.DoltMode),
+		"dolt_database":  strings.TrimSpace(state.DoltDatabase),
+		"mysql_dsn":      strings.TrimSpace(state.MySQLDSN),
+		"mysql_database": strings.TrimSpace(state.MySQLDatabase),
 	}
 	for key, want := range defaults {
 		if want == "" {

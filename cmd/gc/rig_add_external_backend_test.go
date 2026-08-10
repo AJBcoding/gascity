@@ -131,19 +131,22 @@ func TestInheritedExternalScopeMetadataDerivesRigDatabaseFromPrefix(t *testing.T
 	}
 }
 
-func TestInheritedExternalScopeMetadataDeclinesPostgresCity(t *testing.T) {
-	// Postgres scopes keep today's behavior: gc writes no derived metadata,
-	// because the per-scope PG database and credentials are not gc's to mint.
-	city := contract.MetadataState{
-		Database:         "beads.db",
-		Backend:          "postgres",
-		PostgresHost:     "db.example.test",
-		PostgresPort:     "5432",
-		PostgresUser:     "beads",
-		PostgresDatabase: "hq_beads",
-	}
-	if _, ok := inheritedExternalScopeMetadata(city, "gas"); ok {
-		t.Fatal("inheritedExternalScopeMetadata ok = true for postgres; want no derived write")
+func TestInheritedExternalScopeMetadataDeclinesNonMySQLBackend(t *testing.T) {
+	// mysql is the only backend gc derives per-scope metadata for. Anything
+	// else gets no derived write. "postgres" is the case worth naming: it was
+	// a registered external backend that declined here for its own reason
+	// (the PG database and credentials were never gc's to mint), and after it
+	// was retired (gas-1oou) it must still decline — now because gc does not
+	// recognize it at all. Same verdict, so a regression cannot hide behind
+	// the change of reason.
+	for _, backend := range []string{"postgres", "cockroach", ""} {
+		city := contract.MetadataState{
+			Database: "beads.db",
+			Backend:  backend,
+		}
+		if _, ok := inheritedExternalScopeMetadata(city, "gas"); ok {
+			t.Errorf("inheritedExternalScopeMetadata ok = true for backend %q; want no derived write", backend)
+		}
 	}
 }
 
