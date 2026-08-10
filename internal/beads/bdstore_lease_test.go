@@ -21,12 +21,12 @@ func TestBdStoreRenewLeaseRunsBdHeartbeatAsHolder(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd heartbeat gas-1 --actor polecat-a --json`: {
+		`bd heartbeat gas-1 --actor holder-a --json`: {
 			out: []byte(`{"id":"gas-1"}`),
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
-	if err := s.RenewLease("gas-1", "polecat-a"); err != nil {
+	if err := s.RenewLease("gas-1", "holder-a"); err != nil {
 		t.Fatalf("RenewLease() = %v, want nil", err)
 	}
 }
@@ -40,12 +40,12 @@ func TestBdStoreRenewLeaseWrapsRunnerError(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd heartbeat gas-1 --actor polecat-a --json`: {
+		`bd heartbeat gas-1 --actor holder-a --json`: {
 			err: fmt.Errorf("lease not found for holder"),
 		},
 	})
 	s := beads.NewBdStore("/city", runner)
-	err := s.RenewLease("gas-1", "polecat-a")
+	err := s.RenewLease("gas-1", "holder-a")
 	if err == nil {
 		t.Fatal("RenewLease() = nil, want error")
 	}

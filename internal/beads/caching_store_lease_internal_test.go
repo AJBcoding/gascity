@@ -26,11 +26,11 @@ func TestCachingStoreRenewLeaseDelegatesToBacking(t *testing.T) {
 	backing := &leaseRenewingBackingStore{Store: NewMemStore()}
 	c := NewCachingStoreForTest(backing, nil)
 
-	if err := c.RenewLease("gas-1", "polecat-a"); err != nil {
+	if err := c.RenewLease("gas-1", "holder-a"); err != nil {
 		t.Fatalf("RenewLease() = %v, want nil", err)
 	}
-	if len(backing.renewCalls) != 1 || backing.renewCalls[0] != "gas-1/polecat-a" {
-		t.Fatalf("backing renew calls = %v, want [gas-1/polecat-a]", backing.renewCalls)
+	if len(backing.renewCalls) != 1 || backing.renewCalls[0] != "gas-1/holder-a" {
+		t.Fatalf("backing renew calls = %v, want [gas-1/holder-a]", backing.renewCalls)
 	}
 }
 
@@ -41,7 +41,7 @@ func TestCachingStoreRenewLeaseDelegatesToBacking(t *testing.T) {
 func TestCachingStoreRenewLeaseWithoutCapabilityReportsUnsupported(t *testing.T) {
 	c := NewCachingStoreForTest(NewMemStore(), nil)
 
-	err := c.RenewLease("gas-1", "polecat-a")
+	err := c.RenewLease("gas-1", "holder-a")
 	if !errors.Is(err, ErrLeaseRenewalUnsupported) {
 		t.Fatalf("RenewLease() = %v, want ErrLeaseRenewalUnsupported", err)
 	}

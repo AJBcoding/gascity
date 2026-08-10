@@ -1406,6 +1406,13 @@ type BeadsConfig struct {
 	// "require" (guarded release or a typed refusal). Empty defaults to "off".
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
+	// LeaseRenewal selects whether the controller renews the claim leases of
+	// beads held by live sessions: "off" (no renewal driver — leases lapse
+	// mid-work and bd reclaim cannot tell a working holder from a dead one),
+	// "auto" (renew through stores capable of it, skipping lease-less stores),
+	// or "require" (renew, or report a store that cannot as an error). Empty
+	// defaults to "auto". Any other value fails config load.
+	LeaseRenewal string `toml:"lease_renewal,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1464,6 +1471,21 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 		return "off"
 	}
 	return b.GuardedRelease
+}
+
+// NormalizedLeaseRenewal returns the configured lease-renewal value, mapping
+// ONLY the empty string to the built-in default "auto". Unlike its two
+// siblings this gate defaults ON, because it does not adopt a new bd verb
+// behind an untagged pin: bd's heartbeat verb ships today, and the state it
+// selects away from — bd stamping a claim lease unconditionally while bd
+// reclaim is live and nothing renews — is the one gas-76r exists to end. An
+// unknown non-empty value passes through verbatim rather than collapsing to
+// the default; it is rejected upstream by internal/rollout on resolve.
+func (b BeadsConfig) NormalizedLeaseRenewal() string {
+	if b.LeaseRenewal == "" {
+		return "auto"
+	}
+	return b.LeaseRenewal
 }
 
 // UsesBD105CLISemantics reports whether bd-backed code may rely on bd 1.0.5
@@ -4634,6 +4656,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateGuardedRelease(cfg.Beads.GuardedRelease); err != nil {
 		return nil, err
 	}
+	if err := validateLeaseRenewal(cfg.Beads.LeaseRenewal); err != nil {
+		return nil, err
+	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.
@@ -4670,6 +4695,22 @@ func validateGuardedRelease(raw string) error {
 	}
 	if _, err := gate.ParseMode(raw); err != nil {
 		return fmt.Errorf("beads.guarded_release: %w", err)
+	}
+	return nil
+}
+
+// validateLeaseRenewal rejects an out-of-enum beads.lease_renewal value at load
+// time. Like its siblings this gate selects a correctness discipline, and here a
+// typo is worse than usual: silently meaning "off" would leave an operator
+// believing claim leases are renewed while every live holder's lease lapses
+// mid-work and bd reclaim treats it as dead. The empty string (unset) is valid
+// and defaults to auto.
+func validateLeaseRenewal(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	if _, err := gate.ParseMode(raw); err != nil {
+		return fmt.Errorf("beads.lease_renewal: %w", err)
 	}
 	return nil
 }

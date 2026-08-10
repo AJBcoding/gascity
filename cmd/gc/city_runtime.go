@@ -134,8 +134,15 @@ type CityRuntime struct {
 	orderSweepWatchdogLast             time.Time
 	orderTrackingRetentionWatchdogLast time.Time
 	nudgeMailSweepWatchdogLast         time.Time
-	leaseRenewalWatchdogLast           time.Time
-	wispIndexMigrationApplied          bool
+	// Claim-lease renewal pacing (gas-76r). The cadence is measured from the
+	// last COMPLETE sweep, not the last attempt, so a failed renewal does not
+	// spend a full cadence of lease margin; leaseRenewalFailures drives the
+	// retry backoff and leaseRenewalCursor resumes a budget-truncated sweep.
+	leaseRenewalLastSuccess   time.Time
+	leaseRenewalLastAttempt   time.Time
+	leaseRenewalFailures      int
+	leaseRenewalCursor        string
+	wispIndexMigrationApplied bool
 
 	rec events.Recorder
 	cs  *controllerState // nil when controller-managed bead stores are unavailable

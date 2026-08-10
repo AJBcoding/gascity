@@ -91,14 +91,15 @@ func TestSweepClaimLeaseRenewalsRenewsOnlyRunningHolders(t *testing.T) {
 	}
 
 	var stderr bytes.Buffer
-	renewed := sweepClaimLeaseRenewals(
-		[]leaseSweepTarget{{label: "rig", store: store}},
-		map[string]bool{"sess-running": true},
-		&stderr, "test",
-	)
+	res := sweepClaimLeaseRenewals(leaseSweepConfig{
+		targets:   []leaseSweepTarget{{label: "rig", store: store}},
+		running:   map[string]bool{"sess-running": true},
+		stderr:    &stderr,
+		logPrefix: "test",
+	})
 
-	if renewed != 1 {
-		t.Errorf("renewed = %d, want 1", renewed)
+	if res.renewed != 1 {
+		t.Errorf("renewed = %d, want 1", res.renewed)
 	}
 	want := held + "/sess-running"
 	if len(store.renews) != 1 || store.renews[0] != want {
@@ -114,14 +115,15 @@ func TestSweepClaimLeaseRenewalsSkipsStoresWithoutCapability(t *testing.T) {
 	seedInProgressBead(t, store, "sess-running")
 
 	var stderr bytes.Buffer
-	renewed := sweepClaimLeaseRenewals(
-		[]leaseSweepTarget{{label: "rig", store: store}},
-		map[string]bool{"sess-running": true},
-		&stderr, "test",
-	)
+	res := sweepClaimLeaseRenewals(leaseSweepConfig{
+		targets:   []leaseSweepTarget{{label: "rig", store: store}},
+		running:   map[string]bool{"sess-running": true},
+		stderr:    &stderr,
+		logPrefix: "test",
+	})
 
-	if renewed != 0 {
-		t.Errorf("renewed = %d, want 0", renewed)
+	if res.renewed != 0 {
+		t.Errorf("renewed = %d, want 0", res.renewed)
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", stderr.String())
@@ -138,14 +140,15 @@ func TestSweepClaimLeaseRenewalsContinuesPastRenewalError(t *testing.T) {
 	seedInProgressBead(t, store, "sess-b")
 
 	var stderr bytes.Buffer
-	renewed := sweepClaimLeaseRenewals(
-		[]leaseSweepTarget{{label: "rig", store: store}},
-		map[string]bool{"sess-a": true, "sess-b": true},
-		&stderr, "test",
-	)
+	res := sweepClaimLeaseRenewals(leaseSweepConfig{
+		targets:   []leaseSweepTarget{{label: "rig", store: store}},
+		running:   map[string]bool{"sess-a": true, "sess-b": true},
+		stderr:    &stderr,
+		logPrefix: "test",
+	})
 
-	if renewed != 1 {
-		t.Errorf("renewed = %d, want 1", renewed)
+	if res.renewed != 1 {
+		t.Errorf("renewed = %d, want 1", res.renewed)
 	}
 	if len(store.renews) != 2 {
 		t.Errorf("renew calls = %v, want both beads attempted", store.renews)
@@ -166,14 +169,15 @@ func TestSweepClaimLeaseRenewalsTreatsUnsupportedAsStoreSkip(t *testing.T) {
 	store.renewErr[id] = beads.ErrLeaseRenewalUnsupported
 
 	var stderr bytes.Buffer
-	renewed := sweepClaimLeaseRenewals(
-		[]leaseSweepTarget{{label: "rig", store: store}},
-		map[string]bool{"sess-a": true},
-		&stderr, "test",
-	)
+	res := sweepClaimLeaseRenewals(leaseSweepConfig{
+		targets:   []leaseSweepTarget{{label: "rig", store: store}},
+		running:   map[string]bool{"sess-a": true},
+		stderr:    &stderr,
+		logPrefix: "test",
+	})
 
-	if renewed != 0 {
-		t.Errorf("renewed = %d, want 0", renewed)
+	if res.renewed != 0 {
+		t.Errorf("renewed = %d, want 0", res.renewed)
 	}
 	if stderr.Len() != 0 {
 		t.Errorf("stderr = %q, want empty", stderr.String())
@@ -207,7 +211,7 @@ func runningSnapshot(sessionNames ...string) *sessionBeadSnapshot {
 // TestRunLeaseRenewalWatchdogSkipsSessionsWithoutLiveRuntime proves only
 // sessions with a live runtime (StateActive) get their held leases renewed. An
 // asleep or suspended session is not working its bead; keeping its lease alive
-// would hide it from bd reclaim exactly the way the bug hid dead polecats.
+// would hide it from bd reclaim exactly the way the bug hid dead workers.
 func TestRunLeaseRenewalWatchdogSkipsSessionsWithoutLiveRuntime(t *testing.T) {
 	store := newLeaseRenewingMemStore()
 	seedInProgressBead(t, store, "sess-asleep")
