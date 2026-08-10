@@ -605,6 +605,21 @@ func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 		return false, nil
 	}
 	if !samePath(cityPath, dir) {
+		// A scope carrying no metadata of its own has not chosen a backend, so
+		// it inherits the city's — a fact decidable from the city alone. The
+		// authoritative-scope-config path below cannot answer for it: `gc rig
+		// add` writes the rig's .beads/config.yaml only after this gate runs,
+		// so on a fresh rig directory the resolve finds nothing authoritative
+		// and every new rig on a city bound to someone else's store fell
+		// through to managed Dolt — where the add died reaching a Dolt server
+		// that does not exist (gas-4cu).
+		//
+		// This decides dispatch only. The rig is deliberately left unpinned:
+		// an inherited scope resolves the city's binding on each use rather
+		// than carrying a copy that would go stale when the city moves.
+		if !ok {
+			return scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+		}
 		resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, dir, "")
 		if err != nil {
 			return false, err
