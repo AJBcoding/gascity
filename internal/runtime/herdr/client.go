@@ -68,6 +68,31 @@ type envelope struct {
 	Error  *herdrError     `json:"error"`
 }
 
+// herdrErrorFrom decodes a herdr error envelope out of raw command output, or
+// returns nil when the bytes are not one.
+//
+// herdr reports a structured rejection on STDERR with a non-zero exit, not on
+// stdout with exit 0 (measured against 0.7.5: `agent start … --pane w9:p9` →
+// exit 1, stderr `{"error":{"code":"agent_pane_not_found",…}}`). Decoding only
+// the stdout form leaves every herdr-reported failure untyped, which silently
+// disables all of the provider's code-based recovery — the agent_pane_busy
+// retry in Start and resolveAgentNameTaken's adopt/reap both branch on
+// herdrErrorCode and see "" instead. A nil return keeps the caller's raw-text
+// fallback for genuine transport failures, which are plain diagnostics rather
+// than envelopes (`Error: Os { code: 2, kind: NotFound … }` when no server owns
+// the socket).
+func herdrErrorFrom(out []byte) *herdrError {
+	trimmed := strings.TrimSpace(string(out))
+	if !strings.HasPrefix(trimmed, "{") {
+		return nil
+	}
+	var env envelope
+	if err := json.Unmarshal([]byte(trimmed), &env); err != nil {
+		return nil
+	}
+	return env.Error
+}
+
 // run executes `herdr --session <session> <args…>` and returns the result
 // payload, or an error (transport failure or herdr-reported error).
 func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
@@ -76,6 +101,9 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			if he := herdrErrorFrom(ee.Stderr); he != nil {
+				return nil, fmt.Errorf("herdr %v: %w", args, he)
+			}
 			return nil, fmt.Errorf("herdr %v: %s", args, ee.Stderr)
 		}
 		return nil, fmt.Errorf("herdr %v: %w", args, err)
@@ -189,16 +217,15 @@ func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			if he := herdrErrorFrom(ee.Stderr); he != nil {
+				return "", fmt.Errorf("herdr %v: %w", args, he)
+			}
 			return "", fmt.Errorf("herdr %v: %s", args, ee.Stderr)
 		}
 		return "", fmt.Errorf("herdr %v: %w", args, err)
 	}
-	trimmed := strings.TrimSpace(string(out))
-	if strings.HasPrefix(trimmed, "{") {
-		var env envelope
-		if jerr := json.Unmarshal([]byte(trimmed), &env); jerr == nil && env.Error != nil {
-			return "", fmt.Errorf("herdr %v: %w", args, env.Error)
-		}
+	if he := herdrErrorFrom(out); he != nil {
+		return "", fmt.Errorf("herdr %v: %w", args, he)
 	}
 	return string(out), nil
 }
