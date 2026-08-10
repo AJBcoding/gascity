@@ -58,14 +58,20 @@ func TestExternalBackendMetadataForScopeDoltIsNotExternal(t *testing.T) {
 }
 
 func TestApplyResolvedScopeMySQLEnvClearsProjectionsAndProjectsNothing(t *testing.T) {
+	// The postgres keys this fixture used to carry were removed when postgres
+	// was retired (gas-1oou, 2026-08-10). They stopped being gc's projections,
+	// so they are no longer gc's to clear — the same "foreign residue, left
+	// alone" rule this change applied to postgres_* metadata keys. Upstream's
+	// TestOSSProjectsNoUnregisteredBackendEnv holds the stronger line that
+	// makes this safe: source may not NAME an env var for a backend gc does
+	// not implement, so there is no postgres projection left to leak.
+	// GC_DOLT_* / BEADS_DOLT_* below keep the actual assertion intact: gc
+	// clears its OWN projected namespace and projects nothing for mysql.
 	env := map[string]string{
-		"GC_BEADS_BACKEND":        "doltlite",
-		"BEADS_BACKEND":           "doltlite",
-		"BEADS_DOLT_SERVER_HOST":  "127.0.0.1",
-		"BEADS_POSTGRES_HOST":     "db.example.test",
-		"BEADS_POSTGRES_PASSWORD": "swordfish",
-		"GC_POSTGRES_PASSWORD":    "swordfish",
-		"UNRELATED":               "keep",
+		"GC_BEADS_BACKEND":       "doltlite",
+		"BEADS_BACKEND":          "doltlite",
+		"BEADS_DOLT_SERVER_HOST": "127.0.0.1",
+		"UNRELATED":              "keep",
 	}
 	applyResolvedScopeMySQLEnv(env)
 
@@ -73,8 +79,7 @@ func TestApplyResolvedScopeMySQLEnvClearsProjectionsAndProjectsNothing(t *testin
 		t.Fatalf("UNRELATED = %q, want preserved", got)
 	}
 	for _, key := range []string{
-		"GC_BEADS_BACKEND", "BEADS_BACKEND",
-		"BEADS_POSTGRES_HOST", "BEADS_POSTGRES_PASSWORD", "GC_POSTGRES_PASSWORD",
+		"GC_BEADS_BACKEND", "BEADS_BACKEND", "BEADS_DOLT_SERVER_HOST",
 	} {
 		if val, ok := env[key]; ok && val != "" {
 			t.Errorf("env[%q] = %q, want cleared for mysql scope", key, val)

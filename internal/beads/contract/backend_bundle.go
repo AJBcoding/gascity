@@ -37,20 +37,25 @@ import (
 // manages its runtime. A workspace served by the linked beads library through
 // an opaque storage binding needs none of that and is not listed: gc withholds
 // the whole projected namespace for it and never learns the name.
-// This assembly registers mysql and postgres in addition to the OSS pair. gc
-// reads both of their metadata shapes (MetadataState carries mysql_dsn /
-// mysql_database and the postgres quartet), projects their environment
-// (bd_env.go) and refuses malformed connection shapes at the parse layer — the
-// three things this list requires. `gc beads city use-mysql` selects the mysql
-// backend; postgres has no selector verb and is carried for scopes configured
-// outside gc.
+// This assembly registers mysql in addition to the OSS pair. gc reads its
+// metadata shape (MetadataState carries mysql_dsn / mysql_database), projects
+// its environment (bd_env.go) and refuses malformed connection shapes at the
+// parse layer — the three things this list requires. `gc beads city use-mysql`
+// selects it.
+//
+// postgres was registered here and was RETIRED on 2026-08-10 (gas-1oou). It had
+// zero live scopes in this city, upstream had already deleted internal/pgauth
+// and carries no postgres fields at all, so keeping it meant maintaining a
+// lane-only vocabulary in files upstream keeps editing. Retiring it makes
+// backend="postgres" an unsupported backend here, which is what upstream's own
+// pin test asserts. Do not re-add it without restoring the credential resolver
+// and the connection-shape validation that went with it.
 func compiledBackendNames() []BackendName {
 	return []BackendName{
 		UnsetBackend,
 		"dolt",
 		"doltlite",
 		"mysql",
-		"postgres",
 	}
 }
 

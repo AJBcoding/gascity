@@ -1281,10 +1281,17 @@ func TestEnsureCanonicalMetadataWritesMySQLFieldsAndScrubsCrossBackendKeys(t *te
 	if got := trimmedString(meta["custom"]); got != "keep" {
 		t.Fatalf("custom = %q, want %q", got, "keep")
 	}
-	for _, key := range []string{"dolt_mode", "dolt_database", "postgres_host"} {
+	for _, key := range []string{"dolt_mode", "dolt_database"} {
 		if _, ok := meta[key]; ok {
 			t.Fatalf("metadata should not contain cross-backend key %q: %s", key, data)
 		}
+	}
+	// postgres_host survives. It stopped being a cross-backend key when
+	// postgres was retired (gas-1oou, 2026-08-10) and became foreign residue —
+	// gc no longer writes it, so it is not gc's to delete. Asserted rather than
+	// dropped so the change is visible here instead of inferred from a diff.
+	if got := trimmedString(meta["postgres_host"]); got != "db.example.com" {
+		t.Fatalf("postgres_host = %q, want it preserved as foreign residue", got)
 	}
 }
 
@@ -1652,6 +1659,58 @@ func TestLoadMetadataStateValidFixtures(t *testing.T) {
 				DoltDatabase: "hq",
 			},
 		},
+		// The four cases below REJECTED as mixed-backend until postgres was
+		// retired (gas-1oou, 2026-08-10). They are kept, and moved here rather
+		// than deleted, because the verdict flip IS the behavior change and it
+		// deserves a positive assertion instead of a silent absence.
+		//
+		// postgres_* is now foreign residue — the same class as the
+		// postgres_dsn/postgres_schema case directly above, whose rule
+		// crossBackendKeysToScrub states outright: a key belonging to a backend
+		// gc does not implement is left alone, because gc cannot tell an inert
+		// leftover from live configuration. An OSS build already behaves this
+		// way for every one of these.
+		//
+		// Mixed-backend detection itself is NOT weakened: the dolt/mysql pair
+		// still rejects, pinned by the reject_mixed_empty_backend_mysql and
+		// dolt/mysql cases in TestLoadMetadataStateRejectFixtures. Those are the
+		// positive control for this block — if mixed detection ever silently
+		// became a no-op, they fail while these still pass.
+		{
+			name:    "retired postgres keys on a mysql scope are residue, not a mix",
+			fixture: "reject_mysql_with_postgres_field.json",
+			want: MetadataState{
+				Database:      "beads.db",
+				Backend:       "mysql",
+				MySQLDSN:      "root@tcp(127.0.0.1:3306)/",
+				MySQLDatabase: "anthony_beads",
+			},
+		},
+		{
+			name:    "retired postgres keys on a dolt scope are residue, not a mix",
+			fixture: "reject_dolt_with_postgres_field.json",
+			want: MetadataState{
+				Database: "beads",
+				Backend:  "dolt",
+			},
+		},
+		{
+			name:    "retired postgres keys alongside dolt fields are residue",
+			fixture: "reject_mixed_backends.json",
+			want: MetadataState{
+				Database:     "beads",
+				Backend:      "dolt",
+				DoltDatabase: "hq",
+			},
+		},
+		{
+			name:    "retired postgres keys with an empty backend are residue",
+			fixture: "reject_mixed_empty_backend.json",
+			want: MetadataState{
+				Database:     "beads",
+				DoltDatabase: "hq",
+			},
+		},
 		{
 			name:    "mysql round-trip",
 			fixture: "valid_mysql.json",
@@ -1712,32 +1771,18 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 		{
 			name:            "E2 unknown backend",
 			fixture:         "reject_unknown_backend.json",
-			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite, mysql, postgres)`,
+			wantErrContains: `unsupported backend "postgress" (supported: dolt, doltlite, mysql)`,
 		},
 		{
-			name:            "E3 mixed backends fires before required-fields",
-			fixture:         "reject_mixed_backends.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_database is also set)",
-		},
-		{
-			name:            "E3 rejects explicit dolt with postgres fields",
-			fixture:         "reject_dolt_with_postgres_field.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=dolt but postgres_host is also set)",
-		},
-		{
-			name:            "E3 surfaces dolt field when backend=postgres",
-			fixture:         "reject_mixed_pg_backend_with_dolt.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
-		},
-		{
-			name:            "E3 rejects explicit postgres with dolt fields",
-			fixture:         "reject_postgres_with_dolt_field.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend=postgres but dolt_database is also set)",
-		},
-		{
-			name:            "E3 surfaces dolt field first when backend is empty",
-			fixture:         "reject_mixed_empty_backend.json",
-			wantErrContains: "cannot mix dolt and postgres fields in a single scope (backend= but dolt_database is also set)",
+			// postgres was a registered backend here until gas-1oou retired it
+			// (2026-08-10). It is now refused at E2 like any other name this
+			// build does not implement. Upstream's own pin test asserts the
+			// same string, so this is the convergent behavior, and it is what
+			// keeps "postgres stayed retired" a positive assertion rather than
+			// an absence of tests.
+			name:            "E2 retired backend postgres is unsupported",
+			fixture:         "reject_retired_backend_postgres.json",
+			wantErrContains: `unsupported backend "postgres" (supported: dolt, doltlite, mysql)`,
 		},
 		{
 			name:            "E3 rejects explicit dolt with mysql fields",
@@ -1750,29 +1795,9 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			wantErrContains: "cannot mix dolt and mysql fields in a single scope (backend=mysql but dolt_database is also set)",
 		},
 		{
-			name:            "E3 rejects explicit mysql with postgres fields",
-			fixture:         "reject_mysql_with_postgres_field.json",
-			wantErrContains: "cannot mix postgres and mysql fields in a single scope (backend=mysql but postgres_host is also set)",
-		},
-		{
-			name:            "E3 rejects explicit postgres with mysql fields",
-			fixture:         "reject_postgres_with_mysql_field.json",
-			wantErrContains: "cannot mix postgres and mysql fields in a single scope (backend=postgres but mysql_database is also set)",
-		},
-		{
 			name:            "E3 surfaces dolt field first when backend is empty and mysql fields present",
 			fixture:         "reject_mixed_empty_backend_mysql.json",
 			wantErrContains: "cannot mix dolt and mysql fields in a single scope (backend= but dolt_database is also set)",
-		},
-		{
-			name:            "E4 postgres missing host",
-			fixture:         "reject_pg_missing_host.json",
-			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
-		},
-		{
-			name:            "E4 postgres missing all fields",
-			fixture:         "reject_pg_missing_all.json",
-			wantErrContains: "backend=postgres requires postgres_host, postgres_port, postgres_user, postgres_database (all four must be non-empty)",
 		},
 		{
 			name:            "E4 mysql missing dsn",
@@ -1783,21 +1808,6 @@ func TestLoadMetadataStateRejectFixtures(t *testing.T) {
 			name:            "E4 mysql missing all fields",
 			fixture:         "reject_mysql_missing_all.json",
 			wantErrContains: "backend=mysql requires mysql_dsn, mysql_database (both must be non-empty)",
-		},
-		{
-			name:            "E5 postgres_port non-numeric",
-			fixture:         "reject_pg_port_nonnumeric.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "abc"`,
-		},
-		{
-			name:            "E5 postgres_port zero",
-			fixture:         "reject_pg_port_zero.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "0"`,
-		},
-		{
-			name:            "E5 postgres_port too high",
-			fixture:         "reject_pg_port_too_high.json",
-			wantErrContains: `postgres_port must be a TCP port (1..65535), got "99999"`,
 		},
 	}
 	for _, tc := range cases {
@@ -2236,7 +2246,7 @@ func TestCrossBackendKeysToScrubOnlyRemovesKeysGCWrites(t *testing.T) {
 	}
 	// A registered backend never scrubs its own keys, only the other
 	// registered backends'.
-	for _, backend := range []string{"dolt", "doltlite", "postgres", "mysql"} {
+	for _, backend := range []string{"dolt", "doltlite", "mysql"} {
 		for _, key := range crossBackendKeysToScrub(backend) {
 			if key != "dolt_mode" && strings.HasPrefix(key, backend+"_") {
 				t.Fatalf("crossBackendKeysToScrub(%q) = %v, want it to never scrub its own key %q", backend, crossBackendKeysToScrub(backend), key)
@@ -2244,7 +2254,10 @@ func TestCrossBackendKeysToScrubOnlyRemovesKeysGCWrites(t *testing.T) {
 		}
 	}
 	// A backend gc does not write keys for has nothing of gc's to delete.
-	for _, backend := range []string{"", "cockroach", "anything-else"} {
+	// "postgres" is in this list since gas-1oou retired it (2026-08-10): it
+	// moved from a registered backend to a foreign one, so its keys are no
+	// longer gc's to scrub from any arm.
+	for _, backend := range []string{"", "postgres", "cockroach", "anything-else"} {
 		if got := crossBackendKeysToScrub(backend); len(got) != 0 {
 			t.Fatalf("crossBackendKeysToScrub(%q) = %v, want no keys scrubbed", backend, got)
 		}
