@@ -190,64 +190,6 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err := p.bindPlacement(name, info, mode); err != nil {
 		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
 	}
-	// Launch. herdr ≥0.7.5's `agent start` launches a supported agent kind's
-	// canonical executable into the shell pane and blocks until the TUI is
-	// detected (native claude-detection); commands that aren't a clean kind
-	// invocation are exec'd through the pane's shell instead, so the pane
-	// still dies with the command. On agent_name_taken (a concurrent Start
-	// won the name), adopt the live holder or reap a stale one and retry once
-	// — never loop placement, which is the pane/PTY/process storm.
-	switch {
-	case spec.Kind != "":
-		// herdr requires the target pane to be "an available shell" — a
-		// fresh pane's shell spends its first moments sourcing rc files
-		// (agent_pane_busy otherwise), so wait for the prompt, then retry a
-		// residual busy rejection briefly.
-		p.waitPaneShellReady(ctx, paneID)
-		for attempt := 0; ; attempt++ {
-			info, adopted, err = p.startAgentAdopting(ctx, name, spec.Kind, paneID, spec.Args)
-			if err == nil || herdrErrorCode(err) != "agent_pane_busy" || attempt >= paneBusyRetries {
-				break
-			}
-			// Back off before re-probing: herdr's own shell-prompt detection
-			// lags the process-table probe on a fresh pane, so an immediate
-			// retry burns the attempt against the same stale verdict.
-			select {
-			case <-ctx.Done():
-				return fmt.Errorf("herdr: start %q: %w", name, ctx.Err())
-			case <-time.After(time.Second << attempt):
-			}
-			p.waitPaneShellReady(ctx, paneID)
-		}
-		if err == nil && adopted && info.PaneID != "" && info.PaneID != paneID {
-			// Adopted a live holder elsewhere: the fresh pane placed above is
-			// surplus — close it (with its tab) or it leaks one shell per adopt.
-			_ = p.c.tabClose(ctx, tabID)
-		}
-	case spec.Raw != "":
-		// exec through the shell so the pane's root process becomes the
-		// command: when it exits the pane (and tab) close, preserving the
-		// tmux contract that a session ends with its command. The typed
-		// command executes only after the fresh pane's shell finishes
-		// initializing, so wait (bounded) for the launch to actually land —
-		// otherwise callers probing right after Start see a bare shell.
-		if err = p.c.paneRun(ctx, paneID, "exec /bin/sh -c "+shellquote.Quote(spec.Raw)); err == nil {
-			p.waitPaneLaunched(ctx, paneID, spec.Raw)
-		}
-	default:
-		// Empty command: the pane's own shell is the session.
-	}
-	if err != nil {
-		return fmt.Errorf("herdr: start %q: %w", name, err)
-	}
-	// Re-persist the binding with the launch's final placement: adoption may
-	// have landed on the live holder's pane rather than the one placed above.
-	// This binding is what keeps IsRunning/paneID resolving the session when
-	// no registry name exists — herdr ≥0.7.4 clears names on occupant change,
-	// and raw/bare-shell sessions never register one (see panebinding.go).
-	if err := p.bindPlacement(name, info, mode); err != nil {
-		return fmt.Errorf("herdr: persist pane binding for %q: %w", name, err)
-	}
 	// Deliver the agent's first turn. Two independent sources, mirroring tmux:
 	// a named always-awake Claude session carries its behavioral prime in
 	// cfg.PromptSuffix (PromptMode=arg); a pool/sling slot carries its claim
