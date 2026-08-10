@@ -1053,6 +1053,190 @@ func TestEvaluateWorkRecordCloseGateCommitInRigRepo(t *testing.T) {
 	}
 }
 
+// newLocalOnlyGateRepo initializes a repo carrying one base commit and NO
+// remotes at all — the genuinely local-only topology the durability rule
+// deliberately skips.
+func newLocalOnlyGateRepo(t *testing.T) (repoDir string) {
+	t.Helper()
+	repoDir = t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	if err := os.WriteFile(filepath.Join(repoDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, repoDir, "add", "base.txt")
+	runGit(t, repoDir, "commit", "-m", "test: base")
+	return repoDir
+}
+
+// newSelfRemoteOnlyGateRepo builds the herdr-src shape with no publication
+// remote left standing: the repo's ONLY configured remote resolves back into
+// itself, and an unpushed commit on a work branch has been snapshotted into
+// that remote's refs/remotes/*. This is the topology the gas-6tc exclusion
+// produces — remotes are configured, none of them publish.
+func newSelfRemoteOnlyGateRepo(t *testing.T) (repoDir, workBranch, commit string) {
+	t.Helper()
+	repoDir = newLocalOnlyGateRepo(t)
+	runGit(t, repoDir, "remote", "add", "self-src", repoDir)
+
+	workBranch = "gc-gastown.slit-9d8c7b6a5f4e"
+	runGit(t, repoDir, "checkout", "-b", workBranch)
+	commit = gateCommit(t, repoDir, "feature.txt", "only local\n", "feat: never pushed off-machine")
+	runGit(t, repoDir, "fetch", "self-src")
+
+	// Precondition: the self-remote genuinely snapshots the unpushed commit, so
+	// the durability query has real self-referential evidence to reject.
+	if err := exec.Command("git", "-C", repoDir, "merge-base", "--is-ancestor", commit, "refs/remotes/self-src/"+workBranch).Run(); err != nil {
+		t.Fatalf("precondition: self-remote ref must contain the unpushed commit")
+	}
+	return repoDir, workBranch, commit
+}
+
+// TestGitCommitOnRemoteNoRemotesSkipsDurability pins the half of the durability
+// split that must NOT change (gas-avv): a repo with zero remotes configured has
+// nowhere to publish, so the rule is skipped rather than flagging every close in
+// a local-only rig for a push that cannot exist.
+func TestGitCommitOnRemoteNoRemotesSkipsDurability(t *testing.T) {
+	repoDir := newLocalOnlyGateRepo(t)
+	commit := gateCommit(t, repoDir, "feature.txt", "local-only rig\n", "feat: local work")
+
+	if !gitCommitOnRemote(repoDir, commit) {
+		t.Fatalf("gitCommitOnRemote = false in a repo with no remotes; the durability rule must stay skipped where there is nowhere to publish")
+	}
+}
+
+// TestGitCommitOnRemoteSelfRemoteOnlyFailsClosed is the gas-avv regression test.
+// A repo whose remotes all fail the self-referential filter is a
+// MISCONFIGURATION, not a local-only rig: the empty publication list must fail
+// closed, not read as durable. Before the split both sub-cases shared
+// len(publication) == 0 and returned true, so every commit in this topology read
+// as delivered and the durability rule was silently skipped — az-6n75 reopened
+// by configuration.
+func TestGitCommitOnRemoteSelfRemoteOnlyFailsClosed(t *testing.T) {
+	repoDir, _, commit := newSelfRemoteOnlyGateRepo(t)
+
+	if gitCommitOnRemote(repoDir, commit) {
+		t.Fatalf("gitCommitOnRemote = true for commit %s whose only remote is the repo itself; the work exists nowhere off this machine", commit)
+	}
+}
+
+// TestEvaluateWorkRecordCloseGateSelfRemoteOnlyIsNotSilent is the gas-avv
+// regression test at the gate seam. With the stamp CORRECT — the commit really
+// is on the branch it names — the reachability rule is satisfied and the
+// containment resolver has nothing to advise, so the durability rule is the only
+// thing standing between this close and silence. Before the split the close
+// emitted neither a violation nor an advisory and was allowed under enforcement.
+func TestEvaluateWorkRecordCloseGateSelfRemoteOnlyIsNotSilent(t *testing.T) {
+	repoDir, workBranch, commit := newSelfRemoteOnlyGateRepo(t)
+
+	var stderr strings.Builder
+	block := evaluateWorkRecordCloseGate(
+		gateShippedCloseArgs("wr-self-only", commit, workBranch),
+		gateStoreWith("wr-self-only", repoDir), nil, repoDir, nil, true, &stderr)
+	if !block {
+		t.Fatalf("close of work published nowhere but the repo itself was allowed; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "not present on any remote") {
+		t.Fatalf("expected a durability violation, got %q", got)
+	}
+}
+
+// newBareRepoAt initializes a git repository at dir, creating dir (and any
+// parent) first. Unlike newGateRepo it takes the path, so a test can put a
+// repository somewhere with a chosen name — an '@' in a path component is
+// indistinguishable from scp-style user@host to a naive classifier.
+func newBareRepoAt(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	runGit(t, dir, "init", "--initial-branch=main")
+	return dir
+}
+
+// TestIsSelfRemoteURL pins the self-remote classifier (gas-6tc) against the two
+// ways a same-disk remote used to escape it (gas-f64): a network-shaped URL
+// whose host is this machine, and a plain local path containing '@'.
+//
+// Direction matters. Misreading a self-remote as a publication remote is the
+// unsafe error — its fetched refs then read as delivery evidence and the
+// durability rule is silently disarmed. Misreading a real remote as self only
+// costs a blocked close, so the classifier claims "self" solely when the URL
+// resolves to a path that positively *is* this repository.
+func TestIsSelfRemoteURL(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+	selfCommon := gitCommonDir(repoDir)
+	if selfCommon == "" {
+		t.Fatalf("precondition: gitCommonDir(%s) must resolve", repoDir)
+	}
+
+	// A second, unrelated repository: same host, different repo.
+	otherDir := newBareRepoAt(t, filepath.Join(t.TempDir(), "other"))
+
+	// A repository whose path legitimately contains '@'.
+	atDir := newBareRepoAt(t, filepath.Join(t.TempDir(), "no@such", "path"))
+	atCommon := gitCommonDir(atDir)
+	if atCommon == "" {
+		t.Fatalf("precondition: gitCommonDir(%s) must resolve", atDir)
+	}
+
+	tests := []struct {
+		name       string
+		url        string
+		selfCommon string
+		want       bool
+	}{
+		{"plain local path to self", repoDir, selfCommon, true},
+		{"local path containing @ to self", atDir, atCommon, true},
+		{"file URL to self", "file://" + repoDir, selfCommon, true},
+		{"file URL with localhost host to self", "file://localhost" + repoDir, selfCommon, true},
+		{"ssh loopback by name to self", "ssh://localhost" + repoDir, selfCommon, true},
+		{"ssh loopback by IPv4 to self", "ssh://127.0.0.1" + repoDir, selfCommon, true},
+		{"ssh loopback by IPv6 to self", "ssh://[::1]" + repoDir, selfCommon, true},
+		{"ssh loopback with user to self", "ssh://git@localhost" + repoDir, selfCommon, true},
+		{"ssh loopback with port to self", "ssh://localhost:2222" + repoDir, selfCommon, true},
+		{"git protocol loopback to self", "git://127.0.0.1" + repoDir, selfCommon, true},
+		{"loopback host is case-insensitive", "ssh://LocalHost" + repoDir, selfCommon, true},
+
+		{"ssh loopback to a different repo", "ssh://localhost" + otherDir, selfCommon, false},
+		{"local path to a different repo", otherDir, selfCommon, false},
+		{"ssh to a real host", "ssh://github.com/gastownhall/gascity.git", selfCommon, false},
+		{"scp-style real remote", "git@github.com:gastownhall/gascity.git", selfCommon, false},
+		{"https real remote", "https://github.com/gastownhall/gascity.git", selfCommon, false},
+		{"local path that is not a repo", filepath.Join(t.TempDir(), "nope"), selfCommon, false},
+		{"empty url", "", selfCommon, false},
+		{"empty selfCommon", repoDir, "", false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isSelfRemoteURL(tc.url, tc.selfCommon); got != tc.want {
+				t.Errorf("isSelfRemoteURL(%q, %q) = %v, want %v", tc.url, tc.selfCommon, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitPublicationRemotesExcludesSameDiskRemotes drives the same fix through
+// the caller that actually gates a close. gitPublicationRemotes only reads the
+// remote table, so a loopback URL can be registered without a listening sshd.
+func TestGitPublicationRemotesExcludesSameDiskRemotes(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+
+	runGit(t, repoDir, "remote", "add", "self-path", repoDir)
+	runGit(t, repoDir, "remote", "add", "self-file", "file://"+repoDir)
+	runGit(t, repoDir, "remote", "add", "self-ssh", "ssh://localhost"+repoDir)
+	runGit(t, repoDir, "remote", "add", "self-ip", "ssh://127.0.0.1"+repoDir)
+	runGit(t, repoDir, "remote", "add", "upstream", "https://github.com/gastownhall/gascity.git")
+
+	got, _ := gitPublicationRemotes(repoDir)
+	want := []string{"origin", "upstream"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("gitPublicationRemotes = %v, want %v (same-disk remotes must not confer durability)", got, want)
+	}
+}
+
 func TestWorkRecordEnforceEnabled(t *testing.T) {
 	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
 		t.Setenv(workRecordEnforceEnvVar, v)
