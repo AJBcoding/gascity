@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 type attachmentAwareProvider struct {
@@ -2550,11 +2551,9 @@ func killNamedSessionTmuxServerAfterTest(t *testing.T) {
 			return
 		}
 		socket := tmuxLeakTestSocket(socketRoot, namedSessionTestSocketName)
-		ctx, cancel := context.WithTimeout(context.Background(), tmuxLeakCommandTimeout)
-		defer cancel()
 		// A test that never started a session has no server here; that failure
 		// is the expected case and carries nothing to report.
-		_ = exec.CommandContext(ctx, "tmux", "-S", socket, "kill-server").Run()
+		_ = tmuxtest.KillServerOnSocketPath(socket)
 	})
 }
 
