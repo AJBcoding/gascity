@@ -764,6 +764,16 @@ func TestCreateWithProviderWithoutProcessScannerStillStarts(t *testing.T) {
 	}
 }
 
+// TestRuntimeStartCallSitesCleanOrphansFirst pins that every spawn is preceded
+// by same-session orphan cleanup, so a survivor cannot race its replacement for
+// the same work bead.
+//
+// The spawn call is m.startRuntime, not m.sp.Start: the disk preflight took the
+// provider call behind a chokepoint (gas-9nx). Orphan cleanup deliberately did
+// NOT move inside that chokepoint — it is keyed by session ID, which the
+// chokepoint's (sessName, cfg) does not carry, and each caller unwinds a
+// different reservation on refusal (create rolls back the bead, the resume
+// paths unroute ACP). So the invariant stays here, at the call sites.
 func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 	tests := []struct {
 		file   string
@@ -781,7 +791,7 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 			lines := strings.Split(string(data), "\n")
 			starts := 0
 			for i, line := range lines {
-				if !strings.Contains(line, "m.sp.Start(ctx, sessName, cfg)") {
+				if !strings.Contains(line, "m.startRuntime(ctx, sessName, cfg)") {
 					continue
 				}
 				starts++
@@ -794,7 +804,7 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 				}
 			}
 			if starts == 0 {
-				t.Fatalf("%s contains no m.sp.Start(ctx, sessName, cfg) call sites", tt.file)
+				t.Fatalf("%s contains no m.startRuntime(ctx, sessName, cfg) call sites", tt.file)
 			}
 		})
 	}

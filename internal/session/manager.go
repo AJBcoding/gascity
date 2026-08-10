@@ -857,7 +857,10 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 	// directory is what matters: that is where its build caches and test
 	// output land. createBeadOnly deliberately does not check — it spawns
 	// nothing, and the disk it would need is only owed at start time.
-	if err := m.checkSpawnDisk(workDir); err != nil {
+	//
+	// Refusal only: startRuntime re-checks at the spawn below and owns the
+	// warn band, so a create under disk pressure logs one WARN, not two.
+	if err := m.checkSpawnDiskRefusalOnly(workDir); err != nil {
 		return Info{}, err
 	}
 	if title == "" {
@@ -1016,7 +1019,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
-		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		if err := m.startRuntime(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
 				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
 					return metaErr
