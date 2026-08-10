@@ -129,6 +129,11 @@ func TestHookClaimIsLoudWhenPipedWorkQueryFirstStageDies(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	emitted := 0
 	code := claimHookWork(
+		// cityPath is new in upstream's signature (class-route resolution).
+		// dir is a bare t.TempDir() with no city config, so the route opens
+		// empty and the claim proceeds unrouted — which is what this test,
+		// about a dying piped work_query, means to exercise.
+		dir,
 		query,
 		dir,
 		nil,

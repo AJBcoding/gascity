@@ -9,7 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -22,6 +21,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
@@ -168,6 +168,10 @@ func runWithRootCommandOptions(args []string, stdout, stderr io.Writer, options 
 }
 
 func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writer, options rootCommandOptions, lifecycle *productMetricsInvocationLifecycle) int {
+	// Whatever this invocation opened for one-shot storage routing closes here,
+	// after the command has run and before the process reports its code.
+	defer func() { _ = closeCLIStorageRoutes() }()
+
 	prevCityFlag, prevRigFlag := cityFlag, rigFlag
 	prevContextFlag, prevCityURLFlag, prevCityNameFlag := contextFlag, cityURLFlag, cityNameFlag
 	cityFlag, rigFlag = "", ""
@@ -318,6 +322,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newStopCmd(stdout, stderr),
 		newRestartCmd(stdout, stderr),
 		newStatusCmd(stdout, stderr),
+		newStorageCmd(stdout, stderr),
 		newServiceCmd(stdout, stderr),
 		newSuspendCmd(stdout, stderr),
 		newResumeCmd(stdout, stderr),
@@ -340,6 +345,7 @@ func newRootCmdWithOptions(stdout, stderr io.Writer, options rootCommandOptions)
 		newLintCmd(stdout, stderr),
 		newDoctorCmd(stdout, stderr),
 		newHookCmd(stdout, stderr),
+		newReadyCmd(stdout, stderr),
 		newSlingCmd(stdout, stderr),
 		newConvoyCmd(stdout, stderr),
 		newWispCmd(stdout, stderr),
@@ -714,6 +720,12 @@ func resolveContextFromDir() (resolvedContext, error) {
 	}
 
 	// Step 10: Walk up from cwd looking for city.toml.
+	if isTestBinary() {
+		return resolvedContext{}, fmt.Errorf(
+			"not in a city directory (ambient upward discovery from %q is refused in "+
+				"test binaries; set GC_CITY, GC_CITY_PATH, or GC_CITY_ROOT to an explicit "+
+				"synthetic city)", cwd)
+	}
 	cityPath, err := findCity(cwd)
 	if err != nil {
 		return resolvedContext{}, err
@@ -728,9 +740,26 @@ func resolveCity() (string, error) {
 }
 
 func resolveContextFromPath(path string) (resolvedContext, error) {
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return resolvedContext{}, err
+	abs := normalizePathForCompare(path)
+	// Validate the explicit target directly before scanning the registry for
+	// rig bindings. An unrelated registered city with a broken/stale config
+	// must not abort resolution of a perfectly healthy explicit target
+	// (#4364) -- this mirrors resolveCityNameContext's f.localIsCity-first
+	// ordering for named refs.
+	//
+	// Deliberately narrower than validateCityPath: only a real city.toml
+	// qualifies here, not validateCityPath's HasRuntimeRoot fallback. A rig
+	// directory can carry a leftover ".gc/" runtime artifact with no
+	// city.toml of its own (the same shape resolveContextFromDir's step-7
+	// comment already guards against for a different code path); accepting
+	// that shape here would misread the rig dir as its own city and
+	// short-circuit before rig resolution ever runs, silently losing the
+	// real city+rig binding.
+	if citylayout.HasCityConfig(abs) {
+		return resolvedContext{
+			CityPath: abs,
+			RigName:  rigFromCwdDir(abs, abs),
+		}, nil
 	}
 	ctx, ok, err := resolveRigPathToContext(abs)
 	if err != nil {
@@ -738,12 +767,6 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 	}
 	if ok {
 		return ctx, nil
-	}
-	if cityPath, err := validateCityPath(abs); err == nil {
-		return resolvedContext{
-			CityPath: cityPath,
-			RigName:  rigFromCwdDir(cityPath, abs),
-		}, nil
 	}
 	cityPath, err := findCity(abs)
 	if err != nil {
@@ -757,10 +780,7 @@ func resolveContextFromPath(path string) (resolvedContext, error) {
 
 // validateCityPath resolves and validates a path as a city directory.
 func validateCityPath(p string) (string, error) {
-	abs, err := filepath.Abs(p)
-	if err != nil {
-		return "", err
-	}
+	abs := normalizePathForCompare(p)
 	if citylayout.HasCityConfig(abs) || citylayout.HasRuntimeRoot(abs) {
 		return abs, nil
 	}
@@ -1448,8 +1468,8 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 			return openCompatibleFileStore(scopeRoot, runtimeCityPath)
 		},
 		OpenBdStore: func() (beads.Store, error) {
-			if _, err := exec.LookPath("bd"); err != nil {
-				return nil, fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
+			if err := requireBdBinaryForCity(runtimeCityPath); err != nil {
+				return nil, err
 			}
 			return openBdStoreAtWithConfig(scopeRoot, runtimeCityPath, cfg, allowRecovery)
 		},
@@ -1490,6 +1510,18 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
 	return result, nil
+}
+
+// requireBdBinaryForCity verifies that the logical bd command has either an
+// ambient executable or the city-configured, absolute workspace pin. The
+// runner keeps the logical command name as "bd" so its timeout, telemetry,
+// and backup policy still apply while executing that pin.
+func requireBdBinaryForCity(cityPath string) error {
+	_, err := resolveBdBinaryForScope(cityPath, cityPath)
+	if errors.Is(err, errBdNotOnPath) {
+		return fmt.Errorf("bd not found in PATH (install beads or set GC_BEADS=file)")
+	}
+	return err
 }
 
 // openExecStoreAtForCityWithConfig opens the exec-provider store for a city.
@@ -1544,7 +1576,20 @@ func resolveStoreScopeRoot(cityPath, storePath string) string {
 	if !filepath.IsAbs(scopeRoot) {
 		scopeRoot = filepath.Join(cityPath, scopeRoot)
 	}
-	return filepath.Clean(scopeRoot)
+	// Resolve symlinks so a city reached through a linked path (e.g. ~/gc ->
+	// /real/city) yields the same scope root as the real path. Without this the
+	// native-store identity gate sees an unregistered scope and rejects it
+	// ("database project_id could not be confirmed"), silently degrading to the
+	// bd-subprocess fallback.
+	//
+	// Normalize through pathutil, not bare EvalSymlinks: pathutil also collapses
+	// the darwin /private alias. Resolving without that collapse maps an
+	// already-canonical /var city path to a /private/var scope root, so the
+	// scope no longer matches the city it was derived from.
+	if resolved := pathutil.NormalizePathForCompare(scopeRoot); resolved != "" {
+		scopeRoot = resolved
+	}
+	return scopeRoot
 }
 
 // openBdStoreAtWithConfig opens the bd-backed store at storePath for a city.

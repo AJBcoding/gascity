@@ -194,7 +194,12 @@ func redactPreflightDetail(key, value string) string {
 		return value
 	}
 	normalized := strings.ToLower(strings.TrimSpace(key))
-	if strings.Contains(normalized, "postgres_dsn") || strings.Contains(normalized, "mysql_dsn") {
+	// A DSN is a connection string with a userinfo section, whatever backend
+	// wrote it. Keyed on the shape rather than on any one backend's name, so a
+	// diagnostic added for a backend gc does not implement is redacted by the
+	// rule that already exists rather than by one somebody remembers to add.
+	// Upstream's shape-keyed rule subsumes our postgres_dsn/mysql_dsn test.
+	if strings.Contains(normalized, "dsn") {
 		return redactPreflightDSN(value)
 	}
 	if preflightDetailKeyIsSensitive(normalized) {

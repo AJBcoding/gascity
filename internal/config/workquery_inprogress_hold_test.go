@@ -59,7 +59,7 @@ func TestInProgressTierFallsThroughWhenHeld(t *testing.T) {
 			if _, err := exec.LookPath("jq"); err != nil {
 				t.Skip("jq not available; the work-query shell requires it")
 			}
-			script := standardAssignedWorkQueryScript(false) + `printf "[]"`
+			script := standardAssignedWorkQueryScript(QueryTopology{}) + `printf "[]"`
 			out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, fakeBdHeldInProgress(label))
 
 			var rows []map[string]any
@@ -86,7 +86,7 @@ case "$1" in
   *) printf '[]' ;;
 esac
 `
-	script := standardAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
@@ -114,7 +114,7 @@ case "$1" in
   *) printf '[]' ;;
 esac
 `
-	script := standardAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
@@ -141,7 +141,7 @@ case "$1" in
   *) printf '[]' ;;
 esac
 `
-	script := legacyControlAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := legacyControlAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
 
 	var rows []map[string]any
@@ -169,7 +169,7 @@ case "$1" in
   *) printf '[]' ;;
 esac
 `
-	script := standardAssignedInProgressWorkQueryScript(false) + `printf "[]"`
+	script := standardAssignedInProgressWorkQueryScript(QueryTopology{}) + `printf "[]"`
 	out := runShellWithFakeBd(t, script, map[string]string{"GC_SESSION_ID": "sess-1"}, bdScript)
 
 	if out != blob {

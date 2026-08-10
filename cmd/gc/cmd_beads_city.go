@@ -236,7 +236,7 @@ func doBeadsCityEndpoint(fs fsys.FS, cityPath string, opts cityEndpointOptions, 
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "stopping managed local provider", err)
 			return 1
 		}
-		if err := clearManagedDoltRuntimeStateUnlessExternalBackend(cityPath); err != nil {
+		if err := clearManagedDoltRuntimeStateUnlessBound(cityPath); err != nil {
 			writeCityEndpointRollbackError(fs, stderr, snapshots, name, "clearing managed runtime state", err)
 			return 1
 		}

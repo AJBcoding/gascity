@@ -373,6 +373,15 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// legacy bound identities).
 	canonicalTemplate := found.QualifiedName()
 	configuredOwner := sessionNewAliasOwner(cfg, &found)
+
+	// Fix B: when the template is a configured named session and the user
+	// supplied no explicit alias, materialize it under the canonical configured
+	// identity so session_name, mail routing, and tmux display all agree.
+	if configuredOwner != "" && requestedAlias == "" {
+		alias = configuredOwner
+		explicitName = config.NamedSessionRuntimeName(cityName, cfg.Workspace, configuredOwner)
+	}
+
 	reservationIDs := []string{alias, explicitName}
 	reserveConcreteIdentity := found.SupportsMultipleSessions() && strings.TrimSpace(sessionQualifiedName) != ""
 	if reserveConcreteIdentity {
@@ -400,7 +409,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			// Controller is running — create bead only, let reconciler start it.
 			kindMeta := map[string]string{
 				"agent_name":     sessionQualifiedName,
-				"session_origin": "manual",
+				"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+			}
+			if configuredOwner != "" && requestedAlias == "" {
+				kindMeta[session.NamedSessionMetadataKey] = "true"
+				kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
 			}
 			if family := resolvedProviderFamilyMetadata(resolved); family != "" {
 				kindMeta["provider_kind"] = family
@@ -452,7 +465,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 						return err
 					}
 				}
-				if err := session.EnsureSessionNameAvailableWithConfig(sessStore, cfg, explicitName, ""); err != nil {
+				if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
 					return err
 				}
 				var createErr error
@@ -514,7 +527,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 	// Fallback: controller not running — direct start via session manager.
 	kindMeta := map[string]string{
 		"agent_name":     sessionQualifiedName,
-		"session_origin": "manual",
+		"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
+	}
+	if configuredOwner != "" && requestedAlias == "" {
+		kindMeta[session.NamedSessionMetadataKey] = "true"
+		kindMeta[session.NamedSessionIdentityMetadata] = configuredOwner
 	}
 	if family := resolvedProviderFamilyMetadata(resolved); family != "" {
 		kindMeta["provider_kind"] = family
@@ -566,7 +583,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 				return err
 			}
 		}
-		if err := session.EnsureSessionNameAvailableWithConfig(sessStore, cfg, explicitName, ""); err != nil {
+		if err := session.EnsureSessionNameAvailableWithConfigForOwner(sessStore, cfg, explicitName, "", configuredOwner); err != nil {
 			return err
 		}
 		var createErr error
@@ -771,6 +788,16 @@ func resolveSessionTemplate(cfg *config.City, input, currentRigDir string) (conf
 		}
 	}
 	return config.Agent{}, false
+}
+
+// sessionOriginForConfiguredNamed returns "named" when the session is being
+// created for a configured named-session identity without a user-supplied
+// alias, and "manual" otherwise.
+func sessionOriginForConfiguredNamed(configuredOwner, requestedAlias string) string {
+	if configuredOwner != "" && requestedAlias == "" {
+		return "named"
+	}
+	return "manual"
 }
 
 func sessionNewAliasOwner(cfg *config.City, agent *config.Agent) string {
@@ -1154,28 +1181,36 @@ func doSessionListFallback(stateFilter, templateFilter string, jsonOutput bool, 
 }
 
 type sessionListJSONRow struct {
-	ID                   string        `json:"id"`
-	Name                 string        `json:"name,omitempty"`
-	Template             string        `json:"template"`
-	Provider             string        `json:"provider,omitempty"`
-	State                session.State `json:"state"`
-	Title                string        `json:"title,omitempty"`
-	Rig                  string        `json:"rig,omitempty"`
-	Alias                string        `json:"alias,omitempty"`
-	AgentName            string        `json:"agent_name,omitempty"`
-	Transport            string        `json:"transport,omitempty"`
-	Command              string        `json:"command,omitempty"`
-	WorkDir              string        `json:"work_dir,omitempty"`
-	SessionName          string        `json:"session_name,omitempty"`
-	SessionKey           string        `json:"session_key,omitempty"`
-	ResumeFlag           string        `json:"resume_flag,omitempty"`
-	ResumeStyle          string        `json:"resume_style,omitempty"`
-	ResumeCommand        string        `json:"resume_command,omitempty"`
-	CreatedAt            time.Time     `json:"created_at"`
-	LastActive           time.Time     `json:"last_active"`
-	LastNudgeDeliveredAt *time.Time    `json:"last_nudge_delivered_at,omitempty"`
-	Attached             bool          `json:"attached"`
-	Closed               bool          `json:"closed"`
+	ID        string        `json:"id"`
+	Name      string        `json:"name,omitempty"`
+	Template  string        `json:"template"`
+	Provider  string        `json:"provider,omitempty"`
+	State     session.State `json:"state"`
+	Title     string        `json:"title,omitempty"`
+	Rig       string        `json:"rig,omitempty"`
+	Alias     string        `json:"alias,omitempty"`
+	AgentName string        `json:"agent_name,omitempty"`
+	Transport string        `json:"transport,omitempty"`
+	Command   string        `json:"command,omitempty"`
+	WorkDir   string        `json:"work_dir,omitempty"`
+	// WorkerDir is the canonical agent process working directory (the raw
+	// worker_dir / gc.work_dir metadata, Info.WorkerDir). It is surfaced
+	// alongside the legacy WorkDir so consumers can reliably map an active
+	// session to the nested per-bead worktree it is actually working in — the
+	// legacy work_dir is stamped at create/dispatch and is often the agent
+	// home (depth-1) or empty, which is why the worktree reaper's liveness
+	// gate needs the canonical value (gastownhall/gascity#4492 accept-crit #1).
+	WorkerDir            string     `json:"worker_dir,omitempty"`
+	SessionName          string     `json:"session_name,omitempty"`
+	SessionKey           string     `json:"session_key,omitempty"`
+	ResumeFlag           string     `json:"resume_flag,omitempty"`
+	ResumeStyle          string     `json:"resume_style,omitempty"`
+	ResumeCommand        string     `json:"resume_command,omitempty"`
+	CreatedAt            time.Time  `json:"created_at"`
+	LastActive           time.Time  `json:"last_active"`
+	LastNudgeDeliveredAt *time.Time `json:"last_nudge_delivered_at,omitempty"`
+	Attached             bool       `json:"attached"`
+	Closed               bool       `json:"closed"`
 }
 
 type sessionListJSON struct {
@@ -1261,6 +1296,7 @@ func sessionListJSONRows(sessions []session.Info) []sessionListJSONRow {
 			Transport:     s.Transport,
 			Command:       s.Command,
 			WorkDir:       s.WorkDir,
+			WorkerDir:     strings.TrimSpace(s.WorkerDir),
 			SessionName:   s.SessionName,
 			SessionKey:    s.SessionKey,
 			ResumeFlag:    s.ResumeFlag,
@@ -1930,11 +1966,26 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	// Each Update fires the bd on_update hook, which emits a bead.updated
 	// event the supervisor's CachingStore absorbs — the cache-update event
 	// the close path was previously missing (gastownhall/gascity#2625).
+	//
+	// The scan leads with the WORK store here, unlike the reconciler's, which
+	// leads with the sessions-class store. On a split city that difference is
+	// the whole release tier for relocated work: claim-time class routing
+	// (claim_class_route.go) can leave an in_progress assignee in the graph
+	// binding, and a work-led scan cannot see it. So the binding is handed in as
+	// a class leg — the same graphClassBinding identity the claim routes on, from
+	// the same one-shot funnel — and dropped again on a city that relocates
+	// nothing.
 	var rigStores map[string]beads.Store
+	var classStores []beads.Store
 	if cityErr == nil && cfg != nil {
 		rigStores = buildStandaloneRigStores(cfg, cityPath, stderr)
 	}
-	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr)
+	if cityErr == nil {
+		if binding, relocated := graphClassBinding(cliStorageRoutes(cityPath)); relocated {
+			classStores = append(classStores, binding)
+		}
+	}
+	unclaimWorkAssignedToRetiredSessionBead(store, rigStores, closedSessionBead, "", stderr, classStores...)
 
 	if asJSON {
 		if err := writeSessionActionJSON(stdout, sessionActionResult{

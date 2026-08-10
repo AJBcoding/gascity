@@ -4163,6 +4163,7 @@ start_command = "echo"
 		t.Fatalf("WriteFile(city.toml): %v", err)
 	}
 	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 
 	store, err := openCityStoreAt(cityDir)
 	if err != nil {

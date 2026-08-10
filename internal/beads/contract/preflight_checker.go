@@ -157,7 +157,7 @@ func (c PreflightChecker) checkMetadataBackend(metadata preflightMetadata) Prefl
 	case "":
 		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, "Metadata backend is missing", details)
 	default:
-		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, fmt.Sprintf("Metadata backend %q is unsupported", metadata.Backend), details)
+		return NewPreflightCheckResult(PreflightCheckMetadataBackend, PreflightCheckFail, fmt.Sprintf("Metadata backend %q is unsupported; the native store serves dolt only", metadata.Backend), details)
 	}
 }
 
@@ -470,7 +470,7 @@ func preflightRepairSteps(checks []PreflightCheckResult) []PreflightRepairStep {
 					CheckID:  check.ID,
 					Priority: PreflightRepairRecommended,
 					Command:  "bd bootstrap",
-					Note:     "Re-anchor metadata to the active beads backend, or continue using BdStore for postgres scopes.",
+					Note:     "Re-anchor metadata to the active beads backend, or continue using BdStore for a scope the native store cannot serve.",
 				})
 			}
 		case PreflightCheckBDContextAgreement:

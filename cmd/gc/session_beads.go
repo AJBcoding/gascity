@@ -943,14 +943,19 @@ func coordClassStoreCandidates(cfg *config.City, cityStore beads.Store, rigStore
 // without touching the call sites. Unlike coordClassStoreCandidates it has no
 // cfg/suspended context (the retirement scans run per session bead without a
 // suspension frame), so it fans out across all live rig stores by name.
-func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) []beads.Store {
+//
+// extra appends the stores a caller knows can ALSO hold work this session owns
+// but that are not work stores — today the relocated coordination-class binding,
+// which claim-time routing (claim_class_route.go) can write an in_progress
+// assignee into on a split city. A caller whose leading store already IS that
+// binding passes nothing: duplicates are dropped, so the leg cannot be scanned
+// twice. It goes LAST because it is the ledger of last resort, the same order
+// the claim reaches it in.
+func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store, extra ...beads.Store) []beads.Store {
 	if store == nil {
 		return nil
 	}
 	stores := []beads.Store{store}
-	if len(rigStores) == 0 {
-		return stores
-	}
 	names := make([]string, 0, len(rigStores))
 	for name, rs := range rigStores {
 		if rs == nil {
@@ -962,13 +967,42 @@ func workAssignmentStores(store beads.Store, rigStores map[string]beads.Store) [
 	for _, name := range names {
 		stores = append(stores, rigStores[name])
 	}
+	for _, candidate := range extra {
+		if candidate == nil || workAssignmentStoresHave(stores, candidate) {
+			continue
+		}
+		stores = append(stores, candidate)
+	}
 	return stores
 }
 
+// workAssignmentStoresHave reports whether candidate is already a leg. The
+// sessions and graph classes are served from ONE binding on a converged split
+// (openStorageRoutes keys every assigned class to the engine it opened), so a
+// reconciler scan led by the sessions-class store is already reading the store a
+// caller would add here.
+func workAssignmentStoresHave(stores []beads.Store, candidate beads.Store) bool {
+	key, ok := storePointerKey(candidate)
+	if !ok {
+		return false
+	}
+	for _, existing := range stores {
+		if existingKey, ok := storePointerKey(existing); ok && existingKey == key {
+			return true
+		}
+	}
+	return false
+}
+
 // unclaimResult reports the outcome of one unassign sweep over a retired
-// session bead's owned work: Released counts work beads whose assignee was
-// successfully cleared/reopened, Failed counts ReleaseWorkBead errors (already
-// logged per item to stderr). Void callers (named-session retirement, closed-
+// session bead's owned work: Released counts release attempts that completed
+// without error, Failed counts ReleaseWorkBead errors (already logged per item
+// to stderr). Released is deliberately NOT a count of writes — a release whose
+// snapshot went stale (the work was re-claimed by a live worker before the
+// write) correctly performs no write and reports no error, and is counted here
+// with the ones that did write. Both mean the same thing to every caller: this
+// session no longer holds that work. Only Failed distinguishes the case where
+// that is still unknown. Void callers (named-session retirement, closed-
 // session release) ignore it; the stranded-repair path reads Failed to avoid
 // reporting a clean repair — or closing the session bead — when an unassign did
 // not land, so a stale-assignee item is not masked behind a "repaired" close.
@@ -977,12 +1011,21 @@ type unclaimResult struct {
 	Failed   int
 }
 
+// unclaimWorkAssignedToRetiredSessionBead detaches every work bead a retired
+// session still owns, across the reachability scan workAssignmentStores builds.
+//
+// classStores are the non-work ledgers this caller knows can also hold work the
+// session owns. The reconciler leads with the sessions-class store, which on a
+// converged split IS the binding, so it passes none; a caller that leads with
+// the WORK store — `gc session close` — passes the relocated graph binding, or a
+// claim that claim_class_route.go routed there would be released by nothing.
 func unclaimWorkAssignedToRetiredSessionBead(
 	store beads.Store,
 	rigStores map[string]beads.Store,
 	sessionBead beads.Bead,
 	fallbackRoute string,
 	stderr io.Writer,
+	classStores ...beads.Store,
 ) {
 	if store == nil || strings.TrimSpace(sessionBead.ID) == "" {
 		return
@@ -992,7 +1035,7 @@ func unclaimWorkAssignedToRetiredSessionBead(
 	}
 	identifiers := sessionAssignmentIdentifiers(sessionBead)
 	seen := make(map[string]struct{})
-	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores) {
+	for storeIndex, ownerStore := range workAssignmentStores(store, rigStores, classStores...) {
 		wa := workAssignmentForStore(beads.WorkStore{Store: ownerStore})
 		for _, status := range []string{"open", "in_progress"} {
 			for _, assignee := range identifiers {
@@ -1061,7 +1104,7 @@ func reassignWorkAssignedToRetiredSessionBead(
 						continue
 					}
 					seen[key] = struct{}{}
-					if err := wa.ReassignWorkBead(item.ID, newSessionID); err != nil {
+					if err := wa.ReassignWorkBead(item, newSessionID); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}
 				}
@@ -1108,7 +1151,7 @@ func reassignWorkAssignedToRetiredSessionInfo(
 						continue
 					}
 					seen[key] = struct{}{}
-					if err := wa.ReassignWorkBead(item.ID, newSessionID); err != nil {
+					if err := wa.ReassignWorkBead(item, newSessionID); err != nil {
 						fmt.Fprintf(stderr, "session beads: reassigning work %s from retired session %s to %s: %v\n", item.ID, retiredSession.ID, newSessionID, err) //nolint:errcheck
 					}
 				}
@@ -1256,6 +1299,8 @@ func repairStrandedPoolWorkerBead(
 		// report a repair: closing now would strand the still-assigned work
 		// against a retired session. Leave the bead open so the next tick
 		// re-attempts (episode marker still aged, session still not-alive).
+		// The denominator counts every attempt, including releases that correctly
+		// no-oped because the work had already moved to a live worker.
 		fmt.Fprintf(stderr, "session beads: stranded-repair for %s deferred: %d of %d unassign(s) failed; leaving session bead open for retry\n", info.ID, res.Failed, res.Failed+res.Released) //nolint:errcheck
 		return false
 	}
@@ -1781,8 +1826,15 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				bySessionName[createdSessionName] = newBead
 				indexBySessionName[createdSessionName] = len(openBeads) - 1
 				if liveAlias := strings.TrimSpace(meta["alias"]); liveAlias != "" && state == "active" {
-					if err := session.SyncRuntimeAlias(sp, createdSessionName, liveAlias); err != nil {
-						fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", liveAlias, agentName, err) //nolint:errcheck
+					runtimeInfo, infoErr := sessFront.Get(newBead.ID)
+					if infoErr != nil {
+						fmt.Fprintf(stderr, "session beads: reading runtime identity for %s: %v\n", agentName, infoErr) //nolint:errcheck
+					} else {
+						runtimeInfo.SessionName = createdSessionName
+						runtimeInfo.Alias = liveAlias
+						if err := session.SyncRuntimeAlias(sp, runtimeInfo); err != nil {
+							fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", liveAlias, agentName, err) //nolint:errcheck
+						}
 					}
 				}
 			}
@@ -1975,8 +2027,15 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 						openBeads[idx] = b
 					}
 					if aliasValue, ok := batch["alias"]; ok && state == "active" {
-						if err := session.SyncRuntimeAlias(sp, sn, aliasValue); err != nil {
-							fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", aliasValue, agentName, err) //nolint:errcheck
+						runtimeInfo, infoErr := sessFront.Get(b.ID)
+						if infoErr != nil {
+							fmt.Fprintf(stderr, "session beads: reading runtime identity for %s: %v\n", agentName, infoErr) //nolint:errcheck
+						} else {
+							runtimeInfo.SessionName = sn
+							runtimeInfo.Alias = aliasValue
+							if err := session.SyncRuntimeAlias(sp, runtimeInfo); err != nil {
+								fmt.Fprintf(stderr, "session beads: syncing runtime alias %q for %s: %v\n", aliasValue, agentName, err) //nolint:errcheck
+							}
 						}
 					}
 				}

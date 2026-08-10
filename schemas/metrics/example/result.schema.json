@@ -206,6 +206,11 @@
               "logout",
               "whoami",
               "runtime-heartbeat",
+              "pack-registry-requests",
+              "events-reemit-execution",
+              "storage-migrate",
+              "storage-status",
+              "ready",
               "beads-city-use-mysql",
               "session-key"
             ]

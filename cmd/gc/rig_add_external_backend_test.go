@@ -80,12 +80,12 @@ func TestScopeUsesExternalServerBackendForInitForFreshRigOnMySQLCity(t *testing.
 	writeExternalBackendCity(t, cityPath)
 	rigPath := t.TempDir()
 
-	got, err := scopeUsesExternalServerBackendForInit(cityPath, rigPath)
+	got, err := scopeSkipsManagedDoltForInit(cityPath, rigPath)
 	if err != nil {
-		t.Fatalf("scopeUsesExternalServerBackendForInit: %v", err)
+		t.Fatalf("scopeSkipsManagedDoltForInit: %v", err)
 	}
 	if !got {
-		t.Fatal("scopeUsesExternalServerBackendForInit = false for a fresh rig on a mysql city, want true")
+		t.Fatal("scopeSkipsManagedDoltForInit = false for a fresh rig on a mysql city, want true")
 	}
 }
 

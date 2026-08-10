@@ -79,6 +79,14 @@ func (c DoltConfig) DisableEventFlushEnabled() bool {
 
 // MetadataState is the canonical subset of .beads/metadata.json used by GC.
 //
+// It is the subset gc *implements*, not the whole file. Backend names a
+// backend this build registers (backend_bundle.go), and the backend-specific
+// fields below are the ones gc reads. Every other key on disk — including the
+// connection fields of a backend served by the linked beads library rather
+// than by gc — is passed through untouched by EnsureCanonicalMetadata, which
+// canonicalises over the raw object. gc must never force an operator to
+// hand-convert away from a shape bd itself writes.
+//
 // Backend determines which backend-specific fields are meaningful. When
 // returned from LoadMetadataState the populated backend-specific fields are
 // guaranteed consistent with Backend — i.e. a state with Backend == "postgres"
@@ -101,7 +109,7 @@ type MetadataState struct {
 
 // MetadataParseError reports a failure to parse or validate metadata.json.
 //
-// Returned by LoadMetadataState for JSON parse failures and for every E1–E5
+// Returned by LoadMetadataState for JSON parse failures and for every E1–E2
 // rejection in the metadata contract. Callers may use errors.As to
 // discriminate parse failures from I/O failures (which surface as plain OS
 // errors).
@@ -110,11 +118,19 @@ type MetadataParseError struct {
 	Path string
 	// Reason is the verbatim rejection reason text (the part after `: `).
 	Reason string
+	// Err is the typed cause, when the rejection has one. The unknown-backend
+	// rejection carries *UnknownBackendError so a caller can ask whether this
+	// build simply does not register the backend — a fact worth acting on
+	// differently from malformed metadata — without matching on Reason.
+	Err error
 }
 
 func (e *MetadataParseError) Error() string {
 	return fmt.Sprintf("load metadata %s: %s", e.Path, e.Reason)
 }
+
+// Unwrap exposes the typed cause for errors.Is and errors.As.
+func (e *MetadataParseError) Unwrap() error { return e.Err }
 
 var deprecatedMetadataKeys = []string{
 	"dolt_host",
@@ -151,9 +167,18 @@ var mysqlBackendKeys = []string{
 }
 
 // crossBackendKeysToScrub returns the on-disk metadata keys that should be
-// removed when canonicalising for the given backend. An empty backend
-// preserves all backend-specific keys (today's behavior for unknown-shape
-// metadata).
+// removed when canonicalising for the given backend.
+//
+// It scrubs only keys gc itself writes and a backend gc implements does not
+// read: dolt_mode on a doltlite scope, and the connection quartets of the other
+// backends this assembly registers. A key belonging to a backend gc does not
+// implement is left alone: it is the linked beads library's to read, gc cannot
+// tell an inert leftover from live configuration, and a scope bound to such a
+// backend never reaches this function at all.
+//
+// This assembly registers mysql and postgres (backend_bundle.go), so their keys
+// ARE gc's to scrub — an OSS build, which registers neither, correctly leaves
+// them alone. Keep this switch in step with compiledBackendNames().
 func crossBackendKeysToScrub(backend string) []string {
 	switch backend {
 	case "dolt":
@@ -383,16 +408,22 @@ func ReadDoltDatabase(fs fsys.FS, path string) (string, bool, error) {
 // Returns (zero, false, nil) when the file does not exist — callers decide
 // whether absence is an error in their context (mirrors ReadIssuePrefix and
 // ReadDoltDatabase). Returns a non-nil error for read failures other than
-// ENOENT and for any of the E1–E5 rejection cases. Validation failures are
+// ENOENT and for any of the E1–E2 rejection cases. Validation failures are
 // wrapped in *MetadataParseError; callers may use errors.As to discriminate.
 //
 // Validation order is deterministic: the operator always sees the same
 // top-most message when several things are wrong. Order is JSON parse (E1) →
 // mixed-backend (E3) → unknown backend (E2) → postgres-required (E4) →
-// postgres-port-format (E5) → mysql-required (E4). An empty Backend is
-// permitted at the parse
-// layer; downstream consumers that need a backend must check
-// state.Backend != "" themselves.
+// postgres-port-format (E5) → mysql-required (E4). The order is pinned by
+// TestLoadMetadataStateRejectionOrderIsPinned.
+//
+// The connection-shape rungs after E2 survive here because this assembly does
+// implement mysql and postgres; an OSS build registers neither and stops at
+// E2. E2 asks the compiled backend-name registry (backend_bundle.go) rather
+// than a literal allowlist, so its refusal enumerates what this build actually
+// registers. An empty Backend is permitted — it is a registered name — and
+// downstream consumers that need a backend must check state.Backend != ""
+// themselves.
 func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 	data, err := fs.ReadFile(path)
 	if err != nil {
@@ -422,14 +453,8 @@ func LoadMetadataState(fs fsys.FS, path string) (MetadataState, bool, error) {
 		}
 	}
 
-	switch state.Backend {
-	case "", "dolt", "doltlite", "postgres", "mysql":
-		// allowed
-	default:
-		return MetadataState{}, false, &MetadataParseError{
-			Path:   abs,
-			Reason: fmt.Sprintf("unsupported backend %q (supported: dolt, doltlite, postgres, mysql)", state.Backend),
-		}
+	if err := RecognizeBackend(state.Backend); err != nil {
+		return MetadataState{}, false, &MetadataParseError{Path: abs, Reason: err.Error(), Err: err}
 	}
 
 	if state.Backend == "postgres" {

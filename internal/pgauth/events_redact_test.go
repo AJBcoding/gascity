@@ -71,7 +71,7 @@ func TestPostgresEventOmitsPassword(t *testing.T) {
 
 	envelope := events.Event{
 		Seq:     1,
-		Type:    events.PostgresCredentialResolved,
+		Type:    events.BackendCredentialResolved,
 		Ts:      time.Date(2026, 5, 6, 0, 0, 0, 0, time.UTC),
 		Actor:   "controller",
 		Subject: "rigs/pwu",

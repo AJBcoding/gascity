@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
@@ -310,6 +311,13 @@ type SessionHandle struct {
 	// skip both the keyed-path resolve and the write once the sidecar is current.
 	sidecarMu     sync.Mutex
 	sidecarDoneID string
+	// sidecarRetrySchedule is nil in production, where the sidecar retry uses
+	// time.AfterFunc. Tests supply a channel-backed scheduler to drive retries
+	// deterministically.
+	sidecarRetrySchedule  func(time.Duration, func())
+	sidecarRetryID        string
+	sidecarRetryAttempts  int
+	sidecarRetryScheduled bool
 }
 
 var (

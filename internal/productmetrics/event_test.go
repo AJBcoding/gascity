@@ -350,8 +350,12 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 
 	generatedCount := 0
 	generatedCommandIDCatalog(func(commandIDEntry) { generatedCount++ })
-	if generatedCount != 193 {
-		t.Fatalf("generated production catalog has %d entries, want 193", generatedCount)
+	// 198 = upstream's 196 plus this lane's two commands, which the gas-to2q
+	// merge renumbered to 201/202 because both lanes had independently assigned
+	// 196/197 (see gas-to2q). The number follows the regenerated catalog, not
+	// either side's pre-merge count.
+	if generatedCount != 198 {
+		t.Fatalf("generated production catalog has %d entries, want 198", generatedCount)
 	}
 
 	injected := func(yield func(commandIDEntry)) {

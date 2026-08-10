@@ -2,24 +2,18 @@ package pgauth
 
 import "github.com/gastownhall/gascity/internal/events"
 
-// PostgresCredentialResolvedPayload is emitted on
-// events.PostgresCredentialResolved each time gc successfully resolves a
-// Postgres password for a scope. The payload identifies the scope and
-// the resolution tier that supplied the value; it never carries the
-// value itself (asserted by TestPostgresEventOmitsPassword).
-type PostgresCredentialResolvedPayload struct {
-	ScopeKind string `json:"scope_kind"` // "city" or "rig"
-	ScopeName string `json:"scope_name"` // city name, or rig name (no scheme prefix)
-	Source    string `json:"source"`     // pgauth.Source.String()
-	Host      string `json:"host"`       // contract.MetadataState.PostgresHost
-	Port      string `json:"port"`       // contract.MetadataState.PostgresPort (string, mirrors metadata)
-	User      string `json:"user"`       // contract.MetadataState.PostgresUser
-}
-
-// IsEventPayload marks PostgresCredentialResolvedPayload as an
-// events.Payload variant.
-func (PostgresCredentialResolvedPayload) IsEventPayload() {}
-
-func init() {
-	events.RegisterPayload(events.PostgresCredentialResolved, PostgresCredentialResolvedPayload{})
-}
+// PostgresCredentialResolvedPayload is this lane's name for the payload of
+// events.BackendCredentialResolved.
+//
+// It used to be a distinct type registered against a postgres-specific event
+// (events.PostgresCredentialResolved, "pg.credential_resolved"). The gas-to2q
+// upstream merge generalized that event into a backend-agnostic
+// "backend.credential_resolved", and upstream now owns BOTH the payload type
+// and its registration in internal/events/backend_payloads.go.
+//
+// So this is an alias, not a second type. Registering a second payload for one
+// event name would fork the wire contract between two assemblies of the same
+// product — the exact failure upstream's typed-wire invariant exists to
+// prevent, and it says so in that file. Callers set Backend to the backend the
+// scope's metadata names.
+type PostgresCredentialResolvedPayload = events.BackendCredentialResolvedPayload

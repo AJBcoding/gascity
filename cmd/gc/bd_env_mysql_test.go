@@ -91,12 +91,12 @@ func TestScopeUsesExternalServerBackendForInitMySQL(t *testing.T) {
 	cityPath := t.TempDir()
 	writeMySQLScopeFixture(t, cityPath)
 
-	usesExternal, err := scopeUsesExternalServerBackendForInit(cityPath, cityPath)
+	usesExternal, err := scopeSkipsManagedDoltForInit(cityPath, cityPath)
 	if err != nil {
-		t.Fatalf("scopeUsesExternalServerBackendForInit: %v", err)
+		t.Fatalf("scopeSkipsManagedDoltForInit: %v", err)
 	}
 	if !usesExternal {
-		t.Fatal("scopeUsesExternalServerBackendForInit = false for mysql scope, want true")
+		t.Fatal("scopeSkipsManagedDoltForInit = false for mysql scope, want true")
 	}
 }
 

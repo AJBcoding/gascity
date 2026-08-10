@@ -71,12 +71,22 @@ func managedDoltLifecycleOwned(cityPath string) (bool, error) {
 		if cityUsesDoltliteBeadsBackend(cityPath) {
 			return false, nil
 		}
-		_, usesExternal, err := externalBackendMetadataForScope(cityPath, cityPath)
+		// Asked at the chokepoint rather than restated here: gc owns no Dolt
+		// lifecycle for a store it does not serve, whether that store is named
+		// by a complete opaque binding or by an external backend in the
+		// scope's own metadata. Both spellings answer here as one class.
+		bound, err := scopeStoreIsExternallyBound(cityPath, cityPath)
 		if err != nil {
 			return false, err
 		}
-		if usesExternal {
+		if bound {
 			return false, nil
+		}
+		// A city whose metadata gc cannot read is not a city gc owns a Dolt
+		// runtime for, and the refusal has to reach the operator rather than
+		// being answered as "not owned".
+		if _, _, err := contract.LoadMetadataState(fsys.OSFS{}, scopeMetadataJSONPath(cityPath)); err != nil {
+			return false, err
 		}
 		_, _, ok, invalid := resolveConfiguredCityDoltTarget(cityPath)
 		if invalid {
@@ -205,13 +215,32 @@ func clearManagedDoltRuntimeState(cityPath string) error {
 	return nil
 }
 
-func clearManagedDoltRuntimeStateUnlessExternalBackend(cityPath string) error {
+// clearManagedDoltRuntimeStateUnlessBound clears the published managed-Dolt
+// runtime state, except for a city whose beads do not live in a managed Dolt
+// runtime at all. Two ways that happens: the city is bound to a storage binding
+// gc does not serve (upstream's case), or it runs on an external backend such
+// as mysql (this lane's case). Neither has a managed Dolt runtime to describe,
+// and the published state is not gc's to clear.
+//
+// BOTH conditions are checked, and the two exported names share one body on
+// purpose. The merged tree calls both spellings — upstream's call sites use
+// ...UnlessBound, this lane's use ...UnlessExternalBackend — and if they carried
+// different predicates a mysql city reached through an upstream call site would
+// have its published state cleared out from under it.
+func clearManagedDoltRuntimeStateUnlessBound(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) {
 		_, usesExternal, err := externalBackendMetadataForScope(cityPath, cityPath)
 		if err != nil {
 			return err
 		}
 		if usesExternal {
+			return nil
+		}
+		completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
+		if err != nil {
+			return err
+		}
+		if completeBinding {
 			return nil
 		}
 	}

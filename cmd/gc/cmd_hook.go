@@ -16,6 +16,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -288,6 +289,23 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
 
+	// Fence a stale/superseded runtime session BEFORE the city-suspension,
+	// agent-resolution, and agent-suspension early returns below. A stale
+	// incarnation in a suspended city, or one whose template was removed from
+	// config (resolveAgentIdentity fails), or whose agent was suspended, would
+	// otherwise hit one of those bare `return 1` paths, and its startup wrapper
+	// would keep retrying the plain failure instead of seeing the terminal
+	// stale-session drain result and exiting. The fence reads the runtime's own
+	// identity from the environment; it is a no-op for a non-session runtime (no
+	// GC_SESSION_ID / GC_INSTANCE_TOKEN) and fails open for an eligible session or a
+	// transient session-store fault, so a healthy worker still falls through to the
+	// suspension and config checks below.
+	if opts.Claim {
+		if code, handled := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr); handled {
+			return code
+		}
+	}
+
 	st, _ := loadSuspensionState(fsys.OSFS{}, cityPath)
 	if citySuspendedWithState(cfg, st) {
 		fmt.Fprintln(stderr, "gc hook: city is suspended") //nolint:errcheck // best-effort stderr
@@ -327,13 +345,15 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return 1
 	}
 
-	if isAgentEffectivelySuspendedWith(cfg, &a, st) {
+	if isAgentEffectivelySuspendedWith(cfg, cityPath, &a, st) {
 		fmt.Fprintf(stderr, "gc hook: agent %q is suspended\n", agentName) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	cityName := loadedCityName(cfg, cityPath)
-	workQuery := a.EffectiveWorkQueryForBeads(cfg.Beads)
+	topo := cityQueryTopology(cityPath, cfg)
+	warnFederationBlindOverrides(stderr, &a, topo)
+	workQuery := a.EffectiveWorkQueryFor(topo)
 	// Expand {{.Rig}}/{{.AgentBase}} in user-supplied work_query so agent-side
 	// hook invocation sees the same rig substitution as the controller-side
 	// probes in build_desired_state.go / session_reconcile.go. #793.
@@ -351,13 +371,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	agentForQuery := resolvedAgentName
 	sessionForQuery := ""
 	if sessionTemplateContext {
-		agentForQuery = os.Getenv("GC_ALIAS")
-		if agentForQuery == "" {
-			agentForQuery = os.Getenv("GC_SESSION_NAME")
-		}
-		if agentForQuery == "" {
-			agentForQuery = os.Getenv("GC_AGENT")
-		}
+		agentForQuery = hookSessionAgentForQuery()
 		sessionForQuery = os.Getenv("GC_SESSION_NAME")
 	} else {
 		sessionForQuery = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
@@ -385,8 +399,19 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 
 	// Assemble the federated store list (own store, rig store(s), city store),
 	// deduped so no store is queried twice. See buildHookStores for the ordering
-	// and dedupe contracts.
+	// and dedupe contracts. buildHookStores is upstream's hookWorkQueryStores
+	// plus dedupeHookStores; the dedupe is a measured third of the whole hook on
+	// a rig-scoped agent, so the federated scoping below layers onto it rather
+	// than replacing it.
 	stores := buildHookStores(cityPath, workDir, cfg, &a, agentForQuery, queryEnv, overrides)
+	// On a split city the ready tiers of workQuery are already city-wide, so
+	// running the whole query once per store re-asks the same question R+1 times
+	// and re-opens every leg each time. Pin the city-wide read to the primary
+	// entry and leave the extras on the single-store command they ran before the
+	// swap, which still covers the per-store crash-recovery and ephemeral tiers
+	// `gc ready` does not answer. No-op on a single-store city and for a custom
+	// work_query, where both forms are the same string.
+	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -400,23 +425,25 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			os.Getenv("GC_SESSION_ID"), failureTemplate, command, err)
 	}
 	runner := func(command, _ string) (string, error) {
-		out, _, err := firstStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
+		out, _, err := bestStoreWithWork(command, stores, stores[0], shellWorkQueryWithEnv)
 		emitQueryFailure(command, err)
 		return out, err
 	}
 	if opts.Claim {
+		// The stale-session fence already ran before agent resolution above; this
+		// sessionID feeds only the claim assignee identity.
 		sessionID := strings.TrimSpace(overrides["GC_SESSION_ID"])
-		if code, handled := fenceHookClaimSession(cityPath, cfg, sessionID, opts, stdout, stderr); handled {
-			return code
-		}
 		sessionName := strings.TrimSpace(sessionForQuery)
 		alias := strings.TrimSpace(overrides["GC_ALIAS"])
-		assignee := firstNonEmptyHookValue(sessionName, sessionID, alias, agentForQuery, resolvedAgentName)
+		// Write the alias/agent form that read paths query through GC_AGENT.
+		// Session forms remain fallbacks for unaliased workers.
+		assignee := firstNonEmptyHookValue(alias, agentForQuery, resolvedAgentName, sessionName, sessionID)
 		claimOpts := hookClaimOptions{
 			Assignee: assignee,
 			// IdentityCandidates governs ADOPTION of already-owned in_progress/open
-			// work (hookClaimExistingOrAssigned); it must be scoped to this
-			// session's OWN runtime identity, never the bare pool template. A
+			// work (hookClaimExistingAssignment and
+			// claimFirstReadyHookAssignment); it must be scoped to this session's
+			// OWN runtime identity, never the bare pool template. A
 			// suffixed pool worker resolves config via the GC_TEMPLATE fallback, so
 			// resolvedAgentName == a.QualifiedName() is the bare template, which is
 			// ALSO the [[named_session]] holder's identity — including it let a
@@ -436,7 +463,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			DrainAck:     opts.DrainAck,
 			JSON:         opts.JSON,
 		}
-		return claimHookWork(workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	return doHook(workQuery, workDir, false, runner, stdout, stderr)
 }
@@ -566,15 +593,34 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // claimHookWork claims routed work for gc hook --claim from the federated store
 // set, binding the production shell work-query runner and real claim ops. See
 // claimHookWorkWithRunner for the federation and lost-claim-race semantics.
-func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
-	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, hookClaimOps{}, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
+//
+// The claim ops carry the CLASS axis (claim_class_route.go): every store in the
+// federated set is a bd WORKSPACE, and a relocated coordination class is not
+// one, so the binding is reached through the ops rather than through a leg. On a
+// city that relocates nothing the route is nil and the ops value is the one this
+// function has always passed.
+func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+	// The city relocates a class and its front door could not be projected.
+	// Claiming through the work store anyway would write ownership into a
+	// ledger that does not hold the bead, which is the wrong-answer lane this
+	// routing exists to close — so every failure but one is fatal here. The
+	// exception, a binding with no claim CAS, degrades to unrouted claiming;
+	// see hookClaimRouteVerdict.
+	opened, err := hookClaimClassRouteForCity(cityPath)
+	route, proceed := hookClaimRouteVerdict(opened, err, stderr)
+	if !proceed {
+		return 1
+	}
+	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim
-// ops injected for tests. It selects the first store reporting ready work,
-// re-validates it for claim-time freshness and falls back to a later store if it
-// emptied since discovery (claimStoreWithFallback), then attempts the claim
-// against that store's captured rows, against that store's dir/env.
+// ops injected for tests. It selects the best-ranked store reporting ready work
+// (see bestStoreWithWork), re-validates it for claim-time freshness and falls
+// back to a later store if it emptied since discovery (claimStoreWithFallback),
+// then attempts the claim against that store's captured rows, against that
+// store's dir/env.
 //
 // When a selected store still reports ready work but every claimable row is lost
 // to another claimant before the mutation, the single-store claim drains without
@@ -584,8 +630,17 @@ func claimHookWork(workQuery, workDir string, queryEnv []string, stores []hookSt
 // has been exhausted; the drain reason is claims_errored when any exhausted
 // store's eligible claims errored rather than merely lost the race, else no_work.
 // emitFailure surfaces a work-query timeout on the event bus when eligible.
+//
+// The store set is also what the claim-time class escalation is measured
+// against: only the PRIMARY leg runs the city-wide reader, so it is the only leg
+// whose query can serve a bead it does not itself hold, and a not-found there
+// says nothing about the work legs behind it. observeWorkLegs hands the route
+// the whole fan-out so it can prove "no WORK store holds this bead" before it
+// writes ownership into the binding (claim_class_route.go). Nil on a city that
+// relocates nothing.
 func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, ops hookClaimOps, run hookStoreRunner, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	ops.applyDefaults()
+	ops.ClassRoute.observeWorkLegs(stores)
 	// primary is the agent's own store (the first entry). It is captured once
 	// here, before the loop shrinks remaining: only the primary may surface a
 	// work-query error as a fatal claim failure. Once the primary loses its
@@ -601,7 +656,7 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 	// report claims_errored instead of laundering a write failure into no_work.
 	claimsErrored := false
 	for len(remaining) > 0 {
-		_, selected, err := firstStoreWithWork(workQuery, remaining, primary, run)
+		_, selected, err := bestStoreWithWork(workQuery, remaining, primary, run)
 		if err != nil {
 			emitFailure(workQuery, err)
 			fmt.Fprintf(stderr, "gc hook --claim: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -649,13 +704,40 @@ func claimHookWorkWithRunner(workQuery, workDir string, queryEnv []string, store
 }
 
 func hookClaimPrimaryRouteTarget(a *config.Agent) string {
-	if a == nil {
+	return agentutil.RoutedToIdentity(a)
+}
+
+// singleStoreHookWorkQuery returns the agent's work query built for the SAME
+// city with the federated reader turned off — the command the hook ran against
+// every store before the reader was swapped. It is the command
+// scopeFederatedHookStores gives the federated extras, so their cost and
+// coverage stay exactly what they were.
+//
+// It returns "" on a city that federates nothing, so the caller's scoping is a
+// no-op there rather than a second build of the identical string.
+func singleStoreHookWorkQuery(cityPath, cityName string, cfg *config.City, a *config.Agent, topo config.QueryTopology, stderr io.Writer) string {
+	if !topo.FederatedReady || cfg == nil || a == nil {
 		return ""
 	}
-	if target := strings.TrimSpace(a.PoolName); target != "" {
-		return target
+	singleStore := topo
+	singleStore.FederatedReady = false
+	// A custom work_query is returned verbatim for both topologies; scoping then
+	// no-ops on the equality check, and expanding it twice would repeat its
+	// template diagnostic, so stop before that.
+	command := a.EffectiveWorkQueryFor(singleStore)
+	if command == a.EffectiveWorkQueryFor(topo) {
+		return ""
 	}
-	return a.QualifiedName()
+	return expandAgentCommandTemplate(cityPath, cityName, a, cfg.Rigs, "work_query", command, stderr)
+}
+
+func hookSessionAgentForQuery() string {
+	return firstNonEmptyHookValue(
+		os.Getenv("GC_ALIAS"),
+		os.Getenv("BEADS_ACTOR"),
+		os.Getenv("GC_AGENT"),
+		os.Getenv("GC_SESSION_NAME"),
+	)
 }
 
 func firstNonEmptyHookValue(values ...string) string {
