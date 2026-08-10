@@ -1007,6 +1007,63 @@ func TestEvaluateWorkRecordCloseGateSelfRemote(t *testing.T) {
 	}
 }
 
+// TestEvaluateWorkRecordCloseGateRelativeSelfRemote covers a self-referential
+// remote written as a *relative* path. Git resolves such a URL against the
+// repository, so it is an ordinary configuration; resolving it against the gc
+// process's own working directory instead classifies it as a real publication
+// remote and its snapshot refs become delivery evidence for work that never
+// left the host. TestEvaluateWorkRecordCloseGateSelfRemote cannot cover this:
+// it adds its remote as an absolute t.TempDir() path.
+func TestEvaluateWorkRecordCloseGateRelativeSelfRemote(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+
+	// Relative spelling of the same self-reference: from repoDir, "../<base>"
+	// is repoDir. The test process's cwd is the cmd/gc package directory, so a
+	// resolution anchored there lands somewhere else entirely.
+	relURL := "../" + filepath.Base(repoDir)
+	runGit(t, repoDir, "remote", "add", "self-rel", relURL)
+
+	// Precondition: the URL must stay relative. If git or a future helper ever
+	// records it absolute, this test silently becomes a duplicate of the
+	// absolute-path case and stops covering the branch it exists for.
+	if got := strings.TrimSpace(runGit(t, repoDir, "remote", "get-url", "self-rel")); got != relURL {
+		t.Fatalf("precondition: remote URL must stay relative, got %q want %q", got, relURL)
+	}
+
+	const workBranch = "gc-gastown.slit-4f3e2d1c0b9a"
+	runGit(t, repoDir, "checkout", "-b", workBranch)
+	commit := gateCommit(t, repoDir, "feature.txt", "only local\n", "feat: never pushed off-machine")
+	runGit(t, repoDir, "fetch", "self-rel")
+
+	// Precondition: git itself resolved the relative URL against the repository,
+	// so the snapshot genuinely contains the unpushed commit.
+	if !gateRefContains(t, repoDir, "refs/remotes/self-rel/"+workBranch, commit) {
+		t.Fatalf("precondition: relative self-remote ref must contain the unpushed commit")
+	}
+
+	newStore := func() beads.Store { return gateStoreWith("wr-rel-self-remote", repoDir) }
+	closeArgs := gateShippedCloseArgs("wr-rel-self-remote", commit, workBranch)
+
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(closeArgs, newStore(), nil, repoDir, true, &stderr); !block {
+		t.Fatalf("close of relative-self-remote-only work was allowed; the snapshot counted as delivery")
+	}
+	if got := stderr.String(); !strings.Contains(got, "not present on any remote") {
+		t.Fatalf("expected a durability violation, got %q", got)
+	}
+
+	// Paired positive: a real push must still be allowed, so the fix cannot be
+	// satisfied by a filter that discards every remote.
+	runGit(t, repoDir, "push", "origin", workBranch)
+	var pushedStderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(closeArgs, newStore(), nil, repoDir, true, &pushedStderr); block {
+		t.Fatalf("close blocked after real push; stderr=%s", pushedStderr.String())
+	}
+	if got := pushedStderr.String(); got != "" {
+		t.Fatalf("pushed close warned: %q", got)
+	}
+}
+
 func TestWorkRecordEnforceEnabled(t *testing.T) {
 	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
 		t.Setenv(workRecordEnforceEnvVar, v)

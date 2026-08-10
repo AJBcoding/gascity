@@ -275,7 +275,7 @@ func gitPublicationRemotes(repoDir string) []string {
 	if err != nil {
 		return nil
 	}
-	selfCommon := gitCommonDir(repoDir)
+	selfCommon := gitCommonDir("", repoDir)
 	publication := []string{}
 	for _, name := range strings.Fields(string(out)) {
 		if strings.HasPrefix(name, "-") {
@@ -289,7 +289,7 @@ func gitPublicationRemotes(repoDir string) []string {
 			continue
 		}
 		url := strings.TrimSpace(string(urlOut))
-		if isSelfRemoteURL(url, selfCommon) {
+		if isSelfRemoteURL(repoDir, url, selfCommon) {
 			continue
 		}
 		publication = append(publication, name)
@@ -300,7 +300,12 @@ func gitPublicationRemotes(repoDir string) []string {
 // isSelfRemoteURL reports whether a remote URL is a filesystem path that
 // resolves to the repository whose git common dir is selfCommon. Network URLs
 // (scheme://host/..., scp-style user@host:path) are never self-referential.
-func isSelfRemoteURL(url, selfCommon string) bool {
+//
+// repoDir anchors the resolution. Git resolves a relative remote URL against
+// the repository, so resolving it against the gc process's own working
+// directory instead would classify a self-referential remote as a publication
+// remote and let its snapshot refs stand in as delivery evidence.
+func isSelfRemoteURL(repoDir, url, selfCommon string) bool {
 	if url == "" || selfCommon == "" {
 		return false
 	}
@@ -312,7 +317,7 @@ func isSelfRemoteURL(url, selfCommon string) bool {
 	} else if strings.Contains(url, "@") || looksLikeSCPRemote(url) {
 		return false
 	}
-	common := gitCommonDir(url)
+	common := gitCommonDir(repoDir, url)
 	return common != "" && common == selfCommon
 }
 
@@ -332,11 +337,21 @@ func looksLikeSCPRemote(url string) bool {
 // Two paths into the same repository — the root and any of its worktrees —
 // resolve to the same common dir, which is what makes it the right identity for
 // self-remote detection.
-func gitCommonDir(dir string) string {
+//
+// baseDir, when non-empty, is the directory a relative dir resolves against.
+// Git applies -C flags left to right and resolves each against the previous, so
+// passing both reproduces git's own resolution of a relative remote URL —
+// against the repository, not against this process's working directory.
+func gitCommonDir(baseDir, dir string) string {
 	if strings.TrimSpace(dir) == "" || strings.HasPrefix(dir, "-") {
 		return ""
 	}
-	out, err := exec.Command("git", "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir").Output()
+	args := []string{}
+	if strings.TrimSpace(baseDir) != "" && !strings.HasPrefix(baseDir, "-") {
+		args = append(args, "-C", baseDir)
+	}
+	args = append(args, "-C", dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	out, err := exec.Command("git", args...).Output()
 	if err != nil {
 		return ""
 	}
