@@ -55,7 +55,7 @@ BEADS_MYSQL_PASSWORD at runtime and never persists it).`,
 	return cmd
 }
 
-func doBeadsCityUseMySQL(fs fsys.FS, cityPath string, opts cityMySQLOptions, stdout, stderr io.Writer) int {
+func doBeadsCityUseMySQL(fs fsys.FS, cityPath string, opts cityMySQLOptions, stdout, stderr io.Writer) int { //nolint:unparam // fs is the filesystem seam this command reads and writes scope metadata through; every call site passes OSFS{} today
 	const name = "gc beads city use-mysql"
 	if strings.TrimSpace(opts.DSN) == "" {
 		fmt.Fprintf(stderr, "%s: --dsn is required (e.g. \"root@tcp(127.0.0.1:3306)/\")\n", name) //nolint:errcheck

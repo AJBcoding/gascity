@@ -45,14 +45,30 @@ func postgresCredentialResolvedKey(cityPath string, payload pgauth.PostgresCrede
 // Env is rebuilt on each call so GC_DOLT_PORT reflects the current managed
 // dolt port (which can change across city restarts).
 func bdCommandRunnerForCity(cityPath string) beads.CommandRunner {
+	return bdCommandRunnerForCityRecovery(cityPath, true)
+}
+
+// bdCommandRunnerForCityRecovery is bdCommandRunnerForCity with the
+// managed-dolt recovery side effect made explicit. With allowRecovery=false
+// the runner resolves env through bdRuntimeEnvWithErrorNoRecovery, so a
+// short best-effort caller fails fast instead of starting a managed dolt
+// server it neither owns nor stops (gascity gas-0v3m, same reasoning as the
+// scoped-store conversion under ga-cdmx6x).
+func bdCommandRunnerForCityRecovery(cityPath string, allowRecovery bool) beads.CommandRunner {
 	return bdCommandRunnerWithManagedRetryErr(cityPath, func(dir string) (map[string]string, error) {
-		env, err := bdRuntimeEnvWithError(cityPath)
+		env, err := bdRuntimeEnvWithErrorRecovery(cityPath, allowRecovery)
 		env["BEADS_DIR"] = filepath.Join(dir, ".beads")
 		return env, err
 	})
 }
 
 func bdStoreForCity(dir, cityPath string) *beads.BdStore {
+	return bdStoreForCityRecovery(dir, cityPath, true)
+}
+
+// bdStoreForCityRecovery is bdStoreForCity with the managed-dolt recovery
+// side effect made explicit; see bdCommandRunnerForCityRecovery.
+func bdStoreForCityRecovery(dir, cityPath string, allowRecovery bool) *beads.BdStore {
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
 		cfg = nil
@@ -60,7 +76,7 @@ func bdStoreForCity(dir, cityPath string) *beads.BdStore {
 	reapStaleBdExportJSONL(dir)
 	return beads.NewBdStoreWithPrefix(
 		dir,
-		bdCommandRunnerForCity(cityPath),
+		bdCommandRunnerForCityRecovery(cityPath, allowRecovery),
 		issuePrefixForScope(dir, cityPath, cfg),
 		bdStoreOptionsForConfig(cfg)...,
 	)
