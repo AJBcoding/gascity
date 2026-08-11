@@ -246,7 +246,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceNetListen,
-			BaselineCalls: 96, BaselineFiles: 36,
+			BaselineCalls: 97, BaselineFiles: 37,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -296,8 +296,8 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:           ScopeUntagged,
 			Resource:        ResourceTmux,
-			BaselineCalls:   6,
-			BaselineFiles:   2,
+			BaselineCalls:   10,
+			BaselineFiles:   3,
 			ReportedCalls:   6,
 			ReportedFiles:   2,
 			OwnerBead:       "ga-80po0c.2.2.1",
@@ -339,6 +339,68 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "the controller-token withholding proof is a checked Medium subprocess owner",
 			ResourceOwner:   "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map",
 			MigrationTarget: "P0.4b",
+			Expires:         "2026-10-01",
+		},
+		// The cmd/gc tmux-leak guard tests (gas-1fb). Each proves the TestMain
+		// leak guard against a REAL leaked tmux server, which is the only thing
+		// that can prove it: a fake executor cannot leak a process, so a guard
+		// tested against one is tested against nothing. Declared per-test rather
+		// than banked as Small debt, because untagged Small tmux is pinned at
+		// exactly ZERO -- a finished migration, not slack -- and bumping it to 4
+		// would silently un-finish it.
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestDiscoverTmuxServersForSocketRootIgnoresStaleSocket",
+			Resources:       []Resource{ResourceNetListen},
+			OwnerBead:       "ga-80po0c.2.2.2",
+			Invariant:       "the cmd/gc stale-socket discovery regression is a checked Medium stream-listener owner",
+			ResourceOwner:   "the Unix stream listener is confined to TestDiscoverTmuxServersForSocketRootIgnoresStaleSocket and closed before discovery runs; it opens a socket INODE under t.TempDir(), never a port, because the code under test globs for the inode a crashed tmux leaves behind",
+			MigrationTarget: "P0.4c-listener",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestDiscoverTmuxServersForSocketRootFindsLiveServer",
+			Resources:       []Resource{ResourceTmux},
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "the cmd/gc live-server discovery regression is a checked Medium tmux owner",
+			ResourceOwner:   "the tmux server is confined to TestDiscoverTmuxServersForSocketRootFindsLiveServer, spawned on a socket path under t.TempDir() and terminated by test cleanup",
+			MigrationTarget: "P0.4c-tmux",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestTmuxLeakGuardCatchesRealLeakedServer",
+			Resources:       []Resource{ResourceTmux},
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "the cmd/gc leak-guard proof is a checked Medium tmux owner",
+			ResourceOwner:   "the deliberately leaked tmux server is confined to TestTmuxLeakGuardCatchesRealLeakedServer, spawned on an isolated socket root and terminated by test cleanup",
+			MigrationTarget: "P0.4c-tmux",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestTmuxLeakGuardWatchesTheProcessSocketRoot",
+			Resources:       []Resource{ResourceTmux},
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "the cmd/gc leak-guard socket-root scoping proof is a checked Medium tmux owner",
+			ResourceOwner:   "the tmux server is confined to TestTmuxLeakGuardWatchesTheProcessSocketRoot, spawned on the process socket root under test and terminated by test cleanup",
+			MigrationTarget: "P0.4c-tmux",
+			Expires:         "2026-10-01",
+		},
+		{
+			PackageDir:      "cmd/gc",
+			PackageName:     "main",
+			Owner:           "TestNamedSessionFixtureLeavesNoTmuxServerBehind",
+			Resources:       []Resource{ResourceTmux},
+			OwnerBead:       "ga-80po0c.2.2.1",
+			Invariant:       "the cmd/gc named-session fixture cleanup proof is a checked Medium tmux owner",
+			ResourceOwner:   "the tmux server is confined to TestNamedSessionFixtureLeavesNoTmuxServerBehind, spawned by the fixture under test and asserted gone by the end of the test",
+			MigrationTarget: "P0.4c-tmux",
 			Expires:         "2026-10-01",
 		},
 		{
