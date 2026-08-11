@@ -1,0 +1,15 @@
+# Rung 4 of the close-publication ladder: the rung-3 on_close auditor spools
+# every close it cannot prove delivered, and this turns the still-unproven ones
+# into beads. Deterministic — git containment probes and metadata reads, no LLM
+# judgment — so it runs inline in the controller as an exec order.
+#
+# The 30m interval is not a throughput knob. Records are re-verified at sweep
+# time and skipped while younger than GC_CLOSE_AUDIT_MIN_AGE_MIN (default 30m),
+# because the honest sequence is commit → close → push and the push lands after
+# the spool. Sweeping faster than that window files beads for work that is about
+# to be published, which is how a watchman gets ignored.
+[order]
+description = "File beads for closes the rung-3 auditor could not prove delivered"
+exec = "$PACK_DIR/assets/scripts/close-audit-sweep.sh"
+trigger = "cooldown"
+interval = "30m"
