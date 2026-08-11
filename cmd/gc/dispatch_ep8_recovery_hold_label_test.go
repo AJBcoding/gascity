@@ -61,6 +61,15 @@ case "$1" in
     printf '%s\n' "$*" >> "$BD_LOG"
     printf '[{"id":"ga-held-work","type":"task","labels":["hold:mayor"],"metadata":{"gc.run_target":"gascity/builder"}}]'
     ;;
+  # buildOnDeath also reads ephemeral (wisp) work through "bd query"; this case
+  # covers a non-ephemeral held bead, so model an empty ephemeral set. The arm
+  # is load-bearing, not cosmetic: without it "bd query" falls to *) exit 1 and
+  # shellWorkQueryWithEnv's "set -o pipefail" prelude propagates that status out
+  # of the whole hook, failing the run before any assertion is reached.
+  query)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[]'
+    ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
     ;;
@@ -98,6 +107,14 @@ case "$1" in
       *"--metadata-field gc.routed_to=gascity/builder"*) printf '[{"id":"ga-held-boot","type":"wisp","labels":["hold:external"],"metadata":{"gc.routed_to":"gascity/builder"}}]' ;;
       *) printf '[]' ;;
     esac
+    ;;
+  # buildOnBoot also reads ephemeral (wisp) work through "bd query" -- see the
+  # matching arm in the on_death case above for why omitting it fails the run
+  # outright. ga-held-boot is already served by the routed_to "bd list" arm, so
+  # returning an empty ephemeral set here keeps it reopened exactly once.
+  query)
+    printf '%s\n' "$*" >> "$BD_LOG"
+    printf '[]'
     ;;
   update)
     printf '%s\n' "$*" >> "$BD_LOG"
