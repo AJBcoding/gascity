@@ -3135,6 +3135,22 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
+	// Refuse to stamp a work_dir that sits in the lane where a linked worktree
+	// is expected — under the city's worktrees root — but is not one. The stamp
+	// is what the ledger and the next session read (gas-u1f6), so a value naming
+	// a plain directory hands the next session a workspace with no git, no code,
+	// and no .beads (py-3xe5). Binding nothing is the safe degradation: callers
+	// already treat "" as "no work_dir to bind".
+	//
+	// Scoped to that lane deliberately — agent dirs under .gc/agents/** carry no
+	// .git and external repo checkouts carry a .git directory, and both are
+	// legitimate shapes that must keep spawning (gas-tvn5).
+	if err := workdirutil.ValidateWorktreeWorkspace(bp.cityPath, base); err != nil {
+		if bp.stderr != nil {
+			fmt.Fprintf(bp.stderr, "agent %q: refusing to stamp work_dir: %v\n", qualifiedName, err) //nolint:errcheck
+		}
+		return ""
+	}
 	if pack := strings.TrimSpace(request.WorkPack); pack != "" {
 		packDir := filepath.Join(filepath.Dir(base), pack)
 		if workspace := packWorkspaceSlug(request); workspace != "" {
