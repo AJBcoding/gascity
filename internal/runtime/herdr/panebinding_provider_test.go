@@ -50,6 +50,11 @@ agent_get)
 agent_list)
   printf '%s' '{"result":{"agents":[]}}' ;;
 agent_start)
+  if [ -e "$STATE/pane_busy_once" ]; then
+    rm -f "$STATE/pane_busy_once"
+    printf '%s' '{"error":{"code":"agent_pane_busy","message":"agent target pane %5 is not an available shell"},"id":"cli:agent:start"}' >&2
+    exit 1
+  fi
   : > "$STATE/agent_started"
   : > "$STATE/registered"
   if [ -e "$METADIR/$3/GC_SESSION_ID" ]; then : > "$STATE/meta_seeded_before_launch"; fi

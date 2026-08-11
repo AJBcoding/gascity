@@ -43,9 +43,14 @@ type Item struct {
 	Attempts          int        `json:"attempts,omitempty"`
 	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
 	LastError         string     `json:"last_error,omitempty"`
-	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
-	LeaseUntil        time.Time  `json:"lease_until,omitempty"`
-	DeadAt            time.Time  `json:"dead_at,omitempty"`
+	// ReaddressedFrom records the session fence this item carried before the
+	// dispatcher cleared it: the fenced session was no longer open, so the
+	// item was re-addressed to its agent for the slot's live successor to
+	// claim (gas-wvap). Audit trail only; matching never consults it.
+	ReaddressedFrom string    `json:"readdressed_from,omitempty"`
+	ClaimedAt       time.Time `json:"claimed_at,omitempty"`
+	LeaseUntil      time.Time `json:"lease_until,omitempty"`
+	DeadAt          time.Time `json:"dead_at,omitempty"`
 }
 
 // State is the persisted nudge queue snapshot.
