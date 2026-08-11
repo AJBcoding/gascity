@@ -47,12 +47,12 @@ func TestParsePSInitChildren(t *testing.T) {
 	// Shape of `ps -Ao ppid=,pid=,pcpu=,etime=,comm=`: right-aligned numeric
 	// columns, command last and possibly containing spaces.
 	out := strings.Join([]string{
-		"    1   431   0.0 11-03:44:12 /usr/sbin/distnoted",
-		"    1 54321  80.1    11:26:03 -zsh",
-		"  502 54322   0.1       00:05 ps",
-		"    1 54323  79.4    11:26:03 /Applications/Some App.app/Contents/MacOS/Some App",
+		"    1   431 S      0.0 11-03:44:12 /usr/sbin/distnoted",
+		"    1 54321 R      80.1    11:26:03 -zsh",
+		"  502 54322 S+     0.1       00:05 ps",
+		"    1 54323 Ss     79.4    11:26:03 /Applications/Some App.app/Contents/MacOS/Some App",
 		"garbage line",
-		"    1 notapid 12.0   01:00 broken",
+		"    1 notapid S    12.0   01:00 broken",
 		"",
 	}, "\n")
 
@@ -105,9 +105,9 @@ func TestOrphanCPUCheckFlagsSustainedInitChildBurn(t *testing.T) {
 	// The gas-7ipo incident shape: four `while :; do :; done` loops reparented
 	// to init after `BG=$(jobs -p)` captured nothing, burning ~80% each for 11h.
 	out := psFixture(
-		"    1 54321  80.1    11:26:03 -zsh",
-		"    1 54322  79.4    11:26:03 -zsh",
-		"  502 54999   0.1       00:05 ps",
+		"    1 54321 R      80.1    11:26:03 -zsh",
+		"    1 54322 R      79.4    11:26:03 -zsh",
+		"  502 54999 S+      0.1       00:05 ps",
 	)
 	res := newTestOrphanCPUCheck(out, nil).Run(&doctor.CheckContext{})
 
@@ -143,17 +143,26 @@ func TestOrphanCPUCheckIgnoresIdleAndYoungProcesses(t *testing.T) {
 		{
 			// Long-lived init children at rest: every launchd/systemd daemon.
 			name: "idle daemon",
-			out:  psFixture("    1   431   0.2 11-03:44:12 /usr/sbin/distnoted"),
+			out:  psFixture("    1   431 S      0.2 11-03:44:12 /usr/sbin/distnoted"),
 		},
 		{
 			// Hot but young: a compile or test run that just started.
 			name: "young burner",
-			out:  psFixture("    1 54321  99.0       00:42 go"),
+			out:  psFixture("    1 54321 R     99.0       00:42 go"),
 		},
 		{
 			// Not an init child: owned by a live parent, so someone can reap it.
 			name: "owned burner",
-			out:  psFixture("  502 54321  99.0    11:26:03 -zsh"),
+			out:  psFixture("  502 54321 R     99.0    11:26:03 -zsh"),
+		},
+		{
+			// A zombie keeps the lifetime-average %CPU it earned while alive,
+			// but it is dead and consuming nothing. Reporting it as "burning
+			// CPU" would be factually wrong, and zombies are reparented to
+			// init by definition — so this is the false positive most likely
+			// to reach an operator. Observed persisting 17h on a city host.
+			name: "zombie retaining a high lifetime average",
+			out:  psFixture("    1 54321 ZN    80.1    11:26:03 <defunct>"),
 		},
 	}
 	for _, tc := range cases {
@@ -180,14 +189,14 @@ func TestRunPSInitChildrenParsesRealProcessTable(t *testing.T) {
 	rows, parsed := 0, 0
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 5 {
+		if len(fields) < 6 {
 			continue
 		}
 		if _, err := strconv.Atoi(fields[0]); err != nil {
 			continue
 		}
 		rows++
-		if _, ok := parseETime(fields[3]); ok {
+		if _, ok := parseETime(fields[4]); ok {
 			parsed++
 		}
 	}
