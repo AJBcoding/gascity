@@ -168,7 +168,7 @@ detect_loadavg() {
     return
   fi
 
-  local loadavg_file="/proc/loadavg"
+  local loadavg_file="${GC_TEST_LOCAL_LOADAVG_FILE:-/proc/loadavg}"
   if [[ -r "$loadavg_file" ]]; then
     awk '{ print $1; exit }' "$loadavg_file" 2>/dev/null
     return
