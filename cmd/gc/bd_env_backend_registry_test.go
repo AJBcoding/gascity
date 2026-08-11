@@ -11,10 +11,30 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// requireUnregisteredBackend fails the test when backend is one this build
+// registers, enforcing the precondition every caller here depends on.
+//
+// Without it a name that becomes registered later turns these tests into
+// assertions about a *supported* backend, and they fail reporting a missing
+// ErrUnknownBackend rather than the stale fixture that actually broke. That is
+// exactly how "mysql" survived here until this lane registered it (gas-9iy7).
+func requireUnregisteredBackend(t *testing.T, backend string) {
+	t.Helper()
+	if err := contract.RecognizeBackend(backend); err == nil {
+		registered, regErr := contract.RegisteredBackends()
+		if regErr != nil {
+			t.Fatal(regErr)
+		}
+		t.Fatalf("fixture backend %q is registered by this build (registered: %s); pick a name this build does not implement",
+			backend, strings.Join(registered, ", "))
+	}
+}
+
 // writeUnregisteredBackendScope writes an authoritative scope whose metadata
 // names a backend no assembly of gc registers.
 func writeUnregisteredBackendScope(t *testing.T, backend string) string {
 	t.Helper()
+	requireUnregisteredBackend(t, backend)
 	cityPath := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(cityPath, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
@@ -78,7 +98,7 @@ func TestScopeBackendEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
 // second projection entry point — the one an inherited-city scope takes — which
 // has its own switch and therefore its own chance to fall through silently.
 func TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
-	cityPath := writeUnregisteredBackendScope(t, "mysql")
+	cityPath := writeUnregisteredBackendScope(t, "sqlite")
 
 	env := map[string]string{}
 	used, err := applyCityStorageBindingEnv(env, cityPath)
@@ -94,7 +114,7 @@ func TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends(t *testing.T) 
 	if len(env) != 0 {
 		t.Fatalf("a refused projection left %d env keys behind: %v", len(env), env)
 	}
-	if !strings.Contains(err.Error(), `"mysql"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
+	if !strings.Contains(err.Error(), `"sqlite"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
 		t.Errorf("refusal %q must name the backend and state the data-safety guarantee", err)
 	}
 }
@@ -108,6 +128,7 @@ func TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends(t *testing.T) 
 // Dolt endpoint left over in the city's config for a city gc just refused to
 // classify, with bd in that session writing there.
 func TestInheritedRigSessionEnvRefusesUnregisteredCityBackend(t *testing.T) {
+	requireUnregisteredBackend(t, "sqlite")
 	cityPath := t.TempDir()
 	rigDir := filepath.Join(cityPath, "rigs", "fe")
 	for _, dir := range []string{cityPath, rigDir} {
@@ -126,7 +147,7 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"mysql"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"sqlite"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: fe
@@ -152,7 +173,7 @@ dolt.auto-start: false
 	if !errors.Is(err, contract.ErrUnknownBackend) {
 		t.Fatalf("refusal = %v, want it to wrap ErrUnknownBackend", err)
 	}
-	if !strings.Contains(err.Error(), `"mysql"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
+	if !strings.Contains(err.Error(), `"sqlite"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
 		t.Errorf("refusal %q must name the backend and state the data-safety guarantee", err)
 	}
 	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
