@@ -5122,3 +5122,47 @@ func TestResolveNudgePollInterval(t *testing.T) {
 		}
 	})
 }
+
+// The whole point of gas-jfy6: when the payload is still sitting unsubmitted in
+// the target's input box, gc must NOT print a word asserting delivery, and must
+// exit non-zero. A probe that is right while the message still reads "Nudged"
+// fixes nothing for the caller — an operator PAUSE order that reports delivered
+// and is never read is how a paused rig keeps working.
+func TestDeliverSessionNudgeFailsClosedWhenPayloadStaysInTheInputBox(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	fake := runtime.NewFake()
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	// The shape actually peeked on the fleet: a multi-line order collapses to a
+	// paste placeholder that never appears as literal text.
+	fake.PeekOutput = map[string]string{
+		"sess-worker": "● Nothing claimed, nothing to execute.\n\n> [Pasted text #13 +15 lines]",
+	}
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: "sess-worker",
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeWithProvider(target, fake, nudgeDeliveryImmediate, &stdout, &stderr)
+
+	if code == 0 {
+		t.Fatalf("exit = 0 on an undelivered nudge; callers branch on the status, so this must fail closed. stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if strings.Contains(stdout.String(), "Nudged") {
+		t.Fatalf("stdout asserts delivery for a payload still in the input box: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "NOT DELIVERED") {
+		t.Fatalf("stderr = %q, want an explicit not-delivered report", stderr.String())
+	}
+	// The operator needs to know the order is ARMED, not merely undelivered:
+	// the next submit in that session fires it into an unrelated context.
+	if !strings.Contains(stderr.String(), "armed") {
+		t.Fatalf("stderr = %q, want the armed-order hazard named", stderr.String())
+	}
+}

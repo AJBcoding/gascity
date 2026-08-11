@@ -782,3 +782,16 @@ func (f *Fake) RunLive(name string, _ Config) error {
 	}
 	return nil
 }
+
+// ConfirmDelivery implements DeliveryConfirmer against the fake's canned Peek
+// output, so tests exercise the same predicate production does.
+//
+// With no PeekOutput set the screen is empty, nothing is pending, and delivery
+// confirms — which is the honest answer for a fake whose Nudge really did
+// deliver. Set PeekOutput to a screen whose composer still holds the payload to
+// exercise the stranded-order case (gas-jfy6).
+func (f *Fake) ConfirmDelivery(name, sent string, within time.Duration) (DeliveryConfirmation, error) {
+	return ConfirmViaPeek(func(lines int) (string, error) {
+		return f.Peek(name, lines)
+	}, sent, within)
+}
