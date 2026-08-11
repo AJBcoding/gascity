@@ -1784,9 +1784,26 @@ func ensureInheritedExternalScopeMetadata(fs fsys.FS, cityPath, dir, prefix stri
 		return nil
 	}
 	path := scopeMetadataJSONPath(dir)
+	// Both binding probes precede their LoadMetadataState, per the ordering
+	// every other caller keeps. A scope carrying its own complete binding has
+	// nothing to derive, and a city serving one names a backend gc is
+	// explicitly not the validator for — deriving rig metadata from it would
+	// mean parsing a store gc does not serve. Probing second lets
+	// LoadMetadataState refuse by backend name first, which is what stopped
+	// `gc rig add` against an opaque-binding city (gas-9iy7).
+	if completeBinding, err := scopeHasCompleteStorageBinding(path); err != nil {
+		return err
+	} else if completeBinding {
+		return nil
+	}
 	if _, ok, err := contract.LoadMetadataState(fs, path); err != nil {
 		return err
 	} else if ok {
+		return nil
+	}
+	if completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath)); err != nil {
+		return err
+	} else if completeBinding {
 		return nil
 	}
 	cityMeta, ok, err := contract.LoadMetadataState(fs, scopeMetadataJSONPath(cityPath))

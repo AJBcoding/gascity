@@ -229,18 +229,27 @@ func clearManagedDoltRuntimeState(cityPath string) error {
 // have its published state cleared out from under it.
 func clearManagedDoltRuntimeStateUnlessBound(cityPath string) error {
 	if cityUsesBdStoreContract(cityPath) {
-		_, usesExternal, err := externalBackendMetadataForScope(cityPath, cityPath)
-		if err != nil {
-			return err
-		}
-		if usesExternal {
-			return nil
-		}
+		// The binding probe comes first, as it does in every other caller
+		// (scopeStoreIsExternallyBound, scopeSkipsManagedDoltForInit,
+		// ensureBeadsProvider). An opaque binding names a backend that is
+		// explicitly not gc's to validate, so asking externalBackendMetadataForScope
+		// first inverts the contract allowLegacyDoltMetadataRepair states: it
+		// runs LoadMetadataState, which rejects the scope by backend name before
+		// anything asks whether the scope is an opaque binding at all. A city
+		// served by a binding gc does not implement then cannot be shut down —
+		// the refusal reaches the operator from `gc stop` (gas-9iy7).
 		completeBinding, err := scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
 		if err != nil {
 			return err
 		}
 		if completeBinding {
+			return nil
+		}
+		_, usesExternal, err := externalBackendMetadataForScope(cityPath, cityPath)
+		if err != nil {
+			return err
+		}
+		if usesExternal {
 			return nil
 		}
 	}
