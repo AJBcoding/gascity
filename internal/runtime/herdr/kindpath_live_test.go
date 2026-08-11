@@ -3,7 +3,10 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -27,9 +30,19 @@ func TestProviderLiveClaudeKindPath(t *testing.T) {
 		t.Skip("claude not installed")
 	}
 
-	p := New("gctest-kind", t.TempDir(), t.TempDir(), 0, 0)
+	// Per-PID session name, matching the gctest-place-%d tests: a fixed name let
+	// one run's leftover session decide the next run's verdict (see gas-4z96 —
+	// this test was a coin flip on warm state, PASS ~6s cold / FAIL ~2s warm).
+	p := New(fmt.Sprintf("gctest-kind-%d", os.Getpid()), t.TempDir(), t.TempDir(), 0, 0)
 	_ = p.Stop("kindsmoke")
-	t.Cleanup(func() { _ = p.Stop("kindsmoke"); _ = p.TeardownServer() })
+	t.Cleanup(func() {
+		_ = p.Stop("kindsmoke")
+		_ = p.TeardownServer()
+		// TeardownServer stops the server but leaves the session directory, and a
+		// PID is eventually reused — so remove the directory too, or the leak just
+		// returns on a slower cycle.
+		_ = os.RemoveAll(filepath.Dir(p.c.socketPath()))
+	})
 
 	ctx := context.Background()
 	cfg := runtime.Config{
