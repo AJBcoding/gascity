@@ -76,7 +76,11 @@ trap 'push_gate_release_slot "$gate_fd"' EXIT
 # script's own go-env probes and documents the invariant. A bare `go test`
 # outside this harness is covered separately by internal/testenv, which scrubs
 # these vars at test-binary init in every covered package.
-unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT
+# GC_DISABLE_USAGE_METRICS joins them (gas-4zb / gas-mnpr): it is ambient in
+# every agent shell and fakes a deterministic internal/productmetrics
+# regression. The Makefile's env -i already drops it on the `make` path; this
+# unset closes the direct-invocation hole.
+unset GC_DOLT_PORT BEADS_DOLT_SERVER_PORT GC_DISABLE_USAGE_METRICS
 
 local_jobs="${LOCAL_TEST_JOBS:-$("$repo_root/scripts/test-local-job-count")}"
 cmd_gc_total="${CMD_GC_PROCESS_TOTAL:-6}"

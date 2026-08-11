@@ -19,6 +19,14 @@ fail() {
   exit 1
 }
 
+# Shared availability probe with the push-gate admission check (gas-mnpr):
+# sizing and admission must agree on what "available memory" means, so the
+# macOS path below reuses push_gate_free_mem_mb instead of duplicating a
+# second vm_stat parse. The library defines functions only; sourcing it has
+# no side effects.
+# shellcheck source=./push-gate-lock-lib.sh disable=SC1091
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/push-gate-lock-lib.sh"
+
 detect_cpus() {
   if [[ -n "${GC_TEST_LOCAL_CPUS:-}" ]]; then
     [[ "$GC_TEST_LOCAL_CPUS" =~ ^[0-9]+$ && "$GC_TEST_LOCAL_CPUS" -gt 0 ]] ||
@@ -120,8 +128,22 @@ detect_memory_kib() {
     fi
   fi
 
-  # macOS exposes total rather than readily available memory. Reserve 4 GiB
-  # for the OS and interactive work before applying the per-shard budget.
+  # macOS: measure actually-available memory (free+inactive pages) through
+  # the probe the push-gate admission check uses, so sizing and admission
+  # agree on one number. Sizing from total RAM picks the same job count at
+  # load 100 as at idle (gas-cebv; measured 2026-08-10: 11 jobs x 4 GiB
+  # budget = 44 GiB against 14.5 GiB actually available — a constant ~3x
+  # over-commit by construction, and the memory holders are compile/link
+  # processes with a measured 1.9 GiB single-process tail).
+  if [[ "$best" -eq 0 ]]; then
+    candidate="$(push_gate_free_mem_mb 2>/dev/null || true)"
+    if [[ "$candidate" =~ ^[0-9]+$ && "$candidate" -gt 0 ]]; then
+      best=$((candidate * 1024))
+    fi
+  fi
+
+  # Last resort where even the probe cannot answer: total RAM minus a 4 GiB
+  # reservation for the OS and interactive work, before the per-shard budget.
   if [[ "$best" -eq 0 ]]; then
     total_bytes="$(sysctl -n hw.memsize 2>/dev/null || true)"
     if [[ "$total_bytes" =~ ^[0-9]+$ && "$total_bytes" -gt 0 ]]; then
@@ -147,8 +169,21 @@ detect_loadavg() {
   fi
 
   local loadavg_file="/proc/loadavg"
-  [[ -r "$loadavg_file" ]] || return 1
-  awk '{ print $1; exit }' "$loadavg_file" 2>/dev/null
+  if [[ -r "$loadavg_file" ]]; then
+    awk '{ print $1; exit }' "$loadavg_file" 2>/dev/null
+    return
+  fi
+
+  # macOS has no /proc/loadavg; sysctl prints "{ 1min 5min 15min }". Without
+  # this fallback the load-aware reduction silently never runs on Darwin and
+  # the gate picks its idle job count at any load (gas-cebv, gas-mnpr).
+  local sysctl_load
+  sysctl_load="$(sysctl -n vm.loadavg 2>/dev/null | awk '{ print $2; exit }')"
+  if [[ "$sysctl_load" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+    printf '%s\n' "$sysctl_load"
+    return
+  fi
+  return 1
 }
 
 cpus="$(detect_cpus)"
