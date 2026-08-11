@@ -976,31 +976,50 @@ func resolveMailIdentityWithConfigCached(cityPath string, cfg *config.City, stor
 	if sender, ok := reservedMailSenderIdentity(identifier); ok {
 		return sender, nil
 	}
+	// Same source-chain discipline as resolveMailRecipientIdentityCached: a
+	// store lookup that failed has not established that the identity is
+	// unknown, and configuredMailboxAddressWithConfig below reads only
+	// city.toml, so it still answers while the store is degraded (gas-5nr0).
+	var sourceErr error
 	if store != nil && cfg != nil {
 		sessionID, err := resolveSessionIDWithConfig(cityPath, cfg, store, identifier)
-		if err == nil {
-			address, err := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
-			if err != nil {
-				return "", err
+		switch {
+		case err == nil:
+			address, addrErr := session.NewStore(beads.SessionStore{Store: store}).MailboxAddress(sessionID)
+			if addrErr != nil {
+				return "", addrErr
 			}
 			if address == "" {
 				return "", fmt.Errorf("session %q has no mailbox identity", identifier)
 			}
 			return address, nil
-		}
-		if !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
+		case !errors.Is(err, session.ErrSessionNotFound):
+			sourceErr = err
 		}
 	}
-	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
+	// An ambiguous match (matched=true) is a verdict and stands; a store
+	// failure (matched=false) only means this source could not answer.
+	target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache)
+	switch {
+	case targetErr != nil && matched:
 		return "", targetErr
-	} else if matched {
+	case matched:
 		return target.display, nil
+	case targetErr != nil:
+		sourceErr = errors.Join(sourceErr, targetErr)
 	}
 	if address, ok := configuredMailboxAddressWithConfig(cityPath, cfg, identifier); ok {
 		return address, nil
 	}
-	return resolveMailIdentityCached(store, identifier, cache)
+	address, err := resolveMailIdentityCached(store, identifier, cache)
+	switch {
+	case err == nil:
+		return address, nil
+	case sourceErr != nil:
+		return "", errors.Join(sourceErr, err)
+	default:
+		return "", err
+	}
 }
 
 func resolveMailRecipientIdentity(cityPath string, cfg *config.City, store beads.Store, identifier string) (string, error) {
@@ -1011,24 +1030,52 @@ func resolveMailRecipientIdentityCached(cityPath string, cfg *config.City, store
 	if normalized := normalizeNamedSessionTarget(identifier); normalized == "" || normalized == "human" {
 		return "human", nil
 	}
+	// A source that cannot answer is not an answer of "no such recipient".
+	// Both lookups below read the session store, and every live session mailbox
+	// lives in the ephemeral tier, so a slow wisp query leaves them reporting
+	// failure rather than absence. Returning that failure here rejects a
+	// recipient the store-free city config can still resolve, which takes mail
+	// — the escalation channel — down with the store exactly when the city is
+	// loaded enough to need it. Remember the failure and keep walking the
+	// source chain instead; resolution still fails if every source comes up
+	// empty, so a degraded lookup can never manufacture an address (gas-5nr0).
+	var sourceErr error
 	if store != nil {
 		sessionID, err := session.ResolveSessionIDByExactID(store, identifier)
-		if err == nil {
+		switch {
+		case err == nil:
 			return sessionID, nil
-		}
-		if !errors.Is(err, session.ErrSessionNotFound) {
-			return "", err
+		case !errors.Is(err, session.ErrSessionNotFound):
+			sourceErr = err
 		}
 	}
-	if target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache); targetErr != nil {
+	// matched distinguishes the two error shapes this resolver returns: an
+	// ambiguous match reports matched=true and is a definitive verdict about
+	// the recipient, which no later source may override; a store failure
+	// reports matched=false and is merely a source that could not answer.
+	target, matched, targetErr := resolveLiveConfiguredNamedMailTargetCached(store, identifier, cache)
+	switch {
+	case targetErr != nil && matched:
 		return "", targetErr
-	} else if matched {
+	case matched:
 		return target.display, nil
+	case targetErr != nil:
+		sourceErr = errors.Join(sourceErr, targetErr)
 	}
 	if normalizeNamedSessionTarget(identifier) == controllerMailIdentity {
 		return "", session.ErrSessionNotFound
 	}
-	return resolveMailIdentityWithConfigCached(cityPath, cfg, store, identifier, cache)
+	address, err := resolveMailIdentityWithConfigCached(cityPath, cfg, store, identifier, cache)
+	switch {
+	case err == nil:
+		return address, nil
+	case sourceErr != nil:
+		// Report what every source said, so a degraded store is diagnosable
+		// rather than hidden behind the last source's "not found".
+		return "", errors.Join(sourceErr, err)
+	default:
+		return "", err
+	}
 }
 
 func configuredMailboxAddress(identifier string) (string, bool) {
@@ -1734,8 +1781,24 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	if store != nil {
 		validRecipients, err = listLiveSessionMailboxesCached(store, idCache)
 		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: listing live sessions: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
+			// --all broadcasts to whatever this enumeration returns, so the
+			// enumeration IS the payload: without it there is no recipient set
+			// to send to, and proceeding would silently under-deliver.
+			if all {
+				fmt.Fprintf(stderr, "gc mail send --all: listing live sessions: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
+			// For a single recipient this list is only an allow-list guarding
+			// against typos, and an enumeration that failed cannot establish
+			// that any address is unknown. Enforcing it here took mail — the
+			// escalation channel — down whenever the ephemeral tier was slow,
+			// which is exactly when agents need to escalate. Drop the
+			// allow-list, say so, and let resolution fall back to the
+			// store-free city config; delivery still fails loudly if no source
+			// can resolve the address (gas-5nr0).
+			fmt.Fprintf(stderr, "gc mail send: warning: listing live sessions: %v\n", err)                            //nolint:errcheck // best-effort stderr
+			fmt.Fprintln(stderr, "gc mail send: recipient validation degraded; resolving recipient from city config") //nolint:errcheck // best-effort stderr
+			validRecipients = nil
 		}
 	}
 
