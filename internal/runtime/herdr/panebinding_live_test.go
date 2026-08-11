@@ -3,7 +3,10 @@ package herdr
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -26,9 +29,17 @@ func TestProviderLiveOccupantSwapKeepsLiveness(t *testing.T) {
 		t.Skip("herdr not installed")
 	}
 
-	p := New("gctest-swap", t.TempDir(), t.TempDir(), 0, 0)
+	// Per-PID session name, matching the gctest-place-%d tests; see gas-4z96 for
+	// why a fixed name made these live tests depend on prior runs.
+	p := New(fmt.Sprintf("gctest-swap-%d", os.Getpid()), t.TempDir(), t.TempDir(), 0, 0)
 	_ = p.Stop("swap") // clear any leftover from a crashed prior run
-	t.Cleanup(func() { _ = p.Stop("swap"); _ = p.TeardownServer() })
+	t.Cleanup(func() {
+		_ = p.Stop("swap")
+		_ = p.TeardownServer()
+		// TeardownServer leaves the session directory behind; remove it so the
+		// next run starts cold.
+		_ = os.RemoveAll(filepath.Dir(p.c.socketPath()))
+	})
 
 	ctx := context.Background()
 	cfg := runtime.Config{
