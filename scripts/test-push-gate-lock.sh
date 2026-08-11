@@ -49,7 +49,15 @@ trap 'rm -rf "$WORK"' EXIT
 SLOTS="$WORK/gate-slots"
 
 # ---------------- acquire / hold (two slots) ----------------
+# Slot mechanics must not depend on how much memory this host happens to have
+# free, so the headroom check is disabled for every case except the ones that
+# test it (those set the floor explicitly and drive the probe through its
+# fake seam). Before gas-k5kh the probe over-reported by counting swap-backed
+# inactive pages, so the default floor was always cleared and this dependency
+# stayed invisible; against an honest probe it hangs the whole selftest on any
+# busy host.
 export PUSH_GATE_MAX_CONCURRENT=2
+export PUSH_GATE_MIN_FREE_MEM_MB=0
 FD0=""
 if push_gate_acquire_slot "$SLOTS" FD0 "holder-A"; then
     record_pass "acquire.first_succeeds"
@@ -354,11 +362,127 @@ MEM_RES="$(mem_case fail 99999)"
 assert_contains "mem.probe_failure_fails_open" "$MEM_RES" "rc=0"
 assert_contains "mem.probe_failure_diagnostic" "$MEM_RES" "probe"
 
-# Malformed floor falls back to the documented default (6144), which a
-# starved fake must still block against — proving the default is applied
-# rather than the check silently disabling.
+# Malformed floor falls back to the documented default, which a starved fake
+# must still block against — proving the default is applied rather than the
+# check silently disabling.
 MEM_RES="$(mem_case 100 banana)"
 assert_contains "mem.malformed_floor_uses_default" "$MEM_RES" "rc=1"
+
+# The default floor is the measured single-gate envelope (2304 MiB), so it
+# must sit between these two fakes. Bracketing it through the malformed-floor
+# path pins the actual value, which a comment cannot: a silent re-sizing in
+# either direction breaks one of the two.
+MEM_RES="$(mem_case 2000 banana)"
+assert_contains "mem.default_floor_blocks_below_envelope" "$MEM_RES" "rc=1"
+MEM_RES="$(mem_case 4000 banana)"
+assert_contains "mem.default_floor_admits_above_envelope" "$MEM_RES" "rc=0"
+
+# ---------------- availability probe formula (gas-k5kh) ----------------
+# The probe's NUMBER is what both the admission check and
+# scripts/test-local-job-count's sizing act on, so the formula itself is
+# asserted here — the PUSH_GATE_FAKE_FREE_MEM_MB seam above replaces the whole
+# probe and therefore cannot cover it. PUSH_GATE_MEMINFO redirects the Linux
+# read so the vm_stat branch is reachable on every platform, and a stub
+# vm_stat on PATH supplies deterministic page counts.
+PROBE="$WORK/probe"
+mkdir -p "$PROBE/bin"
+
+probe_mb() { # -> the probe's MiB result against the stub vm_stat
+    PATH="$PROBE/bin:$PATH" PUSH_GATE_MEMINFO="$PROBE/absent-meminfo" \
+        PUSH_GATE_FAKE_FREE_MEM_MB="" \
+        bash -c '. "$1"; push_gate_free_mem_mb' _ "$LIB" 2>/dev/null
+}
+
+# 16384-byte pages. inactive is deliberately enormous and swap-backed: it is
+# the page class that made a thrashing host report 17.6 GB available while
+# only 2.0 GB could be had without paging (gas-k5kh, reproduced 2026-08-11).
+cat >"$PROBE/bin/vm_stat" <<'STUB'
+#!/bin/sh
+cat <<'OUT'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                     1000.
+Pages active:                                 918517.
+Pages inactive:                               900000.
+Pages speculative:                               100.
+Pages throttled:                                   0.
+Pages wired down:                             461067.
+Pages purgeable:                                 100.
+OUT
+STUB
+chmod +x "$PROBE/bin/vm_stat"
+
+# (1000 + 100 + 100) * 16384 / 1MiB = 18. Counting inactive would yield 14078.
+assert_eq "probe.excludes_swap_backed_inactive" "$(probe_mb)" "18"
+
+# Page classes the host may not report at all must degrade to zero rather
+# than failing the probe — under-reporting errs toward waiting, which is the
+# safe direction, while a failed probe fails OPEN and admits.
+cat >"$PROBE/bin/vm_stat" <<'STUB'
+#!/bin/sh
+cat <<'OUT'
+Mach Virtual Memory Statistics: (page size of 16384 bytes)
+Pages free:                                     1000.
+Pages active:                                 918517.
+Pages inactive:                               900000.
+OUT
+STUB
+chmod +x "$PROBE/bin/vm_stat"
+assert_eq "probe.missing_page_classes_degrade_to_zero" "$(probe_mb)" "15"
+
+# Linux keeps MemAvailable: it is already the kernel's own reclaim-aware
+# figure, and nothing about this change touches it.
+printf 'MemTotal:       65536000 kB\nMemAvailable:    4194304 kB\n' >"$PROBE/meminfo"
+assert_eq "probe.linux_uses_memavailable" \
+    "$(PUSH_GATE_MEMINFO="$PROBE/meminfo" PUSH_GATE_FAKE_FREE_MEM_MB="" \
+        bash -c '. "$1"; push_gate_free_mem_mb' _ "$LIB" 2>/dev/null)" "4096"
+
+# No meminfo and no vm_stat: unmeasurable, which must return 1 with no output
+# so the caller's documented fail-open path is the one that runs. PATH is
+# emptied down to the (now stub-less) probe dir, so bash must be invoked by
+# absolute path — resolving it through the stripped PATH would exit 127 and
+# fake this assertion green.
+BASH_BIN="$(command -v bash)"
+rm -f "$PROBE/bin/vm_stat"
+# shellcheck disable=SC2016  # $1 is the inner shell's positional arg, not ours
+PROBE_UNMEASURABLE="$(PATH="$PROBE/bin" \
+    PUSH_GATE_MEMINFO="$PROBE/absent-meminfo" PUSH_GATE_FAKE_FREE_MEM_MB="" \
+    "$BASH_BIN" -c '. "$1"; push_gate_free_mem_mb' _ "$LIB" 2>/dev/null; printf 'rc=%s' "$?")"
+assert_eq "probe.unmeasurable_returns_failure" "$PROBE_UNMEASURABLE" "rc=1"
+
+# ---------------- holder liveness (gas-k5kh) ----------------
+# A count of occupied slots reads identically for a gate that is progressing
+# and one wedged at 0.0% CPU, which is what left two agents waiting out a
+# 600s bound behind a run that could no longer produce a verdict anyone would
+# use. The holder line carries the measured numbers; it draws no conclusion
+# from them, so no threshold judgement lives in this script.
+LIVE_SLOTS="$WORK/live-slots"
+FD_LIVE=""
+if push_gate_acquire_slot "$LIVE_SLOTS" FD_LIVE "holder-live"; then
+    LIVE_OUT="$(push_gate_describe_slots "$LIVE_SLOTS" 1)"
+    assert_contains "describe.live_holder_reports_tree_cpu" "$LIVE_OUT" "% CPU"
+    assert_contains "describe.live_holder_reports_elapsed" "$LIVE_OUT" "elapsed"
+    push_gate_release_slot "$FD_LIVE"
+else
+    record_fail "describe.live_holder_reports_tree_cpu" "could not acquire a slot to set up the case"
+    record_fail "describe.live_holder_reports_elapsed" "could not acquire a slot to set up the case"
+fi
+
+# A dead holder has no liveness to report: the leaked-descendant diagnostic
+# stays the whole story, because a CPU figure for a pid that no longer exists
+# would name the wrong process.
+DEAD_LIVE_SLOTS="$WORK/dead-live-slots"
+FD_DEAD_LIVE=""
+if push_gate_acquire_slot "$DEAD_LIVE_SLOTS" FD_DEAD_LIVE "holder-dead-live"; then
+    printf '%s %s %s %s\n' "999999999" "1970-01-01T00:00:00Z" "holder-dead-live" "somehost" \
+        >"$DEAD_LIVE_SLOTS/slot-0.lock"
+    DEAD_LIVE_OUT="$(push_gate_describe_slots "$DEAD_LIVE_SLOTS" 1)"
+    assert_contains "describe.dead_holder_still_flagged" "$DEAD_LIVE_OUT" "holder pid dead"
+    assert_false "describe.dead_holder_claims_no_cpu" test "${DEAD_LIVE_OUT#*% CPU}" != "$DEAD_LIVE_OUT"
+    push_gate_release_slot "$FD_DEAD_LIVE"
+else
+    record_fail "describe.dead_holder_still_flagged" "could not acquire a slot to set up the case"
+    record_fail "describe.dead_holder_claims_no_cpu" "could not acquire a slot to set up the case"
+fi
 
 # ---------------- FIFO waiter queue (gas-mnpr gaps 2+4) ----------------
 QWORK="$WORK/queue-test"
