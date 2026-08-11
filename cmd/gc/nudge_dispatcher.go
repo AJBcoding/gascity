@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -127,6 +128,34 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		return 0, nil
 	}
 	now := time.Now()
+	// Re-address pending items whose session fence outlived its session. A
+	// queued nudge is fenced to the (session_id, epoch) captured at enqueue;
+	// when that session recycles, the fence can never match again — the
+	// dispatcher observes the slot's live successor, the claim yields
+	// nothing, and the item rots never-attempted until its expiry while the
+	// successor idles beside a routed queue it was never poked to read
+	// (gas-wvap / gas-58f8, the third wake-stall cause). Clearing the fence
+	// only when the fenced session is no longer OPEN keeps directed nudges
+	// between two live sessions of one agent un-stealable, and the atomic
+	// claim keeps delivery exactly-once afterward. A re-address failure
+	// fails open to the pre-existing behavior for this tick: fenced items
+	// stay skipped rather than the whole dispatch aborting.
+	var readdressErr error
+	openSessionIDs := make(map[string]bool)
+	for _, info := range sessionBeads.OpenInfos() {
+		if id := strings.TrimSpace(info.ID); id != "" {
+			openSessionIDs[id] = true
+		}
+	}
+	if n, err := readdressOrphanedQueuedNudges(cityPath, openSessionIDs); err != nil {
+		readdressErr = fmt.Errorf("re-addressing orphaned nudges: %w", err)
+	} else if n > 0 {
+		reloaded, err := nudgequeue.LoadState(cityPath)
+		if err != nil {
+			return 0, fmt.Errorf("reloading nudge queue after re-address: %w", err)
+		}
+		state = reloaded
+	}
 	pendingAgents := make(map[string]bool, len(state.Pending))
 	for _, item := range state.Pending {
 		if item.Agent == "" {
@@ -162,7 +191,7 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	// (deriving sessStore from the nudges base would mis-resolve session beads once
 	// nudges relocates independently of sessions).
 	delivered := 0
-	var firstErr error
+	firstErr := readdressErr
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
 		if target.sessionName == "" {
@@ -203,4 +232,28 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 		}
 	}
 	return delivered, firstErr
+}
+
+// readdressOrphanedQueuedNudges clears the session fence from pending items
+// whose fenced session is no longer open, re-addressing them to their agent.
+// The cleared fence is preserved in ReaddressedFrom so state.json keeps the
+// audit trail. See the call site in dispatchAllQueuedNudges for the full
+// rationale (gas-wvap).
+func readdressOrphanedQueuedNudges(cityPath string, openSessionIDs map[string]bool) (int, error) {
+	readdressed := 0
+	err := withNudgeQueueState(cityPath, func(state *nudgeQueueState) error {
+		for i := range state.Pending {
+			item := &state.Pending[i]
+			sid := strings.TrimSpace(item.SessionID)
+			if sid == "" || openSessionIDs[sid] {
+				continue
+			}
+			item.ReaddressedFrom = sid
+			item.SessionID = ""
+			item.ContinuationEpoch = ""
+			readdressed++
+		}
+		return nil
+	})
+	return readdressed, err
 }
