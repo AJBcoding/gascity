@@ -409,6 +409,19 @@ becoming more useful as models improve — it becomes LESS useful instead.
   work is unrecoverable. To read a file at a ref use `git show <ref>:<path>`.
   To check something out, use your own worktree or a disposable
   `git worktree add`.
+- **Background-process safety:** Never collect background PIDs with
+  `BG=$(jobs -p)`. Command substitution runs in a subshell, so the job table
+  it reads is not the one holding your jobs — under `zsh -c` it captures
+  nothing at all, and the `kill $BG` that follows is a silent no-op. When your
+  shell exits, the jobs reparent to init and spin forever owned by nobody:
+  four leaked busy loops burned 3.2 of 16 cores for 11h26m undetected
+  (gas-7ipo). Capture each PID at spawn with `$!` and trap the teardown —
+  `pids=(); ... & pids+=($!)` then
+  `trap 'kill "${pids[@]}" 2>/dev/null' EXIT INT TERM`. Kill only PIDs you
+  captured yourself; never pattern-kill (`pkill -f 'go test'`), because ~10
+  agents run identical commands on this host and a pattern takes out their
+  gates and orphans their children — the same defect at wider scale.
+  `gc doctor`'s `orphan-cpu` check reports init-owned processes burning CPU.
 - **Adding agent config fields:** When adding a field to `config.Agent`,
   also add it to `AgentPatch` and `AgentOverride`, wire it into the shared
   merge body `applyAgentMutation` (in `internal/config/patch.go`) — and, for
