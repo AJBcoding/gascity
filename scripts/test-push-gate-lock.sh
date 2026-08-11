@@ -288,6 +288,10 @@ fi
 assert_true "wiring.sources_lib"   grep -q 'push-gate-lock-lib.sh' "$LOCAL_PARALLEL"
 assert_true "wiring.calls_acquire" grep -q 'push_gate_acquire_slot' "$LOCAL_PARALLEL"
 assert_true "wiring.has_override"  grep -q 'GC_PUSH_GATE_NO_CAP'   "$LOCAL_PARALLEL"
+# gas-4zb / gas-mnpr item 4: the runner itself must scrub the ambient
+# usage-metrics disable var so a DIRECT invocation (bypassing the Makefile's
+# env -i) cannot fake an internal/productmetrics regression.
+assert_true "wiring.scrubs_usage_metrics" grep -qE 'unset .*GC_DISABLE_USAGE_METRICS' "$LOCAL_PARALLEL"
 
 acq_line="$(grep -n 'push_gate_acquire_slot ' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
 if [[ -n "$acq_line" ]]; then

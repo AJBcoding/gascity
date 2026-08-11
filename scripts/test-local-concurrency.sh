@@ -82,6 +82,32 @@ assert_contains "loadavg.malformed_names_var" "$MALFORMED_OUT" "GC_TEST_LOCAL_LO
 assert_true "loadavg.script_defines_min_auto_jobs_2" grep -qE 'min_auto_jobs=2' "$JOB_COUNT"
 assert_true "loadavg.script_references_seam" grep -q 'GC_TEST_LOCAL_LOADAVG' "$JOB_COUNT"
 
+# gas-mnpr / gas-cebv: sizing must consult ACTUALLY-AVAILABLE memory before
+# falling back to total RAM, and must read load on Darwin at all. Static
+# wiring first (platform-independent), then a Darwin-pinned behavioral case
+# — Darwin is where the cgroup path deterministically yields nothing, so the
+# probe seam is provably the deciding input there.
+assert_true "mem_avail.script_uses_shared_probe" grep -q 'push_gate_free_mem_mb' "$JOB_COUNT"
+assert_true "loadavg.script_has_darwin_fallback" grep -q 'vm.loadavg' "$JOB_COUNT"
+if [[ "$(uname)" == Darwin ]]; then
+    # 8 GiB available / 4 GiB per-shard budget = 2 jobs, regardless of the
+    # host's real memory: meminfo is redirected to a missing path and the
+    # probe is driven by its documented fake seam.
+    GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_LOADAVG=0 \
+        GC_TEST_LOCAL_MEMINFO=/nonexistent-gas-mnpr \
+        PUSH_GATE_FAKE_FREE_MEM_MB=8192 "$JOB_COUNT")"
+    assert_eq "mem_avail.darwin_sizes_from_available" "$GOT" "2"
+    # Default path (no loadavg seam) must still produce a sane bounded count
+    # on Darwin — before the vm.loadavg fallback this silently skipped load
+    # awareness; now it reads the live value, so only sanity is assertable.
+    GOT="$(GC_TEST_LOCAL_CPUS=16 GC_TEST_LOCAL_MEMORY_KIB="$HUGE_MEM_KIB" "$JOB_COUNT")"
+    if [[ "$GOT" =~ ^[0-9]+$ && "$GOT" -ge 2 && "$GOT" -le 16 ]]; then
+        record_pass "loadavg.darwin_default_path_sane"
+    else
+        record_fail "loadavg.darwin_default_path_sane" "got '$GOT', want integer in [2,16]"
+    fi
+fi
+
 # Regression guard: the default (no-override) path must actually read
 # /proc/loadavg, mirroring how detect_memory_kib is already proven to read
 # /proc/meminfo. Skipped gracefully where strace is unavailable (containers
