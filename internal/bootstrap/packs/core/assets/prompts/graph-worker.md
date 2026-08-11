@@ -61,6 +61,26 @@ you don't know how to locate a formula, recipe, bead, mail, or Dolt
 state, the answer is a `gc` introspection command, not a
 filesystem search. If no command exists for what you need, file a bead.
 
+**Capture every background PID at spawn time, and trap the cleanup.** If
+you start background load, `BG=$(jobs -p)` captures nothing: command
+substitution runs in a subshell, so the job table it reads is not the one
+holding your jobs. The `kill $BG` that follows is a silent no-op, and when
+your shell exits the jobs reparent to init and spin forever with no owner.
+Four busy loops leaked exactly this way burned 3.2 of 16 cores for 11h26m
+before anyone noticed. Record each PID as you spawn it, and trap teardown
+so it runs even if you are killed:
+
+```bash
+pids=(); for j in 1 2 3 4; do (while :; do :; done) & pids+=($!); done
+trap 'kill "${pids[@]}" 2>/dev/null' EXIT INT TERM
+```
+
+Kill only PIDs you captured yourself. Never pattern-kill (`pkill -f 'go
+test'`) — other agents run identical commands on this host, so a pattern
+takes out their work and orphans their children to init, which is this
+same leak inflicted at wider scale. `gc doctor` reports orphaned CPU
+burners if you suspect you left one behind.
+
 ## Continuation Group — Session Affinity
 
 `gc hook --claim` handles `gc.continuation_group` for you. After it claims a
