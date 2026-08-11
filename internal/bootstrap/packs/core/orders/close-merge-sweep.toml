@@ -1,0 +1,23 @@
+# Rung 5 of the close ladder: the merge ledger. Rung 4 asks whether closed work
+# is DURABLE (on a publication remote); this asks whether it LANDED where it was
+# aimed. Those are different questions with the same symptom, and a publication
+# oracle returns a true green on work that is published, safe forever, and in
+# the tree nothing runs from — gas-cj7 and gas-2w4 are both that shape.
+# Deterministic (git containment probes and metadata reads, no LLM judgment), so
+# it runs inline in the controller as an exec order.
+#
+# It files, it never blocks. Gating closes on merge-ancestry would hold every
+# polecat's bead open behind a refinery queue it does not control, turning one
+# stalled refinery into a city-wide stall — and failing closed hardest on the
+# rigs whose refineries are already struggling.
+#
+# The 6h interval is paired with GC_MERGE_LEDGER_MIN_AGE_HOURS (default 24h),
+# and neither is a throughput knob. A close is not a merge request: the refinery
+# picks work up on its own cadence, so a bead closed an hour ago is expected to
+# be unmerged. Sweeping inside that window reports the pipeline working, which
+# is how a watchman gets ignored.
+[order]
+description = "File beads for closed work that never landed on its target branch"
+exec = "$PACK_DIR/assets/scripts/close-merge-sweep.sh"
+trigger = "cooldown"
+interval = "6h"
