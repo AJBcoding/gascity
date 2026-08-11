@@ -174,11 +174,17 @@ func TestCompiledBackendBundleCarriesOnlyTheBackendsGCImplements(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RegisteredBackends() error = %v, want nil", err)
 	}
-	if want := []string{"dolt", "doltlite", "mysql", "postgres"}; !reflect.DeepEqual(names, want) {
+	if want := []string{"dolt", "doltlite", "mysql"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("RegisteredBackends() = %v, want %v", names, want)
 	}
 	if err := RecognizeBackend("cassandra"); !errors.Is(err, ErrUnknownBackend) {
 		t.Fatalf("RecognizeBackend(cassandra) error = %v, want ErrUnknownBackend", err)
+	}
+	// postgres was registered here until gas-1oou retired it (2026-08-10).
+	// Naming it explicitly, rather than only removing it from the list above,
+	// is what makes a silent re-registration fail a test.
+	if err := RecognizeBackend("postgres"); !errors.Is(err, ErrUnknownBackend) {
+		t.Fatalf("RecognizeBackend(postgres) error = %v, want ErrUnknownBackend after retirement", err)
 	}
 }
 
