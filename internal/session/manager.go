@@ -863,6 +863,21 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 	if err != nil {
 		return Info{}, err
 	}
+	// Materialize before the disk pre-flight, and the ordering is
+	// load-bearing in that direction: the pre-flight probe fails OPEN on a
+	// probe error, so measuring a work dir that does not exist yet would
+	// silently skip the floor for exactly the sessions that have never run
+	// and let them start onto a full disk (gas-wnq). Creation is owed here
+	// because nothing else on the spawn chain does it — not the providers,
+	// not the Manager — so it used to happen only as a side effect of an
+	// earlier reconcile-tick resolution (gas-oax3).
+	//
+	// The cost of this order is one empty directory if the pre-flight then
+	// refuses. That is the agent's own legitimate work_dir, not a
+	// template-identity husk, and the next successful start reuses it.
+	if err := materializeWorkDir(workDir); err != nil {
+		return Info{}, err
+	}
 	// Before any bead, name lock, or runtime process exists, so a refusal
 	// leaves nothing half-created to reconcile. The session's own work
 	// directory is what matters: that is where its build caches and test
