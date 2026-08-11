@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -652,6 +653,110 @@ var Data = alpha.Data
 	})
 }
 
+// TestListAffectedReportsThePackagesAPushMustTest covers the query the
+// pre-push gate uses to scope its suite to the pushed range (gas-qnav). The
+// gate cannot reuse lint-affected: that mode runs golangci-lint and go vet
+// itself, so it answers "were the affected packages clean" rather than "which
+// packages are affected". The contract here is that stdout always holds a
+// package argument list the caller can hand to `go test`, and that an
+// affected set that cannot be computed degrades to the full repository rather
+// than to silence. The query is driven through the production Makefile's
+// list-affected target — the same fixture make entry point lint-affected uses
+// above — so it needs no subprocess call site of its own.
+func TestListAffectedReportsThePackagesAPushMustTest(t *testing.T) {
+	t.Run("changed Go file selects its package and reverse dependents", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go":     "package alpha\n\nfunc Value() int { return 1 }\n",
+			"alpha/unchanged.go": "package alpha\n\nfunc Unchanged() {}\n",
+			"beta/beta.go":       "package beta\n\nfunc Value() int { return 1 }\n",
+			"consumer/consumer.go": `package consumer
+
+import "example.com/static-scope/alpha"
+
+func Value() int { return alpha.Value() }
+`,
+			"README.md": "baseline\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
+
+		fixture.resetCalls(t)
+		requirePackages(t, fixture.listAffected(t, "HEAD"), "./alpha", "./consumer")
+		// The query form must yield a set, not a verdict: no lint, no vet.
+		fixture.requireNoCalls(t)
+	})
+
+	// The pre-push gate's stated worry (gas-qnav): a change to a
+	// widely-depended-on package must select the whole dependent cone, not
+	// just the leaf that changed, or scoping would silently under-test.
+	t.Run("widely depended package selects its transitive dependent cone", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
+			"middle/middle.go": `package middle
+
+import "example.com/static-scope/alpha"
+
+func Value() int { return alpha.Value() }
+`,
+			"consumer/consumer.go": `package consumer
+
+import "example.com/static-scope/middle"
+
+func Value() int { return middle.Value() }
+`,
+			"unrelated/unrelated.go": "package unrelated\n\nfunc Value() int { return 1 }\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
+
+		requirePackages(t, fixture.listAffected(t, "HEAD"), "./alpha", "./consumer", "./middle")
+	})
+
+	t.Run("no changed Go build inputs selects nothing", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
+			"README.md":      "baseline\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "README.md"), "changed\n")
+
+		if got := fixture.listAffected(t, "HEAD"); len(got) != 0 {
+			t.Fatalf("list-affected printed %v for a docs-only diff, want no packages", got)
+		}
+	})
+
+	t.Run("broken package graph falls back to the full repository", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
+			"broken/broken.go": `package broken
+
+import _ "example.com/static-scope/missing"
+`,
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
+
+		requirePackages(t, fixture.listAffected(t, "HEAD"), "./...")
+	})
+
+	t.Run("unreadable diff falls back to the full repository", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
+		})
+		writeTestFile(t, filepath.Join(fixture.repoRoot, "alpha", "alpha.go"), "package alpha\n\nfunc Value() int { return 2 }\n")
+
+		requirePackages(t, fixture.listAffected(t, "refs/heads/does-not-exist"), "./...")
+	})
+
+	t.Run("deleted Go file whose package is gone falls back to the full repository", func(t *testing.T) {
+		fixture := newPRStaticScopeFixture(t, map[string]string{
+			"alpha/alpha.go": "package alpha\n\nfunc Value() int { return 1 }\n",
+			"gone/gone.go":   "package gone\n\nfunc Value() int { return 1 }\n",
+		})
+		if err := os.Remove(filepath.Join(fixture.repoRoot, "gone", "gone.go")); err != nil {
+			t.Fatalf("delete tracked Go file: %v", err)
+		}
+
+		requirePackages(t, fixture.listAffected(t, "HEAD"), "./...")
+	})
+}
+
 func TestCIStaticScopeClassifierFailsClosedOutsideValidatedPullRequestMerge(t *testing.T) {
 	classifier := filepath.Join(repoRoot(t), "scripts", "ci-static-scope")
 	body, err := os.ReadFile(classifier)
@@ -933,7 +1038,24 @@ func (f prStaticScopeFixture) runMakeTargetWithGo(target, goTool string) (string
 	return f.runMakeTargetWithOptions(target, "HEAD", goTool)
 }
 
-func (f prStaticScopeFixture) runMakeTargetWithOptions(target, ref, goTool string) (string, error) {
+// listAffected asks the production Makefile's list-affected target which
+// packages a diff against ref affects, using the tracked scope the pre-push
+// gate uses, and returns the package arguments the query printed. The gate
+// reads the selector's stdout only (diagnostics go to stderr), so the query
+// is asserted on stdout alone.
+func (f prStaticScopeFixture) listAffected(t *testing.T, ref string) []string {
+	t.Helper()
+	cmd := f.makeTargetCommand("list-affected", ref, f.fakeGo)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	stdout, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("list-affected failed: %v\nstderr: %s", err, stderr.String())
+	}
+	return strings.Fields(string(stdout))
+}
+
+func (f prStaticScopeFixture) makeTargetCommand(target, ref, goTool string) *exec.Cmd {
 	cmd := makeCommand(
 		"--no-print-directory",
 		"-f", f.productionMakefile,
@@ -947,7 +1069,11 @@ func (f prStaticScopeFixture) runMakeTargetWithOptions(target, ref, goTool strin
 	)
 	cmd.Dir = f.repoRoot
 	cmd.Env = f.commandEnv()
-	output, err := cmd.CombinedOutput()
+	return cmd
+}
+
+func (f prStaticScopeFixture) runMakeTargetWithOptions(target, ref, goTool string) (string, error) {
+	output, err := f.makeTargetCommand(target, ref, goTool).CombinedOutput()
 	return string(output), err
 }
 
@@ -1088,6 +1214,13 @@ func (f prStaticScopeFixture) requireGoCalls(t *testing.T, want ...[]string) {
 		if !slices.Equal(got[i], want[i]) {
 			t.Errorf("go call %d = %v, want %v", i, got[i], want[i])
 		}
+	}
+}
+
+func requirePackages(t *testing.T, got []string, want ...string) {
+	t.Helper()
+	if !slices.Equal(got, want) {
+		t.Fatalf("list-affected printed %v, want %v", got, want)
 	}
 }
 

@@ -21,6 +21,9 @@ remote="${1:-}"
 go_changed=0
 pushed_refs=""   # "<local ref> <local sha>" per line, non-deletions only
 any_non_deletion=0
+pushed_count=0
+scope_base=""    # last non-deletion remote sha; only used when exactly one ref
+scope_tip=""     # last non-deletion local sha; likewise
 while read -r local_ref local_sha _remote_ref remote_sha; do
   # Branch deletion — nothing to test, nothing to guard.
   if [ "$local_sha" = "$zero" ]; then
@@ -29,6 +32,13 @@ while read -r local_ref local_sha _remote_ref remote_sha; do
   any_non_deletion=1
   pushed_refs="${pushed_refs}${local_ref} ${local_sha}
 "
+  # scope_base deliberately keeps the PRE-recovery remote sha: for a first
+  # push it stays the zero sentinel, so the affected-package scoping below
+  # still falls back to the full suite. Scoping from the recovered ancestor
+  # base is gas-mnpr item 2's composition, kept out of this merge on purpose.
+  pushed_count=$((pushed_count + 1))
+  scope_base="$remote_sha"
+  scope_tip="$local_sha"
   # New remote branch: the remote has no counterpart ref, but it almost always
   # has SOME shared history, and the nearest ancestor it already carries is a
   # correct, cheap diff base — this is what makes a docs-only or scripts-only
@@ -171,6 +181,51 @@ while read -r ref sha; do
 done <<EOF
 $pushed_refs
 EOF
+
+# Affected-package scoping (gas-qnav): the range decided WHETHER to run; let
+# it decide WHAT to run too. scripts/ci-static-select already walks the real
+# build-input graph — the same engine `make lint-affected` uses — so the gate
+# asks it which packages the pushed range affects instead of paying for all
+# ~179 on any .go change. The whole-repository suite still runs, once, at the
+# batch/landing gate (`make test-local-full-parallel`), which cannot be scoped
+# from the environment.
+#
+# Narrowing is only sound when the tree the suite tests IS the tree being
+# pushed. Anything else falls back to the full suite: this gate must fail
+# toward more testing, never less.
+scope="./..."
+scope_reason=""
+selector="$worktree/scripts/ci-static-select"
+if [ "$pushed_count" -ne 1 ]; then
+  scope_reason="pushing ${pushed_count} refs, so no single tested tree to scope from"
+elif [ "$scope_base" = "$zero" ]; then
+  scope_reason="new remote branch, so no base to diff against"
+elif [ "$scope_tip" != "$head_sha" ]; then
+  scope_reason="tested tree ${head_short} is not the pushed tip"
+elif [ ! -x "$selector" ]; then
+  scope_reason="scripts/ci-static-select is not available here"
+else
+  # `|| true` is load-bearing under `set -e`: a selector that cannot answer
+  # must widen the scope, not abort the push. The selector prints ./... for a
+  # set it cannot compute, so an empty answer means it found no Go build
+  # inputs at all — which contradicts the range check above, so widen too.
+  affected="$(
+    LINT_CHANGED_SCOPE=tracked LINT_CHANGED_REF="$scope_base" \
+      "$selector" list-affected go 2>/dev/null || true
+  )"
+  if [ -n "$affected" ]; then
+    scope="$(printf '%s\n' "$affected" | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+  else
+    scope_reason="the selector could not narrow the pushed range"
+  fi
+fi
+
+if [ "$scope" = "./..." ]; then
+  echo "pre-push: scope: whole repository${scope_reason:+ (${scope_reason})}"
+else
+  echo "pre-push: scope: ${scope}"
+fi
+export LOCAL_TEST_PACKAGES="$scope"
 
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.

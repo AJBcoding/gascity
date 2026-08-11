@@ -7,14 +7,23 @@ import (
 	"testing"
 )
 
-// TestPushWorktreeGuard runs the shell self-test for the pre-push
-// wrong-worktree guard and verdict header (gas-4pz). It exercises the real
-// .githooks/pre-push against real temp repos and bare remotes: the hook
-// must refuse to produce a test verdict from a worktree whose HEAD is not
-// contained in any ref being pushed (the parked-repo-root false-P0 mode),
-// must name the tested branch+SHA and the pushed refs when the suite does
-// run, and must leave deletion-only and non-Go pushes untouched. Hermetic:
-// temp git repos and a stub Makefile only, no network/bd/model calls.
+// TestPushWorktreeGuard runs the shell self-test for the .githooks/pre-push
+// gate: the wrong-worktree guard and verdict header (gas-4pz), the free-disk
+// preflight (gas-wnq / gas-9nx), and affected-package scoping (gas-qnav). It
+// exercises the real hook and the real scripts/ci-static-select against real
+// temp repos and bare remotes: the hook must refuse to produce a test verdict
+// from a worktree whose HEAD is not contained in any ref being pushed (the
+// parked-repo-root false-P0 mode), must name the tested branch+SHA and the
+// pushed refs when the suite does run, must leave deletion-only and non-Go
+// pushes untouched, and must hand the suite only the packages the pushed
+// range affects — falling back to the whole repository whenever the pushed
+// shape makes a narrower scope unsound (new remote branch, HEAD merely
+// contained in the pushed ref, multi-ref push, unusable selector,
+// uncomputable set). It also pins the runner contract the gate depends on:
+// scripts/test-local-parallel builds its fast-mode job inventory from
+// LOCAL_TEST_PACKAGES and mode full ignores the selection entirely.
+// Hermetic: temp git repos, a small temp Go module, and a stub Makefile
+// only, no network/bd/model calls.
 func TestPushWorktreeGuard(t *testing.T) {
 	root := repoRoot(t)
 

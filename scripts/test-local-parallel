@@ -4,7 +4,10 @@ set -euo pipefail
 
 usage() {
   cat >&2 <<'USAGE'
-usage: scripts/test-local-parallel <fast|cmd-gc-process|integration|full>
+usage: scripts/test-local-parallel [--print-jobs] <fast|cmd-gc-process|integration|full>
+
+  --print-jobs  print the "label::command" inventory this mode would run and
+                exit without running anything
 
 Environment:
   LOCAL_TEST_JOBS        max concurrent jobs (default: CPU-and-memory-aware)
@@ -12,15 +15,26 @@ Environment:
   GC_TEST_INNER_P        override the per-job GOFLAGS=-p= value (default:
                          outer job budget divided across concurrent jobs)
   GO_TEST_TIMEOUT       per-package go test budget, <n>s|m|h (default: 20m)
+  LOCAL_TEST_PACKAGES   fast mode only: run just these package arguments
+                        instead of the whole module (default: whole module)
 USAGE
 }
 
-if [[ $# -ne 1 ]]; then
+# Parsed without shift so "$@" stays intact for the slice re-exec below.
+print_jobs=0
+if [[ "${1-}" == "--print-jobs" ]]; then
+  print_jobs=1
+  mode="${2-}"
+  expected_args=2
+else
+  mode="${1-}"
+  expected_args=1
+fi
+
+if [[ $# -ne "$expected_args" || -z "$mode" ]]; then
   usage
   exit 1
 fi
-
-mode="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 # shellcheck source=lib/test-slice.sh
@@ -45,29 +59,37 @@ source "$repo_root/scripts/push-gate-lock-lib.sh"
 gate_slot_dir="$(push_gate_slots_dir)" || gate_slot_dir="$repo_root/.git/gate-slots"
 gate_fd=""
 gate_label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:${mode}"
-if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
-  echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
-  # Escalation reporting (gas-mnpr gap 3): the refusal itself is local and
-  # fail-closed — this exit 75 on the waiter's own clock IS the mechanism,
-  # because escalation mail drops silently under exactly the load that causes
-  # timeouts (gas-5nr0), so nothing here may depend on delivery. Mail is only
-  # how a human learns starvation RECURS: best-effort, never blocking, and a
-  # send failure is visible on stderr but changes nothing. The target
-  # defaults to this rig's witness; PUSH_GATE_ESCALATION_MAILTO overrides it,
-  # and setting it empty disables the report entirely.
-  escalation_mailto="${PUSH_GATE_ESCALATION_MAILTO-}"
-  if [[ -z "${PUSH_GATE_ESCALATION_MAILTO+set}" && -n "${GC_AGENT:-}" && "${GC_AGENT}" == */* ]]; then
-    escalation_mailto="${GC_AGENT%%/*}/witness"
+# A --print-jobs inventory query runs nothing, so it must neither consume a
+# heavy-suite slot nor queue behind one — it is also invoked from inside an
+# already-held slot by the gate's own shell harness, where waiting on a
+# second slot could deadlock against the invocation that holds the first.
+# (It never reaches the admission-timeout escalation below either: a query
+# that does not wait cannot starve.)
+if [[ "$print_jobs" -eq 0 ]]; then
+  if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
+    echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
+    # Escalation reporting (gas-mnpr gap 3): the refusal itself is local and
+    # fail-closed — this exit 75 on the waiter's own clock IS the mechanism,
+    # because escalation mail drops silently under exactly the load that causes
+    # timeouts (gas-5nr0), so nothing here may depend on delivery. Mail is only
+    # how a human learns starvation RECURS: best-effort, never blocking, and a
+    # send failure is visible on stderr but changes nothing. The target
+    # defaults to this rig's witness; PUSH_GATE_ESCALATION_MAILTO overrides it,
+    # and setting it empty disables the report entirely.
+    escalation_mailto="${PUSH_GATE_ESCALATION_MAILTO-}"
+    if [[ -z "${PUSH_GATE_ESCALATION_MAILTO+set}" && -n "${GC_AGENT:-}" && "${GC_AGENT}" == */* ]]; then
+      escalation_mailto="${GC_AGENT%%/*}/witness"
+    fi
+    if [[ -n "$escalation_mailto" ]] && command -v gc >/dev/null 2>&1; then
+      gc mail send "$escalation_mailto" \
+        -s "push-gate admission timed out: ${gate_label} (mode ${mode}) on $(hostname 2>/dev/null || echo unknown-host)" \
+        -m "A heavy-suite invocation gave up after its admission wait bound and refused with exit 75. Holder and queue diagnostics are in the invoking agent's log. One of these is contention working as designed; a recurrence pattern means host admission needs attention (gas-mnpr)." \
+        >/dev/null 2>&1 || echo "push-gate: witness escalation mail failed (non-blocking)" >&2
+    fi
+    exit 75
   fi
-  if [[ -n "$escalation_mailto" ]] && command -v gc >/dev/null 2>&1; then
-    gc mail send "$escalation_mailto" \
-      -s "push-gate admission timed out: ${gate_label} (mode ${mode}) on $(hostname 2>/dev/null || echo unknown-host)" \
-      -m "A heavy-suite invocation gave up after its admission wait bound and refused with exit 75. Holder and queue diagnostics are in the invoking agent's log. One of these is contention working as designed; a recurrence pattern means host admission needs attention (gas-mnpr)." \
-      >/dev/null 2>&1 || echo "push-gate: witness escalation mail failed (non-blocking)" >&2
-  fi
-  exit 75
+  trap 'push_gate_release_slot "$gate_fd"' EXIT
 fi
-trap 'push_gate_release_slot "$gate_fd"' EXIT
 
 # GC_DOLT_PORT / BEADS_DOLT_SERVER_PORT point bd at the live shared city Dolt
 # server. They must never reach `go test`, or every bd-forking test writes to
@@ -118,6 +140,33 @@ gomodcache_val="$(go env GOMODCACHE)"
 gotmpdir_val="$(go env GOTMPDIR)"
 goroot_val="$(go env GOROOT)"
 
+# LOCAL_TEST_PACKAGES scopes the per-push gate to the packages the pushed
+# range actually affects (gas-qnav); .githooks/pre-push fills it from
+# `scripts/ci-static-select list-affected`. Only fast mode honors it. `full`
+# is the batch/landing gate, and that run must keep paying for
+# whole-repository coverage once instead of once per branch, so scoping it
+# from the environment is deliberately impossible. `./...` anywhere in the
+# selection means the selector could not narrow the scope: run everything.
+scoping=0
+scoped_unit_packages=""
+scoped_cmd_gc=0
+if [[ "$mode" == "fast" && -n "${LOCAL_TEST_PACKAGES:-}" ]]; then
+  scoping=1
+  # Unquoted on purpose: the selector prints one package argument per line and
+  # each must become a separate `go test` argument.
+  for package in ${LOCAL_TEST_PACKAGES}; do
+    case "$package" in
+      ./...) scoping=0; break ;;
+      ./cmd/gc) scoped_cmd_gc=1 ;;
+      *) scoped_unit_packages+="${scoped_unit_packages:+ }${package}" ;;
+    esac
+  done
+fi
+if [[ "$scoping" -eq 0 ]]; then
+  scoped_unit_packages=""
+  scoped_cmd_gc=0
+fi
+
 jobspecs=()
 
 add_job() {
@@ -136,6 +185,14 @@ add_fsys_compile_job() {
 # timeout budget. Package parallelism is bounded separately for every job by the
 # GOFLAGS -p export below (ga-04m84s), so it is not pinned on this command.
 add_unit_core_job() {
+  if [[ "$scoping" -eq 1 ]]; then
+    # cmd/gc is covered by its own shards below, never by unit-core. The
+    # scoped run keeps the unscoped sweep's -count=1 and shared timeout
+    # budget: scoping narrows WHAT runs, never HOW it runs (ga-9au).
+    [[ -n "$scoped_unit_packages" ]] || return 0
+    add_job "unit-core" "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} ${scoped_unit_packages}"
+    return 0
+  fi
   add_job "unit-core" \
     "GC_FAST_UNIT=1 go test -count=1 -timeout ${go_test_timeout} \$(go list ./... | grep -v '^github.com/gastownhall/gascity/cmd/gc\$')"
 }
@@ -208,9 +265,14 @@ case "$mode" in
   fast)
     add_fsys_compile_job
     add_unit_core_job
+    # The two gate-machinery selftests run in every fast invocation, scoped
+    # or not: they cover shell infrastructure the Go affected-set cannot
+    # reason about, and scoping must fail toward more testing, never less.
     add_push_gate_lock_selftest_job
     add_local_concurrency_selftest_job
-    add_cmd_gc_shards "unit-cmd-gc" "1" ""
+    if [[ "$scoping" -eq 0 || "$scoped_cmd_gc" -eq 1 ]]; then
+      add_cmd_gc_shards "unit-cmd-gc" "1" ""
+    fi
     ;;
   cmd-gc-process)
     add_cmd_gc_shards "cmd-gc-process" "0" ""
@@ -237,6 +299,11 @@ esac
 if [[ ${#jobspecs[@]} -eq 0 ]]; then
   echo "no jobs selected for mode ${mode}" >&2
   exit 1
+fi
+
+if [[ "$print_jobs" -eq 1 ]]; then
+  printf '%s\n' "${jobspecs[@]}"
+  exit 0
 fi
 
 # Each outer job's `go test` binary defaults its internal -p to
