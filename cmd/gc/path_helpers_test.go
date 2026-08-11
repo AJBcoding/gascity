@@ -146,6 +146,15 @@ type doltLeakGuardedTestingM struct {
 	// legitimately start and stop during a long test run.
 	sourceRoot   string
 	cleanupPaths []string
+
+	// tmux half of the guard (gas-1fb). An empty tmuxSocketRoot disables the
+	// sweep, so a guard built without guardTmuxSocketRoot behaves exactly as
+	// it did when the guard watched dolt alone. The function fields exist so
+	// unit tests can inject a scripted enumerator and reaper instead of
+	// spawning real servers; they default to the live implementations.
+	tmuxSocketRoot string
+	tmuxEnumerate  func() ([]TmuxProcInfo, error)
+	tmuxReap       func([]TmuxProcInfo)
 }
 
 func newDoltLeakGuardedTestingM(m *testing.M, tempRoot string, cleanupPaths ...string) *doltLeakGuardedTestingM {
@@ -184,6 +193,60 @@ func (g *doltLeakGuardedTestingM) nonEmptyLeakRoots() []string {
 	return roots
 }
 
+// guardTmuxSocketRoot arms the tmux half of the leak guard for this run's
+// TMUX_TMPDIR. Only servers reachable through a socket under socketRoot are
+// ever reported or reaped, so a concurrent run's or the operator's own tmux
+// server is out of scope by construction.
+func (g *doltLeakGuardedTestingM) guardTmuxSocketRoot(socketRoot string) *doltLeakGuardedTestingM {
+	g.tmuxSocketRoot = socketRoot
+	return g
+}
+
+// snapshotTmuxServers scopes the current tmux servers to this run. It returns
+// an empty snapshot when the tmux half is disarmed.
+func (g *doltLeakGuardedTestingM) snapshotTmuxServers() (map[int]TmuxProcInfo, error) {
+	if g.tmuxSocketRoot == "" {
+		return nil, nil
+	}
+	enumerate := g.tmuxEnumerate
+	if enumerate == nil {
+		enumerate = func() ([]TmuxProcInfo, error) {
+			return discoverTmuxServersForSocketRoot(g.tmuxSocketRoot)
+		}
+	}
+	return snapshotTmuxServersForSocketRoot(enumerate, g.tmuxSocketRoot)
+}
+
+// reportTmuxLeaks diffs the run's tmux servers against initial, reports any
+// survivor of the settle window, reaps it by PID, and reports whether the
+// guard should fail the package. It must run before cleanupTemporaryPaths:
+// once the socket root is deleted the sockets are unlinked inodes and no
+// server under it can be discovered any more.
+func (g *doltLeakGuardedTestingM) reportTmuxLeaks(initial map[int]TmuxProcInfo, initialErr error) bool {
+	if g.tmuxSocketRoot == "" {
+		return false
+	}
+	if initialErr != nil {
+		return true
+	}
+	leaked, err := settleTmuxLeaks(g.snapshotTmuxServers, initial, tmuxLeakSettleWindow(), tmuxLeakSettleInterval)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "cmd/gc test tmux leak guard: final scan failed: %v\n", err) //nolint:errcheck
+		return true
+	}
+	if len(leaked) == 0 {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "cmd/gc test tmux leak guard: leaked %d tmux server(s) under %s\n", len(leaked), g.tmuxSocketRoot) //nolint:errcheck
+	writeTmuxLeakReport(os.Stderr, leaked)
+	reap := g.tmuxReap
+	if reap == nil {
+		reap = reapTmuxLeakProcesses
+	}
+	reap(leaked)
+	return true
+}
+
 func (g *doltLeakGuardedTestingM) Run() int {
 	return g.runWith(g.m.Run, discoverDoltProcesses, g.sweepStaleCmdGCTestDoltProcesses, sweepOrphanDoltStoreDirs, reapManagedDoltTestProcesses, reapDoltLeakProcesses)
 }
@@ -204,6 +267,10 @@ func (g *doltLeakGuardedTestingM) runWith(
 	initial, initialErr := snapshotDoltProcessesForConfigRoots(enumerate, g.leakRoots())
 	if initialErr != nil {
 		fmt.Fprintf(os.Stderr, "cmd/gc test dolt leak guard: initial scan failed: %v\n", initialErr) //nolint:errcheck
+	}
+	initialTmux, initialTmuxErr := g.snapshotTmuxServers()
+	if initialTmuxErr != nil {
+		fmt.Fprintf(os.Stderr, "cmd/gc test tmux leak guard: initial scan failed: %v\n", initialTmuxErr) //nolint:errcheck
 	}
 
 	code := runTests()
@@ -229,6 +296,10 @@ func (g *doltLeakGuardedTestingM) runWith(
 			reapLeaks(leaked)
 			guardFailed = true
 		}
+	}
+
+	if g.reportTmuxLeaks(initialTmux, initialTmuxErr) {
+		guardFailed = true
 	}
 
 	g.cleanupTemporaryPaths()
@@ -445,10 +516,10 @@ func reapDoltLeakProcessesWithKiller(leaked []DoltProcInfo, killFn func(int, sys
 	for _, proc := range leaked {
 		pids = append(pids, proc.PID)
 	}
-	return reapDoltLeakPIDsWithKiller(pids, killFn)
+	return reapLeakPIDsWithKiller(pids, killFn)
 }
 
-func reapDoltLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) error) []error {
+func reapLeakPIDsWithKiller(pids []int, killFn func(int, syscall.Signal) error) []error {
 	var errs []error
 	for _, pid := range pids {
 		if err := killFn(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
@@ -508,7 +579,7 @@ func requireNoLeakedDoltAfterWithFilterAndKiller(t testReporter, enumerate func(
 		}
 		t.Errorf("test leaked %d dolt sql-server process(es); ensure cleanup paths reach shutdownBeadsProvider, or call clearInheritedBeadsEnv to prevent inherited GC_BEADS=bd from triggering gc-beads-bd.sh:\n%s",
 			len(leaked), strings.Join(rep, "\n"))
-		for _, err := range reapDoltLeakPIDsWithKiller(pids, killFn) {
+		for _, err := range reapLeakPIDsWithKiller(pids, killFn) {
 			t.Errorf("test leaked dolt cleanup failed: %v", err)
 		}
 	})

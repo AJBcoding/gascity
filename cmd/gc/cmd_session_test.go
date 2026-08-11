@@ -23,6 +23,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
+	"github.com/gastownhall/gascity/test/tmuxtest"
 )
 
 type attachmentAwareProvider struct {
@@ -2525,8 +2526,40 @@ func TestCmdSessionNew_IgnoresUnmanagedSupervisorSocket(t *testing.T) {
 	}
 }
 
+// namedSessionTestSocketName is the tmux socket a gc started from this fixture
+// puts its server on: gc derives the socket from the city name written below.
+const namedSessionTestSocketName = "test-city"
+
+// killNamedSessionTmuxServerAfterTest tears down the tmux server gc starts when
+// a test drives a named session. Without it the server outlives the test binary
+// — 22 of them accumulated on one box, one per run, before the TestMain guard
+// existed to notice (gas-iio, gas-1fb).
+//
+// The socket is addressed by explicit path under this run's TMUX_TMPDIR rather
+// than by `-L <name>`, so the scoping holds by construction: a path built from
+// this run's own root cannot resolve to the operator's default server or to
+// another checkout's socket, whatever the environment does. With no isolated
+// root configured it does nothing rather than guess. Killing by socket works
+// here and not in the TestMain guard because the temp tree still exists at this
+// point; once TestMain removes it the socket is an unlinked inode, which is why
+// the guard reaps by PID instead.
+func killNamedSessionTmuxServerAfterTest(t *testing.T) {
+	t.Helper()
+	socketRoot := strings.TrimSpace(os.Getenv("TMUX_TMPDIR"))
+	t.Cleanup(func() {
+		if socketRoot == "" {
+			return
+		}
+		socket := tmuxLeakTestSocket(socketRoot, namedSessionTestSocketName)
+		// A test that never started a session has no server here; that failure
+		// is the expected case and carries nothing to report.
+		_ = tmuxtest.KillServerOnSocketPath(socket)
+	})
+}
+
 func writeNamedSessionCityTOML(t *testing.T, dir string) {
 	t.Helper()
+	killNamedSessionTmuxServerAfterTest(t)
 	if err := os.MkdirAll(filepath.Join(dir, ".gc"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.gc): %v", err)
 	}
