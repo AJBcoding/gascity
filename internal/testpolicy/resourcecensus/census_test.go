@@ -1995,9 +1995,13 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	// These were briefly pinned at 119 / 117. That was a measurement taken while
 	// the merge conflict resolution was still in flight and never re-taken; the
 	// committed tree has always measured 96 / 94. Re-baselined in gas-i2po.
+	// gas-2qx6 banked +1/+1: cmd/gc/tmux_leak_test.go's stale-socket test opens
+	// a Unix socket INODE (never a port) to reproduce what a crashed tmux
+	// leaves on disk. Source debt counts Medium owners too, so declaring the
+	// exact Medium owner below keeps the Small row at 94/35 but not this one.
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
-	if debt.BaselineCalls != 96 || debt.BaselineFiles != 36 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
-		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 96/36, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	if debt.BaselineCalls != 97 || debt.BaselineFiles != 37 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 97/37, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
 	if smallDebt.BaselineCalls != 94 || smallDebt.BaselineFiles != 35 {
@@ -2010,23 +2014,25 @@ func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	}
 
 	wantOwners := map[string]bool{
-		"TestServerAliveDetectsLiveServer":  true,
-		"TestServerAliveRejectsStaleSocket": true,
+		"internal/runtime/herdr|herdr|TestServerAliveDetectsLiveServer":      true,
+		"internal/runtime/herdr|herdr|TestServerAliveRejectsStaleSocket":     true,
+		"cmd/gc|main|TestDiscoverTmuxServersForSocketRootIgnoresStaleSocket": true,
 	}
 	for _, row := range bootstrapPolicy.Medium {
-		if row.PackageDir != "internal/runtime/herdr" || row.PackageName != "herdr" || !wantOwners[row.Owner] {
+		key := row.PackageDir + "|" + row.PackageName + "|" + row.Owner
+		if !wantOwners[key] {
 			continue
 		}
 		if len(row.Resources) != 1 || row.Resources[0] != ResourceNetListen {
-			t.Fatalf("herdr Medium owner %s resources = %v, want net_listen", row.Owner, row.Resources)
+			t.Fatalf("Medium owner %s resources = %v, want net_listen", key, row.Resources)
 		}
 		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
-			t.Fatalf("herdr Medium owner %s policy = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.Owner, row.OwnerBead, row.MigrationTarget)
+			t.Fatalf("Medium owner %s policy = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", key, row.OwnerBead, row.MigrationTarget)
 		}
-		delete(wantOwners, row.Owner)
+		delete(wantOwners, key)
 	}
 	if len(wantOwners) != 0 {
-		t.Fatalf("missing exact herdr stream-listener Medium owners: %v", wantOwners)
+		t.Fatalf("missing exact stream-listener Medium owners: %v", wantOwners)
 	}
 }
 
@@ -2083,10 +2089,15 @@ func TestBootstrapPolicyOwnsSyscallListenDebt(t *testing.T) {
 func TestBootstrapPolicyOwnsTmuxDebtAndExactMediumSetup(t *testing.T) {
 	t.Parallel()
 
+	// gas-2qx6 banked +4/+1: cmd/gc/tmux_leak_test.go proves the TestMain leak
+	// guard against real leaked tmux servers, which nothing else can prove.
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceTmux)
-	if debt.BaselineCalls != 6 || debt.BaselineFiles != 2 {
-		t.Fatalf("tmux source baseline = %d/%d, want 6/2", debt.BaselineCalls, debt.BaselineFiles)
+	if debt.BaselineCalls != 10 || debt.BaselineFiles != 3 {
+		t.Fatalf("tmux source baseline = %d/%d, want 10/3", debt.BaselineCalls, debt.BaselineFiles)
 	}
+	// The Small row stays at ZERO. That zero is a finished migration, not
+	// slack: the four new calls are held out by exact Medium ownership below,
+	// and a future change that banks Small tmux debt instead un-finishes it.
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceTmux)
 	if smallDebt.BaselineCalls != 0 || smallDebt.BaselineFiles != 0 {
 		t.Fatalf("tmux Small baseline = %d/%d, want 0/0", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
@@ -2098,8 +2109,12 @@ func TestBootstrapPolicyOwnsTmuxDebtAndExactMediumSetup(t *testing.T) {
 	}
 
 	wantOwners := map[string]map[Resource]bool{
-		"cmd/gc|main|TestMain":                {ResourceEnvironment: true, ResourceTmux: true},
-		"internal/runtime/tmux|tmux|TestMain": {ResourceEnvironment: true, ResourceTmux: true},
+		"cmd/gc|main|TestMain":                                            {ResourceEnvironment: true, ResourceTmux: true},
+		"internal/runtime/tmux|tmux|TestMain":                             {ResourceEnvironment: true, ResourceTmux: true},
+		"cmd/gc|main|TestDiscoverTmuxServersForSocketRootFindsLiveServer": {ResourceTmux: true},
+		"cmd/gc|main|TestTmuxLeakGuardCatchesRealLeakedServer":            {ResourceTmux: true},
+		"cmd/gc|main|TestTmuxLeakGuardWatchesTheProcessSocketRoot":        {ResourceTmux: true},
+		"cmd/gc|main|TestNamedSessionFixtureLeavesNoTmuxServerBehind":     {ResourceTmux: true},
 	}
 	for _, row := range bootstrapPolicy.Medium {
 		key := row.PackageDir + "|" + row.PackageName + "|" + row.Owner

@@ -142,8 +142,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 96
-baseline_files = 36
+baseline_calls = 97
+baseline_files = 37
 reported_calls = 92
 reported_files = 34
 owner_bead = "ga-80po0c.2.2.2"
@@ -194,8 +194,8 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "tmux"
-baseline_calls = 6
-baseline_files = 2
+baseline_calls = 10
+baseline_files = 3
 reported_calls = 6
 reported_files = 2
 owner_bead = "ga-80po0c.2.2.1"
@@ -239,6 +239,67 @@ owner_bead = "ga-80po0c.2.1"
 invariant = "the controller-token withholding proof is a checked Medium subprocess owner"
 resource_owner = "the one /bin/sh subprocess is confined to TestPassthroughEnvWithholdsControllerTokenFromChildProcess, which exists to read a credential back out of a real child process: the session env is an overlay, so only a real child can prove GC_CONTROLLER_TOKEN is absent rather than merely missing from a map"
 migration_target = "P0.4b"
+expires = "2026-10-01"
+
+# The cmd/gc tmux-leak guard tests (gas-1fb). Each proves the TestMain leak
+# guard against a REAL leaked tmux server, which is the only thing that can
+# prove it: a fake executor cannot leak a process, so a guard tested against
+# one is tested against nothing. Declared per-test rather than banked as Small
+# debt, because untagged Small tmux is pinned at exactly ZERO -- a finished
+# migration, not slack -- and bumping it to 4 would silently un-finish it.
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestDiscoverTmuxServersForSocketRootIgnoresStaleSocket"
+resources = ["net_listen"]
+owner_bead = "ga-80po0c.2.2.2"
+invariant = "the cmd/gc stale-socket discovery regression is a checked Medium stream-listener owner"
+resource_owner = "the Unix stream listener is confined to TestDiscoverTmuxServersForSocketRootIgnoresStaleSocket and closed before discovery runs; it opens a socket INODE under t.TempDir(), never a port, because the code under test globs for the inode a crashed tmux leaves behind"
+migration_target = "P0.4c-listener"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestDiscoverTmuxServersForSocketRootFindsLiveServer"
+resources = ["tmux"]
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "the cmd/gc live-server discovery regression is a checked Medium tmux owner"
+resource_owner = "the tmux server is confined to TestDiscoverTmuxServersForSocketRootFindsLiveServer, spawned on a socket path under t.TempDir() and terminated by test cleanup"
+migration_target = "P0.4c-tmux"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestTmuxLeakGuardCatchesRealLeakedServer"
+resources = ["tmux"]
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "the cmd/gc leak-guard proof is a checked Medium tmux owner"
+resource_owner = "the deliberately leaked tmux server is confined to TestTmuxLeakGuardCatchesRealLeakedServer, spawned on an isolated socket root and terminated by test cleanup"
+migration_target = "P0.4c-tmux"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestTmuxLeakGuardWatchesTheProcessSocketRoot"
+resources = ["tmux"]
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "the cmd/gc leak-guard socket-root scoping proof is a checked Medium tmux owner"
+resource_owner = "the tmux server is confined to TestTmuxLeakGuardWatchesTheProcessSocketRoot, spawned on the process socket root under test and terminated by test cleanup"
+migration_target = "P0.4c-tmux"
+expires = "2026-10-01"
+
+[[medium]]
+package_dir = "cmd/gc"
+package_name = "main"
+owner = "TestNamedSessionFixtureLeavesNoTmuxServerBehind"
+resources = ["tmux"]
+owner_bead = "ga-80po0c.2.2.1"
+invariant = "the cmd/gc named-session fixture cleanup proof is a checked Medium tmux owner"
+resource_owner = "the tmux server is confined to TestNamedSessionFixtureLeavesNoTmuxServerBehind, spawned by the fixture under test and asserted gone by the end of the test"
+migration_target = "P0.4c-tmux"
 expires = "2026-10-01"
 
 [[medium]]
