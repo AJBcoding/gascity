@@ -100,11 +100,36 @@
 #       per-worktree `.git` file that cannot hold a directory
 #       (NFR4 fallback, never /tmp — see AGENTS.md Build Cache Conventions).
 #       Does not create the directory (push_gate_acquire_slot does).
+#   push_gate_free_mem_mb
+#       Print available memory in MiB (Linux MemAvailable; macOS free +
+#       inactive pages). Returns 1 with no output when the host cannot be
+#       measured. PUSH_GATE_FAKE_FREE_MEM_MB is the selftest seam — numeric
+#       replaces the probe, 'fail' simulates an unprobeable host.
+#   push_gate_queue_dir <slot_dir>
+#       Print the FIFO waiter-queue directory for a slot dir.
+#   push_gate_queue_head <queue_dir>
+#       Sweep dead-pid tickets, then print the oldest live ticket's
+#       basename (empty when nobody waits). Ticket names are
+#       <zero-padded-epoch>.<pid>.<label>, so lexicographic order is
+#       arrival order. Waiting is FIFO: acquire only attempts the slot
+#       sweep while it holds the head ticket, and an arrival that finds
+#       live waiters enrolls behind them instead of racing a freed slot.
+#   push_gate_describe_queue <queue_dir>
+#       Print one "queue-<pos>: <label> (pid ..., ticket ...)" line per
+#       live waiter, sweeping dead tickets — a starved waiter is a listable
+#       file with a probeable pid, distinguishable from a dead one without
+#       any terminal access.
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
 #       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 2),
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
-#       (default 15); each is validated and falls back to its default on a
-#       malformed value. holder_label defaults to
+#       (default 15), PUSH_GATE_MIN_FREE_MEM_MB (default 6144 — one measured
+#       ~2.3 GiB single-gate envelope with its 1.9 GiB single-process heavy
+#       tail, doubled with margin; 0 disables the headroom check); each is
+#       validated and falls back to its default on a malformed value.
+#       Admission requires BOTH a free slot and that much free memory —
+#       insufficient headroom waits and times out exactly like slot
+#       contention, while an unmeasurable host fails open with a
+#       diagnostic. holder_label defaults to
 #       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. If the slot
 #       dir cannot be created (e.g. an unwritable parent), degrades the same
 #       way as a missing flock(1): diagnostic to stderr, empty fd, return 0
@@ -252,6 +277,108 @@ _push_gate_tunable() {
     printf '%s\n' "$_pgt_value"
 }
 
+# Print available memory in MiB: MemAvailable on Linux (/proc/meminfo),
+# free+inactive pages on macOS (vm_stat). PUSH_GATE_FAKE_FREE_MEM_MB is the
+# selftest seam: a numeric value replaces the probe entirely and the literal
+# 'fail' simulates an unprobeable host — the selftest asserts BOTH the admit
+# and the block direction through it, so a seam this function ignored could
+# not pass silently. Prints nothing and returns 1 when the host cannot be
+# measured; the admission caller fails OPEN on that, matching the pre-push
+# disk preflight's contract that a check which cannot measure the host must
+# never be why a gate stops working.
+push_gate_free_mem_mb() {
+    local _pgm_fake="${PUSH_GATE_FAKE_FREE_MEM_MB:-}"
+    if [[ -n "$_pgm_fake" ]]; then
+        if [[ "$_pgm_fake" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "$_pgm_fake"
+            return 0
+        fi
+        return 1
+    fi
+    if [[ -r /proc/meminfo ]]; then
+        local _pgm_kb
+        _pgm_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null)"
+        [[ "$_pgm_kb" =~ ^[0-9]+$ ]] || return 1
+        printf '%s\n' $(( _pgm_kb / 1024 ))
+        return 0
+    fi
+    if command -v vm_stat >/dev/null 2>&1; then
+        local _pgm_out _pgm_page _pgm_free _pgm_inactive
+        _pgm_out="$(vm_stat 2>/dev/null)" || return 1
+        _pgm_page="$(printf '%s\n' "$_pgm_out" | sed -n 's/.*page size of \([0-9][0-9]*\) bytes.*/\1/p' | head -n 1)"
+        _pgm_free="$(printf '%s\n' "$_pgm_out" | awk -F': *' '/^Pages free/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
+        _pgm_inactive="$(printf '%s\n' "$_pgm_out" | awk -F': *' '/^Pages inactive/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
+        [[ "$_pgm_page" =~ ^[0-9]+$ && "$_pgm_free" =~ ^[0-9]+$ && "$_pgm_inactive" =~ ^[0-9]+$ ]] || return 1
+        printf '%s\n' $(( (_pgm_free + _pgm_inactive) * _pgm_page / 1024 / 1024 ))
+        return 0
+    fi
+    return 1
+}
+
+# FIFO waiter queue (gas-mnpr gaps 2+4). flock wakeups are unordered, so
+# under contention a late arrival can beat a waiter that has been polling for
+# its whole bound — measured in production on 2026-08-09, when one long
+# bounded run starved two authorized gates for 40 minutes and both were
+# reported as possibly-failed. Tickets make waiting FAIR (oldest live ticket
+# attempts first) and OBSERVABLE (a starved waiter is a file an operator can
+# list, with a pid to probe and an mtime that its owner refreshes every poll
+# — distinguishable from a dead one without peeking at any terminal).
+#
+# A ticket is <queue_dir>/<zero-padded-epoch>.<pid>.<label>: lexicographic
+# order IS arrival order, with the pid as a same-second tiebreak. Tickets are
+# only created once a waiter actually blocks — the uncontended fast path
+# creates nothing — and are removed on every normal return. A crashed
+# waiter's ticket has a dead pid and is swept by whichever waiter or
+# describe call next encounters it, mirroring how the kernel frees a crashed
+# holder's flock.
+
+# Print the queue directory for a slot dir.
+push_gate_queue_dir() {
+    printf '%s/queue\n' "$1"
+}
+
+# Sweep dead-pid tickets from <queue_dir>, then print the head (oldest live)
+# ticket's basename, or nothing when the queue is empty. Malformed names are
+# treated as dead. Sweeping is best-effort: an unremovable ticket is skipped
+# rather than blocking the queue read.
+push_gate_queue_head() {
+    local _pgq_dir="$1" _pgq_ticket _pgq_base _pgq_pid
+    [[ -d "$_pgq_dir" ]] || return 0
+    for _pgq_ticket in "$_pgq_dir"/*; do
+        [[ -e "$_pgq_ticket" ]] || continue
+        _pgq_base="${_pgq_ticket##*/}"
+        _pgq_pid="${_pgq_base#*.}"
+        _pgq_pid="${_pgq_pid%%.*}"
+        if ! [[ "$_pgq_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$_pgq_pid" 2>/dev/null; then
+            rm -f "$_pgq_ticket" 2>/dev/null || true
+            continue
+        fi
+        printf '%s\n' "$_pgq_base"
+        return 0
+    done
+    return 0
+}
+
+# Print one line per live waiter: "  queue-<pos>: <label> (pid <pid>, waiting
+# since <mtime>)". Dead tickets are swept, not printed.
+push_gate_describe_queue() {
+    local _pgq_dir="$1" _pgq_ticket _pgq_base _pgq_pid _pgq_label _pgq_pos=0
+    [[ -d "$_pgq_dir" ]] || return 0
+    for _pgq_ticket in "$_pgq_dir"/*; do
+        [[ -e "$_pgq_ticket" ]] || continue
+        _pgq_base="${_pgq_ticket##*/}"
+        _pgq_pid="${_pgq_base#*.}"
+        _pgq_pid="${_pgq_pid%%.*}"
+        if ! [[ "$_pgq_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$_pgq_pid" 2>/dev/null; then
+            rm -f "$_pgq_ticket" 2>/dev/null || true
+            continue
+        fi
+        _pgq_pos=$((_pgq_pos + 1))
+        _pgq_label="${_pgq_base#*.*.}"
+        printf '  queue-%s: %s (pid %s, ticket %s)\n' "$_pgq_pos" "$_pgq_label" "$_pgq_pid" "$_pgq_base"
+    done
+}
+
 # Acquire one of PUSH_GATE_MAX_CONCURRENT slots, polling with a bounded wait
 # on contention. See header for the full contract.
 push_gate_acquire_slot() {
@@ -277,10 +404,11 @@ push_gate_acquire_slot() {
         return 0
     fi
 
-    local _pgl_max _pgl_max_wait _pgl_poll
+    local _pgl_max _pgl_max_wait _pgl_poll _pgl_min_free
     _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
     _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
     _pgl_poll="$(_push_gate_tunable PUSH_GATE_POLL_SECONDS 15 1)"
+    _pgl_min_free="$(_push_gate_tunable PUSH_GATE_MIN_FREE_MEM_MB 6144 0)"
     local _pgl_host
     _pgl_host="$(hostname 2>/dev/null || echo unknown)"
 
@@ -296,39 +424,120 @@ push_gate_acquire_slot() {
     fi
 
     local _pgl_i _pgl_slot _pgl_fd _pgl_announced=0 _pgl_start=0
+    local _pgl_free_now="" _pgl_mem_blocked=0 _pgl_mem_warned=0
+    local _pgl_queue_dir _pgl_ticket="" _pgl_head _pgl_my_turn
+    _pgl_queue_dir="$(push_gate_queue_dir "$_pgl_slot_dir")"
+
+    # Enroll this waiter in the FIFO queue. Enrollment failure (an unwritable
+    # queue dir) degrades to the pre-queue behavior — unfair but functional —
+    # rather than blocking the caller.
+    _push_gate_enroll() {
+        _pgl_ticket="$(printf '%010d.%s.%s' "$(date +%s)" "$$" "${_pgl_label//[^A-Za-z0-9_-]/_}")"
+        if ! { mkdir -p "$_pgl_queue_dir" && : >"$_pgl_queue_dir/$_pgl_ticket"; } 2>/dev/null; then
+            _pgl_ticket=""
+        fi
+    }
 
     while :; do
-        for (( _pgl_i = 0; _pgl_i < _pgl_max; _pgl_i++ )); do
-            _pgl_slot="$_pgl_slot_dir/slot-${_pgl_i}.lock"
-            _pgl_fd=$(( PUSH_GATE_FD_BASE + _pgl_i ))
-            if _push_gate_fd_in_use "$_pgl_fd"; then
-                continue
-            fi
-            eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
-            if flock -n "$_pgl_fd"; then
-                printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
-                eval "$_pgl_fd_var=\$_pgl_fd"
-                if [[ "$_pgl_announced" -eq 1 ]]; then
-                    echo "push-gate: slot-${_pgl_i} acquired after wait" >&2
+        # Memory-headroom admission (gas-mnpr): admitting a gate onto a
+        # starved host converts slot capacity into thrash — the measured
+        # single-gate envelope is ~2.3 GiB summed RSS with a 1.9 GiB
+        # single-process tail, on a host whose free RAM swings between
+        # 38 MB and 4 GB under load, and the incident box was 50% idle on
+        # CPU while it thrashed, so a count- or CPU-based rule admits
+        # straight into the failure. Insufficient headroom is treated
+        # exactly like every slot being busy: same announce-once, same
+        # bounded wait, same return 1. An unmeasurable host fails OPEN
+        # with one diagnostic.
+        _pgl_mem_blocked=0
+        if [[ "$_pgl_min_free" -gt 0 ]]; then
+            if _pgl_free_now="$(push_gate_free_mem_mb)"; then
+                if [[ "$_pgl_free_now" -lt "$_pgl_min_free" ]]; then
+                    _pgl_mem_blocked=1
                 fi
-                return 0
+            elif [[ "$_pgl_mem_warned" -eq 0 ]]; then
+                _pgl_mem_warned=1
+                echo "push-gate: free-memory probe unavailable — admitting without a headroom check" >&2
             fi
-            eval "exec ${_pgl_fd}>&-" || true
-        done
+        fi
+
+        # FIFO turn check (gas-mnpr gap 2): only the oldest live waiter
+        # attempts the sweep. An un-enrolled arrival that finds live waiters
+        # already queued enrolls behind them instead of barging a slot the
+        # moment it frees; the truly uncontended path (empty queue, free
+        # slot) still acquires on the first sweep without creating anything.
+        _pgl_my_turn=1
+        _pgl_head="$(push_gate_queue_head "$_pgl_queue_dir")"
+        if [[ -z "$_pgl_ticket" ]]; then
+            if [[ -n "$_pgl_head" ]]; then
+                _push_gate_enroll
+                _pgl_my_turn=0
+            fi
+        elif [[ -n "$_pgl_head" && "$_pgl_head" != "$_pgl_ticket" ]]; then
+            _pgl_my_turn=0
+        fi
+
+        if [[ "$_pgl_mem_blocked" -eq 0 && "$_pgl_my_turn" -eq 1 ]]; then
+            for (( _pgl_i = 0; _pgl_i < _pgl_max; _pgl_i++ )); do
+                _pgl_slot="$_pgl_slot_dir/slot-${_pgl_i}.lock"
+                _pgl_fd=$(( PUSH_GATE_FD_BASE + _pgl_i ))
+                if _push_gate_fd_in_use "$_pgl_fd"; then
+                    continue
+                fi
+                eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
+                if flock -n "$_pgl_fd"; then
+                    printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
+                    eval "$_pgl_fd_var=\$_pgl_fd"
+                    if [[ -n "$_pgl_ticket" ]]; then
+                        rm -f "$_pgl_queue_dir/$_pgl_ticket" 2>/dev/null || true
+                    fi
+                    if [[ "$_pgl_announced" -eq 1 ]]; then
+                        echo "push-gate: slot-${_pgl_i} acquired after wait" >&2
+                    fi
+                    return 0
+                fi
+                eval "exec ${_pgl_fd}>&-" || true
+            done
+        fi
+
+        # Blocked this round (memory, turn, or busy slots): make the wait
+        # visible as a ticket so a starved waiter is distinguishable from a
+        # dead one (gap 4).
+        if [[ -z "$_pgl_ticket" ]]; then
+            _push_gate_enroll
+        fi
 
         if [[ "$_pgl_announced" -eq 0 ]]; then
             _pgl_announced=1
             _pgl_start="$(date +%s)"
-            echo "push-gate: all $_pgl_max slot(s) busy, waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s):" >&2
-            push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            if [[ "$_pgl_mem_blocked" -eq 1 ]]; then
+                echo "push-gate: low free memory (${_pgl_free_now} MiB < floor ${_pgl_min_free} MiB), waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s; PUSH_GATE_MIN_FREE_MEM_MB=0 disables)" >&2
+            else
+                echo "push-gate: all $_pgl_max slot(s) busy, waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s):" >&2
+                push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            fi
+            push_gate_describe_queue "$_pgl_queue_dir" >&2
         fi
 
         if (( $(date +%s) - _pgl_start >= _pgl_max_wait )); then
-            echo "push-gate: timed out after ${_pgl_max_wait}s waiting for a free slot" >&2
-            push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            if [[ "$_pgl_mem_blocked" -eq 1 ]]; then
+                echo "push-gate: timed out after ${_pgl_max_wait}s waiting for free memory (${_pgl_free_now} MiB < floor ${_pgl_min_free} MiB; PUSH_GATE_MIN_FREE_MEM_MB=0 disables)" >&2
+            else
+                echo "push-gate: timed out after ${_pgl_max_wait}s waiting for a free slot" >&2
+                push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            fi
+            push_gate_describe_queue "$_pgl_queue_dir" >&2
+            if [[ -n "$_pgl_ticket" ]]; then
+                rm -f "$_pgl_queue_dir/$_pgl_ticket" 2>/dev/null || true
+            fi
             return 1
         fi
 
+        # Refresh the ticket's mtime each poll: a live-but-starved waiter
+        # shows a fresh timestamp, a dead one goes stale and gets swept.
+        if [[ -n "$_pgl_ticket" ]]; then
+            touch "$_pgl_queue_dir/$_pgl_ticket" 2>/dev/null || true
+        fi
         sleep "$_pgl_poll"
     done
 }

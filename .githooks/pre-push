@@ -13,6 +13,11 @@ set -euo pipefail
 
 zero="0000000000000000000000000000000000000000"
 
+# git passes the remote's name as $1 (or its URL when pushing by URL); the
+# new-branch base search below scopes to that remote's tracking refs. Empty
+# only if the hook is invoked outside git, which keeps the conservative path.
+remote="${1:-}"
+
 go_changed=0
 pushed_refs=""   # "<local ref> <local sha>" per line, non-deletions only
 any_non_deletion=0
@@ -27,13 +32,39 @@ while read -r local_ref local_sha _remote_ref remote_sha; do
   any_non_deletion=1
   pushed_refs="${pushed_refs}${local_ref} ${local_sha}
 "
+  # scope_base deliberately keeps the PRE-recovery remote sha: for a first
+  # push it stays the zero sentinel, so the affected-package scoping below
+  # still falls back to the full suite. Scoping from the recovered ancestor
+  # base is gas-mnpr item 2's composition, kept out of this merge on purpose.
   pushed_count=$((pushed_count + 1))
   scope_base="$remote_sha"
   scope_tip="$local_sha"
-  # New remote branch: no cheap base to diff against — run the suite.
+  # New remote branch: the remote has no counterpart ref, but it almost always
+  # has SOME shared history, and the nearest ancestor it already carries is a
+  # correct, cheap diff base — this is what makes a docs-only or scripts-only
+  # first push a non-event instead of a full-suite run (gas-mnpr part 1;
+  # gas-2uct and gas-9f29 each needed a --no-verify conversation for exactly
+  # this line). Boundary commits of `rev-list <tip> --not --remotes=<remote>`
+  # are that frontier: parents of pushed commits the remote provably has, so a
+  # tree diff from one of them can over-test but never under-test the push.
+  # Empty output means the remote already has every pushed commit under some
+  # other ref — nothing new to test. New commits with NO boundary means no
+  # shared history at all (root graft): keep the conservative full-suite run.
   if [ "$remote_sha" = "$zero" ]; then
-    go_changed=1
-    continue
+    if [ -z "$remote" ]; then
+      go_changed=1
+      continue
+    fi
+    reachable="$(git rev-list --boundary --topo-order "$local_sha" --not --remotes="$remote" 2>/dev/null || true)"
+    if [ -z "$reachable" ]; then
+      continue
+    fi
+    base="$(printf '%s\n' "$reachable" | sed -n 's/^-//p' | head -n 1)"
+    if [ -z "$base" ]; then
+      go_changed=1
+      continue
+    fi
+    remote_sha="$base"
   fi
   if git diff --name-only "$remote_sha" "$local_sha" -- '*.go' 2>/dev/null | grep -q .; then
     go_changed=1

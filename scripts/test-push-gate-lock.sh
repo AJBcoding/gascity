@@ -291,8 +291,15 @@ assert_true "wiring.has_override"  grep -q 'GC_PUSH_GATE_NO_CAP'   "$LOCAL_PARAL
 
 acq_line="$(grep -n 'push_gate_acquire_slot ' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
 if [[ -n "$acq_line" ]]; then
-    LOSER_BLOCK="$(sed -n "${acq_line},$((acq_line + 10))p" "$LOCAL_PARALLEL")"
+    LOSER_BLOCK="$(sed -n "${acq_line},$((acq_line + 25))p" "$LOCAL_PARALLEL")"
     assert_contains "wiring.timeout_exits_75" "$LOSER_BLOCK" "exit 75"
+    # gas-mnpr gap 3: the timeout path reports to the witness, best-effort.
+    # The mail must sit INSIDE the acquire-failure block (before its exit 75),
+    # be non-blocking (a send failure only prints), and be disableable via
+    # PUSH_GATE_ESCALATION_MAILTO. Nothing may make exit 75 depend on it.
+    assert_contains "wiring.timeout_reports_to_witness" "$LOSER_BLOCK" "gc mail send"
+    assert_contains "wiring.escalation_is_overridable" "$LOSER_BLOCK" "PUSH_GATE_ESCALATION_MAILTO"
+    assert_contains "wiring.escalation_send_nonblocking" "$LOSER_BLOCK" '|| echo "push-gate: witness escalation mail failed (non-blocking)"'
 else
     record_fail "wiring.timeout_exits_75" "no push_gate_acquire_slot call found in $LOCAL_PARALLEL"
 fi
@@ -313,6 +320,93 @@ else
     record_fail "wiring.closes_gate_fd_before_fanout" \
         "close at line '${close_line:-none}', fan-out at line '${fanout_line:-none}'"
 fi
+
+# ---------------- memory-headroom admission (gas-mnpr gap 1) ----------------
+# Deterministic via the PUSH_GATE_FAKE_FREE_MEM_MB seam: a numeric value
+# replaces the probe, the literal 'fail' simulates an unprobeable host. Both
+# admit and block directions are asserted THROUGH the seam, so a seam the lib
+# ignores cannot pass these silently (the block direction would admit).
+MEMSLOTS="$WORK/mem-slots"
+mem_case() { # <fake> <floor> -> runs acquire in a clean process, echoes "rc=<n> out=<stderr>"
+    local out rc
+    out="$(PUSH_GATE_FAKE_FREE_MEM_MB="$1" PUSH_GATE_MIN_FREE_MEM_MB="$2" \
+        PUSH_GATE_MAX_WAIT_SECONDS=1 PUSH_GATE_POLL_SECONDS=1 PUSH_GATE_MAX_CONCURRENT=2 \
+        bash -c '. "$1"; fd=""; push_gate_acquire_slot "$2" fd mem-case' _ "$LIB" "$MEMSLOTS" 2>&1)"
+    rc=$?
+    printf 'rc=%s out=%s\n' "$rc" "$out"
+}
+
+MEM_RES="$(mem_case 512 4096)"
+assert_contains "mem.blocked_below_floor_times_out" "$MEM_RES" "rc=1"
+assert_contains "mem.blocked_message_names_memory" "$MEM_RES" "free memory"
+
+MEM_RES="$(mem_case 8192 4096)"
+assert_contains "mem.admitted_at_headroom" "$MEM_RES" "rc=0"
+
+MEM_RES="$(mem_case 1 0)"
+assert_contains "mem.floor_zero_disables" "$MEM_RES" "rc=0"
+
+MEM_RES="$(mem_case fail 99999)"
+assert_contains "mem.probe_failure_fails_open" "$MEM_RES" "rc=0"
+assert_contains "mem.probe_failure_diagnostic" "$MEM_RES" "probe"
+
+# Malformed floor falls back to the documented default (6144), which a
+# starved fake must still block against — proving the default is applied
+# rather than the check silently disabling.
+MEM_RES="$(mem_case 100 banana)"
+assert_contains "mem.malformed_floor_uses_default" "$MEM_RES" "rc=1"
+
+# ---------------- FIFO waiter queue (gas-mnpr gaps 2+4) ----------------
+QWORK="$WORK/queue-test"
+mkdir -p "$QWORK"
+
+# queue_head: oldest LIVE ticket wins; dead-pid and malformed tickets are
+# swept as a side effect. Our own pid is live by construction; 4000000 is
+# outside macOS/Linux default pid ranges, so it is reliably dead.
+: >"$QWORK/0000000001.4000000.dead-early"
+: >"$QWORK/0000000002.$$.live-old"
+: >"$QWORK/0000000003.$$.live-young"
+: >"$QWORK/garbage-name"
+QHEAD="$(push_gate_queue_head "$QWORK")"
+assert_eq "queue.head_is_oldest_live" "$QHEAD" "0000000002.$$.live-old"
+assert_false "queue.dead_ticket_before_head_swept" test -e "$QWORK/0000000001.4000000.dead-early"
+assert_true "queue.younger_live_ticket_kept" test -e "$QWORK/0000000003.$$.live-young"
+
+# head stops at the head — entries behind it (like the malformed one) are
+# swept by the next full walk, which describe is.
+QDESC="$(push_gate_describe_queue "$QWORK")"
+assert_contains "queue.describe_lists_positions" "$QDESC" "queue-1: live-old"
+assert_contains "queue.describe_lists_second" "$QDESC" "queue-2: live-young"
+assert_false "queue.malformed_ticket_swept_by_describe" test -e "$QWORK/garbage-name"
+rm -rf "$QWORK"
+
+# A waiter that is not the queue head must NOT take a slot even when one is
+# free: plant an older live ticket (our own pid keeps it live), leave every
+# slot free, and watch a short-bound acquire time out behind it — then
+# verify its own ticket was enrolled during the wait (observability) and
+# removed on expiry, while the planted head survived untouched.
+FIFOSLOTS="$WORK/fifo-slots"
+FIFOQ="$(push_gate_queue_dir "$FIFOSLOTS")"
+mkdir -p "$FIFOQ"
+: >"$FIFOQ/0000000001.$$.planted-head"
+FIFO_OUT="$(PUSH_GATE_MAX_WAIT_SECONDS=1 PUSH_GATE_POLL_SECONDS=1 PUSH_GATE_MIN_FREE_MEM_MB=0 \
+    bash -c '. "$1"; fd=""; push_gate_acquire_slot "$2" fd fifo-waiter' _ "$LIB" "$FIFOSLOTS" 2>&1)"
+FIFO_RC=$?
+assert_eq "queue.non_head_blocked_despite_free_slot" "$FIFO_RC" "1"
+assert_contains "queue.wait_shows_planted_head" "$FIFO_OUT" "planted-head"
+assert_contains "queue.wait_shows_own_enrollment" "$FIFO_OUT" "fifo-waiter"
+assert_true "queue.planted_head_survives" test -e "$FIFOQ/0000000001.$$.planted-head"
+FIFO_LEFT="$(find "$FIFOQ" -name '*fifo-waiter*' | wc -l | tr -d ' ')"
+assert_eq "queue.own_ticket_removed_on_timeout" "$FIFO_LEFT" "0"
+
+# Head-of-queue acquires: with our planted ticket removed the same call must
+# take a free slot immediately (empty queue = uncontended fast path).
+rm -f "$FIFOQ/0000000001.$$.planted-head"
+FIFO_OUT="$(PUSH_GATE_MAX_WAIT_SECONDS=1 PUSH_GATE_POLL_SECONDS=1 PUSH_GATE_MIN_FREE_MEM_MB=0 \
+    bash -c '. "$1"; fd=""; push_gate_acquire_slot "$2" fd fifo-head' _ "$LIB" "$FIFOSLOTS" 2>&1)"
+assert_eq "queue.empty_queue_acquires_immediately" "$?" "0"
+FIFO_LEFT="$(find "$FIFOQ" -type f 2>/dev/null | wc -l | tr -d ' ')"
+assert_eq "queue.fast_path_leaves_no_ticket" "$FIFO_LEFT" "0"
 
 echo
 echo "push-gate-lock tests: $pass passed, $fail failed"
