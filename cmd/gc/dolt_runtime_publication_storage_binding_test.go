@@ -132,9 +132,13 @@ func TestManagedDoltLifecycleOwnedStillRejectsIncompleteStorageMetadata(t *testi
 			want:     "partial beads storage binding",
 		},
 		{
+			// The name has to be one this build genuinely does not register, or
+			// the parser rejects the fixture for some other reason first and the
+			// subtest stops testing what it is named for. "postgres" was that
+			// name until this lane registered it (gas-9iy7).
 			name:     "a backend this build does not register",
-			metadata: `{"backend":"postgres","dolt_mode":"server","dolt_database":"legacy"}`,
-			want:     `unsupported backend "postgres"`,
+			metadata: `{"backend":"` + unregisteredTestBackend + `","dolt_mode":"server","dolt_database":"legacy"}`,
+			want:     `unsupported backend "` + unregisteredTestBackend + `"`,
 		},
 	}
 

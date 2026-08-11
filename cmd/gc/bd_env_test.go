@@ -4476,10 +4476,11 @@ func TestControlBdCommandRunnerDefaultsBeadsActorToControllerWhenUnset(t *testin
 // subprocess inherits whatever the ambient environment happens to hold.
 func writeUnregisteredBackendMetadata(t *testing.T, scopeRoot string) {
 	t.Helper()
+	requireUnregisteredBackend(t, unregisteredTestBackend)
 	if err := os.MkdirAll(filepath.Join(scopeRoot, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	meta := `{"database":"beads","backend":"postgres"}`
+	meta := `{"database":"beads","backend":"` + unregisteredTestBackend + `"}`
 	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(meta), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -4502,7 +4503,7 @@ func assertRefusesUnregisteredBackend(t *testing.T, err error) {
 	if regErr != nil {
 		t.Fatalf("RegisteredBackends: %v", regErr)
 	}
-	for _, want := range []string{`"postgres"`, strings.Join(registered, ", ")} {
+	for _, want := range []string{`"` + unregisteredTestBackend + `"`, strings.Join(registered, ", ")} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("refusal %q omits %q", err, want)
 		}
