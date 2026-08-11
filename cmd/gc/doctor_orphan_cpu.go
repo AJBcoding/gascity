@@ -43,11 +43,21 @@ import (
 // agents' work and orphans their children to init — inflicting this very defect
 // at wider scale.
 //
-// Reading %CPU as a lifetime average is what makes this work. `ps -o pcpu`
-// reports CPU time over the process's whole life, not an instantaneous sample,
-// so a brief spike cannot trip the check while a loop that has spun since it
-// was orphaned reports its true ~80% forever. Do not "fix" this into a
-// sampled rate; the average is the signal.
+// The %CPU column means different things per platform, and the check works on
+// both for different reasons. Linux ps reports cputime/elapsed — a true
+// lifetime average — so a loop orphaned hours ago keeps reporting the ~80% it
+// has burned all along. BSD/macOS ps reports "a decaying average over up to a
+// minute of previous (real) time", so it reports what the process is burning
+// now. Either way a sustained burner reads high and an idle daemon reads low,
+// which is the only distinction this check draws.
+//
+// Where they differ is which imprecision each carries, and neither is worth
+// engineering around here: Linux keeps reporting a process that burned hard
+// early and has since gone quiet, while macOS can catch a minute-long spike
+// inside a long-lived process. minElapsed bounds the second; nothing bounds the
+// first. That asymmetry is a reason this check stays advisory and names PIDs
+// for a human to identify — not a reason to build cross-platform sampling into
+// a diagnostic that runs one ps.
 type orphanCPUCheck struct {
 	// minCPUPercent is the lifetime-average %CPU at or above which an
 	// init-owned process is worth reporting.
@@ -116,7 +126,7 @@ func (c *orphanCPUCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 
 	if len(burners) == 0 {
 		res.Status = doctor.StatusOK
-		res.Message = fmt.Sprintf("no orphaned CPU burners: %d init-owned processes scanned, none averaging >=%.0f%% CPU for %s or longer",
+		res.Message = fmt.Sprintf("no orphaned CPU burners: %d live init-owned processes scanned, none averaging >=%.0f%% CPU for %s or longer",
 			len(scanned), c.minCPUPercent, c.minElapsed)
 		return res
 	}
@@ -156,21 +166,29 @@ func (c *orphanCPUCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 }
 
 // runPSInitChildren runs `ps` and returns raw output with one row per process:
-// ppid, pid, %cpu, elapsed, command. The `=` suffixes suppress column headers,
-// which POSIX, BSD (macOS), and Linux ps all honor, so the output needs no
-// header skipping and parses the same everywhere.
+// ppid, pid, state, %cpu, elapsed, command. The `=` suffixes suppress column
+// headers, which POSIX, BSD (macOS), and Linux ps all honor, so the output
+// needs no header skipping and parses the same everywhere.
 func runPSInitChildren() (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), orphanPSTimeout)
 	defer cancel()
 
-	out, err := exec.CommandContext(ctx, "ps", "-Ao", "ppid=,pid=,pcpu=,etime=,comm=").Output()
+	out, err := exec.CommandContext(ctx, "ps", "-Ao", "ppid=,pid=,state=,pcpu=,etime=,comm=").Output()
 	if err != nil {
 		return "", err
 	}
 	return string(out), nil
 }
 
-// parsePSInitChildren returns the rows of ps output whose parent is PID 1.
+// parsePSInitChildren returns the live rows of ps output whose parent is PID 1.
+//
+// Zombies are dropped. A zombie keeps the lifetime-average %CPU it earned while
+// alive but consumes nothing, and it is reparented to init by definition — so
+// without this it is the false positive most likely to reach an operator, and
+// the one most likely to send them killing something already dead. State is
+// multi-character on BSD ("ZN") and single on Linux ("Z"), so the test is a
+// prefix, matching how internal/pidutil reads the same field.
+//
 // Rows it cannot parse are skipped rather than reported: a malformed row is a
 // row we know nothing about, and inventing a finding from it would be worse
 // than missing it.
@@ -178,8 +196,8 @@ func parsePSInitChildren(out string) []initChildProc {
 	var procs []initChildProc
 	for _, line := range strings.Split(out, "\n") {
 		fields := strings.Fields(line)
-		// ppid pid pcpu etime comm... — comm is last and may contain spaces.
-		if len(fields) < 5 {
+		// ppid pid state pcpu etime comm... — comm is last, may contain spaces.
+		if len(fields) < 6 {
 			continue
 		}
 		ppid, err := strconv.Atoi(fields[0])
@@ -190,11 +208,14 @@ func parsePSInitChildren(out string) []initChildProc {
 		if err != nil {
 			continue
 		}
-		cpu, err := strconv.ParseFloat(fields[2], 64)
+		if strings.HasPrefix(fields[2], "Z") {
+			continue
+		}
+		cpu, err := strconv.ParseFloat(fields[3], 64)
 		if err != nil {
 			continue
 		}
-		elapsed, ok := parseETime(fields[3])
+		elapsed, ok := parseETime(fields[4])
 		if !ok {
 			continue
 		}
@@ -202,7 +223,7 @@ func parsePSInitChildren(out string) []initChildProc {
 			PID:        pid,
 			CPUPercent: cpu,
 			Elapsed:    elapsed,
-			Command:    strings.Join(fields[4:], " "),
+			Command:    strings.Join(fields[5:], " "),
 		})
 	}
 	return procs
