@@ -3043,8 +3043,12 @@ func TestOrderRunExecEnvBuildFailureRedactsProcessSecrets(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	// The refusal quotes the offending backend name, so naming it as the
 	// process secret is what puts a secret-shaped value on the exact path
-	// under test: an env-build failure rendered to stderr.
-	t.Setenv("GC_ORDER_SECRET", "postgres")
+	// under test: an env-build failure rendered to stderr. It must be the
+	// same name the fixture writes, not a name that merely happens to appear
+	// in the refusal's "supported" list — that coincidence is what left this
+	// test asserting nothing once gas-1oou retired postgres.
+	const secret = unregisteredTestBackend
+	t.Setenv("GC_ORDER_SECRET", secret)
 
 	cityDir := t.TempDir()
 	writeUnregisteredBackendMetadata(t, cityDir)
@@ -3065,7 +3069,7 @@ dolt.auto-start: false
 	if result.failureLabel != "exec-env-failed" {
 		t.Fatalf("failureLabel = %q, want exec-env-failed", result.failureLabel)
 	}
-	if strings.Contains(stderr.String(), "postgres") {
+	if strings.Contains(stderr.String(), secret) {
 		t.Fatalf("stderr leaked process secret: %s", stderr.String())
 	}
 	if !strings.Contains(stderr.String(), "[redacted]") {
