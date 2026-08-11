@@ -1982,19 +1982,14 @@ func TestHeadLimitedWriter(t *testing.T) {
 	})
 }
 
-// TestGcBdHeartbeatRewritesToMetadataUpdate pins the gastownhall/gascity#1855
-// worker-heartbeat write half: `gc bd heartbeat <id>` must forward to bd as
-// `update <id> --set-metadata gc.last_heartbeat_at=<RFC3339 UTC>`. The exact
-// key (with the _at suffix) is what the gas-city-dashboard will read
-// (dashboard #324) to tell a live worker from a dead one, and the stamp must
-// be valid RFC3339 in UTC even when the local clock is in another zone.
-func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
-	origNow := bdHeartbeatNow
-	t.Cleanup(func() { bdHeartbeatNow = origNow })
-	// Pin the clock to a non-UTC zone to prove the rewrite normalizes to UTC.
-	fixed := time.Date(2026, 5, 31, 12, 0, 0, 0, time.FixedZone("PST", -8*3600))
-	bdHeartbeatNow = func() time.Time { return fixed }
-
+// TestGcBdHeartbeatForwardsToRealHeartbeat pins the gas-9d4e contract:
+// `gc bd heartbeat <id>` must reach bd as its own `heartbeat <id>`
+// subcommand — the one that renews the claim lease
+// (heartbeat_at / lease_expires_at). The historical rewrite into
+// `update --set-metadata gc.last_heartbeat_at=...` was a write nothing read,
+// and it silently shadowed the lease renewal: a worker heartbeating through
+// gc lost its lease after the TTL while believing it was covered.
+func TestGcBdHeartbeatForwardsToRealHeartbeat(t *testing.T) {
 	// The fake bd captures its forwarded args so the assertion can inspect them.
 	capture := filepath.Join(t.TempDir(), "gc-bd-args.txt")
 	silentFallbackTestSetup(t, "#!/bin/sh\nprintf '%s' \"$*\" > \"${CAPTURE_PATH}\"\n")
@@ -2009,21 +2004,8 @@ func TestGcBdHeartbeatRewritesToMetadataUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const prefix = "update demo-abc --set-metadata " + heartbeatMetadataKey + "="
-	gotArgs := string(data)
-	stamp, ok := strings.CutPrefix(gotArgs, prefix)
-	if !ok {
-		t.Fatalf("forwarded args = %q, want prefix %q", gotArgs, prefix)
-	}
-	parsed, err := time.Parse(time.RFC3339, stamp)
-	if err != nil {
-		t.Fatalf("heartbeat stamp %q is not valid RFC3339: %v", stamp, err)
-	}
-	if _, offset := parsed.Zone(); offset != 0 {
-		t.Fatalf("heartbeat stamp %q is not UTC (zone offset %d)", stamp, offset)
-	}
-	if want := fixed.UTC().Format(time.RFC3339); stamp != want {
-		t.Fatalf("heartbeat stamp = %q, want %q", stamp, want)
+	if gotArgs := string(data); gotArgs != "heartbeat demo-abc" {
+		t.Fatalf("forwarded args = %q, want %q", gotArgs, "heartbeat demo-abc")
 	}
 }
 
@@ -2048,13 +2030,18 @@ func TestRewriteBdHeartbeatArgs(t *testing.T) {
 			}
 		}
 	})
-	t.Run("rewrites a clean id to a set-metadata update", func(t *testing.T) {
+	t.Run("passes a clean heartbeat through to bd's real lease renewal", func(t *testing.T) {
 		out, err := rewriteBdHeartbeatArgs([]string{"heartbeat", "demo-abc"})
 		if err != nil {
 			t.Fatalf("rewriteBdHeartbeatArgs unexpected error: %v", err)
 		}
-		if len(out) != 4 || out[0] != "update" || out[1] != "demo-abc" || out[2] != "--set-metadata" {
-			t.Fatalf("rewriteBdHeartbeatArgs = %q, want [update demo-abc --set-metadata ...]", out)
+		// The historical rewrite into `update --set-metadata gc.last_heartbeat_at=...`
+		// silently shadowed bd's lease renewal: workers heartbeating through gc
+		// lost their claim lease after the TTL (gas-9d4e). bd's own heartbeat
+		// subcommand renews heartbeat_at/lease_expires_at, so gc must forward
+		// the call, not replace it.
+		if len(out) != 2 || out[0] != "heartbeat" || out[1] != "demo-abc" {
+			t.Fatalf("rewriteBdHeartbeatArgs = %q, want [heartbeat demo-abc]", out)
 		}
 	})
 	t.Run("passes non-heartbeat args through unchanged", func(t *testing.T) {
