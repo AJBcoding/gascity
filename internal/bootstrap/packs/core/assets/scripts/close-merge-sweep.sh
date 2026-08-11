@@ -30,6 +30,40 @@
 # already struggling. The polecat's job IS finished at publication; merging is
 # the refinery's. So this is a read-only sweep that files a bead, never a gate.
 #
+# ANCESTRY IS NOT EFFECT, SO THE VERDICT IS A THREE-RUNG LADDER. "Is this SHA
+# reachable" is never the question; "is this CHANGE in effect" is. Cherry-pick,
+# rebase, squash-merge and hand-porting all put a change into effect while
+# leaving the recorded SHA unreachable, so a bare ancestry probe manufactures
+# confident false alarms — five of them during this bead's own design, from four
+# independent directions. A watchman whose third alarm is wrong gets ignored,
+# and then the real merge gap goes unread too. So we report ONLY when all three
+# rungs miss, and each rung asks a DIFFERENT question, because re-running one
+# method twice feels rigorous and learns nothing:
+#   1. ANCESTRY     — is the commit reachable from the target? Cheap, and right
+#                     whenever it fires. Answers "did this COMMIT land".
+#   2. PATCH-ID     — does any commit on the target carry the same diff? Catches
+#                     cherry-pick and rebase, where the bytes survive and the
+#                     SHA does not.
+#   3. FINGERPRINT  — do the distinctive identifiers this commit INTRODUCES
+#                     exist at the target? Catches the port and the squash,
+#                     where even the diff is different. gas-cj7's own
+#                     remediation is this shape: upstream #4768 had rewritten
+#                     the function signature, so the fix had to be re-authored
+#                     and its patch-id differs forever. An ancestry+patch-id
+#                     ledger would report it missing forever, on work that is
+#                     in effect.
+# A fingerprint is DERIVED from the commit rather than stamped by hand: the
+# identifiers on its added lines that appear nowhere in its parent tree. Hand-
+# picked fingerprints fail silently in the safe-looking direction when someone
+# chooses a common word or a line that later gets reformatted, and 13 of 29
+# gate-scoped closes carry no work record to stamp one on anyway. A stamped
+# gc.work_fingerprint is honoured when present; nothing depends on it existing.
+#
+# WHAT WE CANNOT READ, WE DO NOT JUDGE. A commit this repo has never fetched
+# and a target with no remote-tracking ref are both UNPROBEABLE, not unmerged.
+# Reporting either as a merge gap is an inverted alarm about work that may be
+# perfectly landed somewhere this clone cannot see.
+#
 # ANCESTRY IS MEASURED AGAINST THE REMOTE REF, NEVER THE BARE LOCAL BRANCH.
 # A local branch name can sit hundreds of commits behind the ref everyone
 # actually pushes to — measured 2026-08-11: local integration/deploy-20260804
@@ -61,12 +95,25 @@ LIMIT="${GC_MERGE_LEDGER_LIMIT:-200}"
 # rung 4's publication grace, which only has to outlast a push.
 MIN_AGE_HOURS="${GC_MERGE_LEDGER_MIN_AGE_HOURS:-24}"
 
+# Rungs 2 and 3 run only after rung 1 misses, which is the rare case, so these
+# bounds exist to cap the tail rather than to tune throughput. The patch-id scan
+# walks only commits on the target that touch the same paths, so the limit is
+# reached only by files with very long histories.
+PATCH_SCAN_LIMIT="${GC_MERGE_LEDGER_PATCH_SCAN:-400}"
+FINGERPRINTS_WANTED="${GC_MERGE_LEDGER_FINGERPRINTS:-3}"
+TOKEN_CANDIDATES="${GC_MERGE_LEDGER_TOKEN_CANDIDATES:-12}"
+# Shorter tokens are words, not identifiers: "function", "return" and "context"
+# all appear in every tree, so a fingerprint built from them reports landed for
+# any change at all — a false green, the one direction this sweep must not fail.
+MIN_TOKEN_LEN="${GC_MERGE_LEDGER_MIN_TOKEN_LEN:-12}"
+
 command -v jq >/dev/null 2>&1 || exit 0
 command -v git >/dev/null 2>&1 || exit 0
 command -v gc >/dev/null 2>&1 || exit 0
 
 FILED=0
 LANDED=0
+EQUIV=0
 UNPROVEN=0
 UNKNOWN=0
 TOOSOON=0
@@ -120,6 +167,85 @@ is_ancestor() {
     git -C "$1" merge-base --is-ancestor "$2" "$3" 2>/dev/null
 }
 
+# commit_readable — true when $2 names a commit object this clone actually has.
+# A commit published on a remote nobody here has fetched is unreadable, and
+# every probe below would report it absent from a target it may well be on.
+commit_readable() {
+    git -C "$1" cat-file -e "${2}^{commit}" 2>/dev/null
+}
+
+# patch_id_of — the stable patch-id of a commit's diff, empty when it has none
+# (merge commits, and commits whose diff is empty). --stable is required: the
+# default is unstable across git versions, so two clones would disagree.
+patch_id_of() {
+    git -C "$1" diff-tree -p --no-commit-id "$2" 2>/dev/null |
+        git -C "$1" patch-id --stable 2>/dev/null | awk '{print $1}'
+}
+
+# same_patch_on_target — LADDER RUNG 2. Does any commit on the target ref carry
+# this commit's diff under a different SHA? Only commits touching the same paths
+# are candidates, which keeps this bounded on a fast-moving lane.
+same_patch_on_target() {
+    local repo="$1" probe="$2" ref="$3" want cand line
+    local -a paths=()
+
+    want="$(patch_id_of "$repo" "$probe")"
+    [ -n "$want" ] || return 1
+
+    while IFS= read -r line; do
+        [ -n "$line" ] && paths+=("$line")
+    done <<EOF
+$(git -C "$repo" show --format= --name-only "$probe" 2>/dev/null)
+EOF
+    # bash 3.2 errors on "${paths[@]}" for an empty array under set -u.
+    [ "${#paths[@]}" -gt 0 ] || return 1
+
+    for cand in $(git -C "$repo" log --format=%H --max-count="$PATCH_SCAN_LIMIT" \
+                      "$ref" -- "${paths[@]}" 2>/dev/null); do
+        [ "$(patch_id_of "$repo" "$cand")" = "$want" ] && return 0
+    done
+    return 1
+}
+
+# introduced_identifiers — the distinctive identifiers a commit ADDS: tokens on
+# its added lines that appear nowhere in its parent tree. The parent check is
+# what makes a token distinguishing — a token the commit merely mentions proves
+# nothing about the commit when found on a target.
+introduced_identifiers() {
+    local repo="$1" commit="$2" want="$3" parent tok found=0
+    parent="$(git -C "$repo" rev-parse --verify --quiet "${commit}^" 2>/dev/null)"
+    for tok in $(git -C "$repo" show --format= --unified=0 "$commit" 2>/dev/null |
+                     grep '^+' | grep -v '^+++' | cut -c2- |
+                     grep -oE "[A-Za-z_][A-Za-z0-9_-]{$((MIN_TOKEN_LEN - 1)),}" |
+                     sort -u | awk '{ print length($0), $0 }' | sort -rn |
+                     head -n "$TOKEN_CANDIDATES" | cut -d' ' -f2-); do
+        if [ -n "$parent" ] && git -C "$repo" grep -q -F -e "$tok" "$parent" -- 2>/dev/null; then
+            continue   # pre-existing: it distinguishes nothing
+        fi
+        printf '%s\n' "$tok"
+        found=$((found + 1))
+        [ "$found" -ge "$want" ] && return 0
+    done
+    return 0
+}
+
+# fingerprint_on_target — LADDER RUNG 3. Is any of these identifiers present at
+# the target ref? Read at the ref with git grep <ref>, never off the working
+# tree: the tree is whatever branch someone last checked out, and on this
+# machine that is routinely not the branch under discussion. That single
+# confusion is what turned a miss into a confident alarm during this design.
+fingerprint_on_target() {
+    local repo="$1" ref="$2" fingerprints="$3" tok
+    [ -n "$fingerprints" ] || return 1
+    while IFS= read -r tok; do
+        [ -n "$tok" ] || continue
+        git -C "$repo" grep -q -F -e "$tok" "$ref" -- 2>/dev/null && return 0
+    done <<EOF
+$fingerprints
+EOF
+    return 1
+}
+
 already_filed() {
     local repo="$1" id="$2" out
     out=$( cd "$repo" 2>/dev/null && gc bd list --status=open --json 2>/dev/null |
@@ -151,8 +277,8 @@ file_finding() {
 
 # sweep_bead — one closed bead, one verdict.
 sweep_bead() {
-    local repo="$1" id="$2" commit="$3" closed_at="$4" merged_target="$5" merged_sha="$6" target="$7"
-    local ref claim probe
+    local repo="$1" id="$2" commit="$3" closed_at="$4" merged_target="$5" merged_sha="$6" target="$7" stamped_fp="$8"
+    local ref claim probe fingerprints evidence
 
     [ -n "$id" ] && [ -n "$commit" ] || return 0
 
@@ -171,14 +297,60 @@ sweep_bead() {
 
     [ -n "$target" ] || { UNKNOWN=$((UNKNOWN + 1)); return 0; }
 
+    if ! commit_readable "$repo" "$probe"; then
+        # Published somewhere this clone has never fetched, or garbage-collected
+        # out of it. Every probe below would say "absent" about a commit we
+        # simply cannot read. Unprobeable is not unmerged.
+        UNKNOWN=$((UNKNOWN + 1)); return 0
+    fi
+
     if ! ref="$(resolve_target_ref "$repo" "$target")"; then
         # Only a local ref, or none. A local branch can be hundreds of commits
         # stale; judging against it manufactures false alarms. Stay quiet.
         UNKNOWN=$((UNKNOWN + 1)); return 0
     fi
 
+    # THE LADDER. Three different questions, cheapest first; a finding needs all
+    # three to miss. Both claims run it: a rebased or filtered target rewrites
+    # every SHA on it while keeping the content, so ancestry alone would turn
+    # each proven merge into a "merged work was dropped" alarm.
     if is_ancestor "$repo" "$probe" "$ref"; then
         LANDED=$((LANDED + 1)); return 0
+    fi
+
+    if same_patch_on_target "$repo" "$probe" "$ref"; then
+        EQUIV=$((EQUIV + 1))
+        printf 'close-merge-sweep: %s is on %s under a different SHA (patch-id) — not filing\n' "$id" "$target"
+        return 0
+    fi
+
+    fingerprints="${stamped_fp:-$(introduced_identifiers "$repo" "$probe" "$FINGERPRINTS_WANTED")}"
+    if fingerprint_on_target "$repo" "$ref" "$fingerprints"; then
+        EQUIV=$((EQUIV + 1))
+        printf 'close-merge-sweep: %s is on %s under a different SHA (fingerprint) — not filing\n' "$id" "$target"
+        return 0
+    fi
+
+    # All three missed. Quote the CONTENT evidence, not the ancestry verdict:
+    # "this identifier is absent from X" is checkable in one command, whereas
+    # "SHA is not an ancestor" invites the reader to conclude it was never
+    # applied — the exact reasoning error that produced this design's five
+    # false positives.
+    if [ -n "$fingerprints" ]; then
+        evidence="Three independent probes agree the change is absent from $ref:
+  1. ancestry  — $probe is not reachable from the ref
+  2. patch-id  — no commit on the ref touching these paths carries its diff
+  3. content   — none of the identifiers this commit introduces appear there:
+$(printf '%s\n' "$fingerprints" | sed 's/^/         /')
+
+Check the load-bearing one yourself in a single command:
+  git grep -F -e '$(printf '%s' "$fingerprints" | head -n 1)' $ref"
+    else
+        evidence="Ancestry and patch-id both say absent. The content rung could NOT run: this
+commit introduces no identifier distinctive enough to fingerprint (a pure
+deletion, a whitespace-only change, or a merge commit). Treat this finding as
+weaker than one carrying identifier evidence and confirm by hand — read the
+commit's diff and check its subject matter at $ref directly."
     fi
 
     if [ "$claim" = "proven" ]; then
@@ -186,17 +358,20 @@ sweep_bead() {
         file_finding "$repo" "$id" "merge-retracted" \
             "Merge ledger: $id was merged to $target at $probe, and $probe is no longer on $ref" \
             "This bead recorded a PROVEN merge — the refinery stamped merged_target and
-merged_sha — but the commit is no longer an ancestor of the target.
+merged_sha — and the change is no longer present on the target.
 
   bead:           $id
   merged_target:  $target
   merged_sha:     $probe
   probed ref:     $ref
 
+$evidence
+
 A proven merge that stops being true means the target branch was force-pushed
-or its history rewritten, and merged work was dropped in the process. This is
-the loud case: the ledger is not guessing here, it is reporting that a fact it
-recorded has been retracted.
+or its history rewritten, and merged work was dropped in the process. A rewrite
+that KEPT the content is not this: rungs 2 and 3 above would have found it, so
+this is not simply a changed SHA. This is the loud case: the ledger is not
+guessing here, it is reporting that a fact it recorded has been retracted.
 
 To resolve: confirm whether $probe is still wanted on $target. If it is,
 re-merge it. If it was deliberately dropped, correct the record with
@@ -216,6 +391,12 @@ the tree anything runs from.
   target:      $target  (intended, NOT a proven merge)
   probed ref:  $ref
   closed:      $closed_at
+
+$evidence
+
+Absence of the FIX is all this reports. Do not read it as 'the bug is present
+on $target' — that is a separate claim nobody has checked here, and it can be
+false outright when the code the fix touches does not exist on that lineage.
 
 This is an INTENDED-target claim, not a proven one: no refinery merge was ever
 recorded for this bead, so the target is the rig's configured default_branch
@@ -259,20 +440,23 @@ RECORDS=$( cd "$REPO" 2>/dev/null && gc bd list --status=closed --limit="$LIMIT"
             (.closed_at // .updated_at // ""),
             (.metadata["merged_target"] // ""),
             (.metadata["merged_sha"] // ""),
-            (.metadata["gc.work_target"] // "")
+            (.metadata["gc.work_target"] // ""),
+            (.metadata["gc.work_fingerprint"] // "")
           ] | @tsv
     ' 2>/dev/null )
 
-while IFS="$(printf '\t')" read -r id commit closed_at merged_target merged_sha work_target; do
+while IFS="$(printf '\t')" read -r id commit closed_at merged_target merged_sha work_target fingerprint; do
     [ -n "${id:-}" ] || continue
     # gc.work_target is the target frozen at close, when it is present; the
     # config value is the fallback for the closes that predate that stamp.
+    # gc.work_fingerprint is optional — the ladder derives one when it is absent,
+    # which is nearly always, so nothing here depends on a new close-path stamp.
     sweep_bead "$REPO" "$id" "$commit" "$closed_at" "$merged_target" "$merged_sha" \
-        "${work_target:-$DEFAULT_BRANCH}"
+        "${work_target:-$DEFAULT_BRANCH}" "${fingerprint:-}"
 done <<EOF
 $RECORDS
 EOF
 
-printf 'close-merge-sweep: landed=%d unproven=%d filed=%d deduped=%d toosoon=%d unknown=%d target=%s\n' \
-    "$LANDED" "$UNPROVEN" "$FILED" "$DEDUPED" "$TOOSOON" "$UNKNOWN" "${DEFAULT_BRANCH:-<unresolved>}"
+printf 'close-merge-sweep: landed=%d equiv=%d unproven=%d filed=%d deduped=%d toosoon=%d unknown=%d target=%s\n' \
+    "$LANDED" "$EQUIV" "$UNPROVEN" "$FILED" "$DEDUPED" "$TOOSOON" "$UNKNOWN" "${DEFAULT_BRANCH:-<unresolved>}"
 exit 0

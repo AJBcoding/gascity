@@ -92,6 +92,16 @@ run_sweep() {
         bash "$SWEEP" 2>&1
 }
 
+# move_target_on — put an unrelated commit on the current branch. Without this,
+# a branch cut from main and cherry-picked straight back lands on the SAME
+# parent with the same tree, author and (within the same second) committer date,
+# so git reproduces a byte-identical commit object. Ancestry then answers and
+# the rung under test never runs.
+move_target_on() {
+    printf 'unrelated\n' >>"$1/other.txt"
+    git -C "$1" add other.txt && git -C "$1" commit -qm unrelated
+}
+
 bead() { # id commit [merged_target] [merged_sha]
     jq -nc --arg id "$1" --arg c "$2" --arg mt "${3:-}" --arg ms "${4:-}" \
       '[{id:$id, closed_at:"2000-01-01T00:00:00Z", metadata:(
@@ -192,12 +202,166 @@ test_recent_close_is_left_for_the_next_sweep() {
     pass "a close inside the grace period is left for the next sweep"
 }
 
+# --- rung 2: a cherry-pick lands the same diff under a different SHA -------
+# The mayor's own false positive (py-zwqw): the fix WAS on main, re-applied
+# under a different SHA, so ancestry said "missing" on work that was in effect
+# the whole time. An ancestry-only ledger files a P1 about a regression that
+# does not exist.
+test_cherry_picked_work_is_resolved_by_patch_id() {
+    setup
+    git -C "$REPO" checkout -q -b feature
+    printf 'distinctiveCherryIdentifier = 1\n' >>"$REPO/f.txt"
+    git -C "$REPO" commit -qam original
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    git -C "$REPO" push -q origin feature      # published, never merged
+    git -C "$REPO" checkout -q main
+    move_target_on "$REPO" || { fail "setup: could not advance main"; return; }
+    # Same diff, different SHA. A silently failed cherry-pick would leave main
+    # genuinely missing the work and the test would "pass" for the wrong reason.
+    git -C "$REPO" cherry-pick "$sha" >/dev/null 2>&1 ||
+        { fail "setup: cherry-pick onto main failed"; return; }
+    [ "$(git -C "$REPO" rev-parse HEAD)" != "$sha" ] ||
+        { fail "setup: cherry-pick reproduced the same SHA, so ancestry would answer"; return; }
+    git -C "$REPO" push -q origin main
+    git -C "$REPO" fetch -q origin
+
+    local out; out=$(run_sweep "$(bead b-7 "$sha")" main)
+    [ ! -s "$TMP/create.log" ] ||
+        { fail "filed on work that landed under a different SHA: $(cat "$TMP/create.log")"; return; }
+    grep -q 'patch-id' <<<"$out" ||
+        { fail "cherry-picked work was not resolved by the patch-id rung: $out"; return; }
+    pass "a cherry-pick is resolved by patch-id, not reported as a merge gap"
+}
+
+# --- rung 3: a PORT changes the diff but keeps the identifier --------------
+# gas-cj7's own remediation: upstream #4768 had rewritten the function's
+# signature, so the fix could not be cherry-picked and was re-authored. Its
+# patch-id differs forever. An ancestry+patch-id ledger reports it missing
+# forever, on work that is in effect.
+test_ported_work_is_resolved_by_symbol_fingerprint() {
+    setup
+    git -C "$REPO" checkout -q -b feature
+    printf 'package gate\n\nfunc workRecordRepoForCommit(commit string) string {\n\treturn commit\n}\n' >"$REPO/gate.go"
+    git -C "$REPO" add gate.go
+    git -C "$REPO" commit -qm original
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    git -C "$REPO" push -q origin feature
+    git -C "$REPO" checkout -q main
+    # The port: same distinguishing identifier, genuinely different diff.
+    printf 'package gate\n\n// reworked for the new signature\nfunc workRecordRepoForCommit(commit string, repo string) (string, error) {\n\treturn repo, nil\n}\n' >"$REPO/gate.go"
+    git -C "$REPO" add gate.go
+    git -C "$REPO" commit -qm port
+    git -C "$REPO" push -q origin main
+    git -C "$REPO" fetch -q origin
+
+    local out; out=$(run_sweep "$(bead b-8 "$sha")" main)
+    [ ! -s "$TMP/create.log" ] ||
+        { fail "filed on a port whose identifier is present on the target: $(cat "$TMP/create.log")"; return; }
+    grep -q 'fingerprint' <<<"$out" ||
+        { fail "ported work was not resolved by the fingerprint rung: $out"; return; }
+    pass "a re-authored port is resolved by symbol fingerprint, not reported as a merge gap"
+}
+
+# --- all three rungs miss: the finding must quote CONTENT evidence ---------
+test_absent_work_files_quoting_the_content_evidence() {
+    setup
+    git -C "$REPO" checkout -q -b feature
+    printf 'package gate\n\nfunc neverLandedAnywhereIdentifier() {}\n' >"$REPO/gate.go"
+    git -C "$REPO" add gate.go
+    git -C "$REPO" commit -qm original
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    git -C "$REPO" push -q origin feature
+    git -C "$REPO" checkout -q main
+
+    local out; out=$(run_sweep "$(bead b-9 "$sha")" main)
+    grep -q 'merge-gap' "$TMP/create.log" ||
+        { fail "genuinely absent work was not filed: $(cat "$TMP/create.log")"; return; }
+    grep -q 'neverLandedAnywhereIdentifier' "$TMP/create.log" ||
+        { fail "finding does not quote the content evidence a reader can check"; return; }
+    pass "when all three rungs miss the finding quotes the absent identifier, not just the SHA"
+}
+
+# --- the fingerprint must DISTINGUISH, or the ledger goes quiet on real gaps -
+# A commit that merely mentions an identifier the target already has proves
+# nothing by that identifier's presence. Counting it turns the fingerprint rung
+# into a false GREEN — silence on exactly the unmerged work this bead exists to
+# surface, which is the failure direction nobody would notice.
+test_preexisting_identifier_is_not_evidence_of_landing() {
+    setup
+    printf 'package gate\n\nfunc alreadyPresentEverywhere() {}\n' >"$REPO/gate.go"
+    git -C "$REPO" add gate.go
+    git -C "$REPO" commit -qm base
+    git -C "$REPO" push -q origin main
+    git -C "$REPO" fetch -q origin
+
+    git -C "$REPO" checkout -q -b feature
+    printf 'func brandNewNeverLanded() { alreadyPresentEverywhere() }\n' >>"$REPO/gate.go"
+    git -C "$REPO" commit -qam newwork
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    git -C "$REPO" push -q origin feature
+    git -C "$REPO" checkout -q main    # the new work never reaches main
+
+    run_sweep "$(bead b-12 "$sha")" main >/dev/null
+    grep -q 'merge-gap' "$TMP/create.log" ||
+        { fail "an identifier the target already had was taken as proof the work landed"; return; }
+    grep -q 'brandNewNeverLanded' "$TMP/create.log" ||
+        { fail "the finding cites no identifier the commit actually introduced"; return; }
+    pass "an identifier the target already had is not counted as evidence the work landed"
+}
+
+# --- a commit this repo cannot read is UNPROBEABLE, exactly like a missing ref
+test_unresolvable_commit_is_unprobeable_not_unmerged() {
+    setup
+    local out
+    out=$(run_sweep '[{"id":"b-10","closed_at":"2000-01-01T00:00:00Z","metadata":{"gc.work_outcome":"shipped","gc.work_commit":"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"}}]' main)
+    [ ! -s "$TMP/create.log" ] ||
+        { fail "judged a commit it cannot read and filed a false alarm: $(cat "$TMP/create.log")"; return; }
+    grep -q 'unknown=1' <<<"$out" ||
+        { fail "an unreadable commit should count as UNPROBEABLE, not unmerged: $out"; return; }
+    pass "a commit this repo cannot read is left unjudged rather than reported missing"
+}
+
+# --- a rewritten target must not turn every proven merge into a retraction -
+# The ladder has to cover the PROVEN claim too. Rebasing or filtering the
+# target branch changes every SHA on it while keeping the content, so an
+# ancestry-only probe reports each proven merge as retracted work.
+test_rewritten_target_does_not_manufacture_retractions() {
+    setup
+    git -C "$REPO" checkout -q -b feature
+    printf 'package gate\n\nfunc provenMergeIdentifier() {}\n' >"$REPO/gate.go"
+    git -C "$REPO" add gate.go
+    git -C "$REPO" commit -qm merged
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    git -C "$REPO" checkout -q main
+    move_target_on "$REPO" || { fail "setup: could not advance main"; return; }
+    # The same content, arriving under a rewritten history.
+    git -C "$REPO" cherry-pick "$sha" >/dev/null 2>&1 ||
+        { fail "setup: cherry-pick onto main failed"; return; }
+    [ "$(git -C "$REPO" rev-parse HEAD)" != "$sha" ] ||
+        { fail "setup: cherry-pick reproduced the same SHA, so ancestry would answer"; return; }
+    git -C "$REPO" push -q origin main
+    git -C "$REPO" fetch -q origin
+
+    local out; out=$(run_sweep "$(bead b-11 "$sha" main "$sha")" main)
+    [ ! -s "$TMP/create.log" ] ||
+        { fail "reported a retraction for content still present on the target: $(cat "$TMP/create.log")"; return; }
+    grep -q 'equiv=1' <<<"$out" ||
+        { fail "a proven merge surviving a rewrite was not resolved by the ladder: $out"; return; }
+    pass "a rewritten target does not manufacture merge-retracted findings"
+}
+
 test_landed_work_files_nothing
 test_unmerged_work_files_a_merge_gap
 test_retracted_merge_is_reported_distinctly
 test_stale_local_ref_is_never_judged_against
 test_sweep_is_read_only_and_always_exits_zero
 test_recent_close_is_left_for_the_next_sweep
+test_cherry_picked_work_is_resolved_by_patch_id
+test_ported_work_is_resolved_by_symbol_fingerprint
+test_absent_work_files_quoting_the_content_evidence
+test_preexisting_identifier_is_not_evidence_of_landing
+test_unresolvable_commit_is_unprobeable_not_unmerged
+test_rewritten_target_does_not_manufacture_retractions
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]
