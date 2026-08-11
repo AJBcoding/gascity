@@ -47,6 +47,24 @@ gate_fd=""
 gate_label="${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}:${mode}"
 if ! push_gate_acquire_slot "$gate_slot_dir" gate_fd "$gate_label"; then
   echo "push-gate: giving up after the wait bound; rerun once a slot frees, or set GC_PUSH_GATE_NO_CAP=1 to bypass this cap for one invocation" >&2
+  # Escalation reporting (gas-mnpr gap 3): the refusal itself is local and
+  # fail-closed — this exit 75 on the waiter's own clock IS the mechanism,
+  # because escalation mail drops silently under exactly the load that causes
+  # timeouts (gas-5nr0), so nothing here may depend on delivery. Mail is only
+  # how a human learns starvation RECURS: best-effort, never blocking, and a
+  # send failure is visible on stderr but changes nothing. The target
+  # defaults to this rig's witness; PUSH_GATE_ESCALATION_MAILTO overrides it,
+  # and setting it empty disables the report entirely.
+  escalation_mailto="${PUSH_GATE_ESCALATION_MAILTO-}"
+  if [[ -z "${PUSH_GATE_ESCALATION_MAILTO+set}" && -n "${GC_AGENT:-}" && "${GC_AGENT}" == */* ]]; then
+    escalation_mailto="${GC_AGENT%%/*}/witness"
+  fi
+  if [[ -n "$escalation_mailto" ]] && command -v gc >/dev/null 2>&1; then
+    gc mail send "$escalation_mailto" \
+      -s "push-gate admission timed out: ${gate_label} (mode ${mode}) on $(hostname 2>/dev/null || echo unknown-host)" \
+      -m "A heavy-suite invocation gave up after its admission wait bound and refused with exit 75. Holder and queue diagnostics are in the invoking agent's log. One of these is contention working as designed; a recurrence pattern means host admission needs attention (gas-mnpr)." \
+      >/dev/null 2>&1 || echo "push-gate: witness escalation mail failed (non-blocking)" >&2
+  fi
   exit 75
 fi
 trap 'push_gate_release_slot "$gate_fd"' EXIT

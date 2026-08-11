@@ -291,8 +291,15 @@ assert_true "wiring.has_override"  grep -q 'GC_PUSH_GATE_NO_CAP'   "$LOCAL_PARAL
 
 acq_line="$(grep -n 'push_gate_acquire_slot ' "$LOCAL_PARALLEL" | head -1 | cut -d: -f1)"
 if [[ -n "$acq_line" ]]; then
-    LOSER_BLOCK="$(sed -n "${acq_line},$((acq_line + 10))p" "$LOCAL_PARALLEL")"
+    LOSER_BLOCK="$(sed -n "${acq_line},$((acq_line + 25))p" "$LOCAL_PARALLEL")"
     assert_contains "wiring.timeout_exits_75" "$LOSER_BLOCK" "exit 75"
+    # gas-mnpr gap 3: the timeout path reports to the witness, best-effort.
+    # The mail must sit INSIDE the acquire-failure block (before its exit 75),
+    # be non-blocking (a send failure only prints), and be disableable via
+    # PUSH_GATE_ESCALATION_MAILTO. Nothing may make exit 75 depend on it.
+    assert_contains "wiring.timeout_reports_to_witness" "$LOSER_BLOCK" "gc mail send"
+    assert_contains "wiring.escalation_is_overridable" "$LOSER_BLOCK" "PUSH_GATE_ESCALATION_MAILTO"
+    assert_contains "wiring.escalation_send_nonblocking" "$LOSER_BLOCK" '|| echo "push-gate: witness escalation mail failed (non-blocking)"'
 else
     record_fail "wiring.timeout_exits_75" "no push_gate_acquire_slot call found in $LOCAL_PARALLEL"
 fi
