@@ -11,6 +11,19 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 )
 
+// unregisteredTestBackend is the name every fixture in this package uses to
+// mean "a backend this build does not register".
+//
+// It is a constant so the fixtures and the assertions that read their refusals
+// cannot drift apart, and so retiring or adding a backend is a one-line change
+// here rather than a hunt through nine files. "sqlite" is not arbitrary: it is
+// what TestScopeBackendEnvRefusalEnumeratesRegisteredBackends already used, and
+// it is unregistered both today (dolt, doltlite, mysql, postgres) and after
+// gas-1oou retires postgres. Naming a backend the lane registers is what broke
+// this whole family (gas-9iy7, gas-wawv); requireUnregisteredBackend now makes
+// that a loud, self-describing failure instead of a confusing one.
+const unregisteredTestBackend = "sqlite"
+
 // requireUnregisteredBackend fails the test when backend is one this build
 // registers, enforcing the precondition every caller here depends on.
 //
@@ -60,7 +73,7 @@ func writeUnregisteredBackendScope(t *testing.T, backend string) string {
 // subprocess, which would then resolve a store from whatever the parent process
 // happened to be carrying.
 func TestScopeBackendEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
-	cityPath := writeUnregisteredBackendScope(t, "sqlite")
+	cityPath := writeUnregisteredBackendScope(t, unregisteredTestBackend)
 
 	env := map[string]string{}
 	used, err := applyCanonicalScopeBackendEnv(env, cityPath, cityPath)
@@ -81,7 +94,7 @@ func TestScopeBackendEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
 	if regErr != nil {
 		t.Fatal(regErr)
 	}
-	if !strings.Contains(err.Error(), `"sqlite"`) {
+	if !strings.Contains(err.Error(), `"`+unregisteredTestBackend+`"`) {
 		t.Errorf("refusal %q does not name the backend", err)
 	}
 	for _, name := range registered {
@@ -98,7 +111,7 @@ func TestScopeBackendEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
 // second projection entry point — the one an inherited-city scope takes — which
 // has its own switch and therefore its own chance to fall through silently.
 func TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends(t *testing.T) {
-	cityPath := writeUnregisteredBackendScope(t, "sqlite")
+	cityPath := writeUnregisteredBackendScope(t, unregisteredTestBackend)
 
 	env := map[string]string{}
 	used, err := applyCityStorageBindingEnv(env, cityPath)
@@ -114,7 +127,7 @@ func TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends(t *testing.T) 
 	if len(env) != 0 {
 		t.Fatalf("a refused projection left %d env keys behind: %v", len(env), env)
 	}
-	if !strings.Contains(err.Error(), `"sqlite"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
+	if !strings.Contains(err.Error(), `"`+unregisteredTestBackend+`"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
 		t.Errorf("refusal %q must name the backend and state the data-safety guarantee", err)
 	}
 }
@@ -128,7 +141,7 @@ func TestCityStorageBindingEnvRefusalEnumeratesRegisteredBackends(t *testing.T) 
 // Dolt endpoint left over in the city's config for a city gc just refused to
 // classify, with bd in that session writing there.
 func TestInheritedRigSessionEnvRefusesUnregisteredCityBackend(t *testing.T) {
-	requireUnregisteredBackend(t, "sqlite")
+	requireUnregisteredBackend(t, unregisteredTestBackend)
 	cityPath := t.TempDir()
 	rigDir := filepath.Join(cityPath, "rigs", "fe")
 	for _, dir := range []string{cityPath, rigDir} {
@@ -147,7 +160,7 @@ dolt.auto-start: false
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"sqlite"}`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityPath, ".beads", "metadata.json"), []byte(`{"database":"beads","backend":"`+unregisteredTestBackend+`"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: fe
@@ -173,7 +186,7 @@ dolt.auto-start: false
 	if !errors.Is(err, contract.ErrUnknownBackend) {
 		t.Fatalf("refusal = %v, want it to wrap ErrUnknownBackend", err)
 	}
-	if !strings.Contains(err.Error(), `"sqlite"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
+	if !strings.Contains(err.Error(), `"`+unregisteredTestBackend+`"`) || !strings.Contains(err.Error(), contract.BackendNotOpenedGuarantee) {
 		t.Errorf("refusal %q must name the backend and state the data-safety guarantee", err)
 	}
 	for _, key := range []string{"GC_DOLT_HOST", "GC_DOLT_PORT", "BEADS_DOLT_SERVER_HOST", "BEADS_DOLT_SERVER_PORT"} {
