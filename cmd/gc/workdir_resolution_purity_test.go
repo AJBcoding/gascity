@@ -97,3 +97,35 @@ func TestPrepareTemplateResolutionLeavesNoEmptyWorkDir(t *testing.T) {
 			"it must not create a directory it does not write into (gas-m7h)", workDir, err)
 	}
 }
+
+// TestResolveTemplateDoesNotMaterializeWorkDir closes the last tick-frequency
+// husk vector (gas-oax3). resolveTemplate runs on every reconcile tick for
+// every DESIRED session — including ones that are never created, because a
+// create budget capped them or the agent is draining — so materializing during
+// resolution minted a directory per tick for sessions that never ran.
+//
+// Creation moved to the session-create path (internal/session: createStarted
+// and the reconciler's ensureRunning bridges), which is reached only when a
+// session is actually about to run in the directory.
+func TestResolveTemplateDoesNotMaterializeWorkDir(t *testing.T) {
+	cityDir, cfg := poolWorkDirCity(t)
+	bp := newAgentBuildParams("test-city", cityDir, cfg, runtime.NewFake(), time.Now().UTC(), nil, io.Discard)
+	cfgAgent := &cfg.Agents[0]
+
+	// Without this the assertion below could hold vacuously: a resolveTemplate
+	// that failed early would never reach the work_dir step at all.
+	params, err := resolveTemplate(bp, cfgAgent, "myrig/polecat", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate must succeed or this test proves nothing: %v", err)
+	}
+
+	want := filepath.Join(cityDir, ".gc", "worktrees", "myrig", "polecats", "polecat")
+	if params.WorkDir != want {
+		t.Fatalf("resolveTemplate WorkDir = %q, want %q; the value must still be resolved, only its materialization moved", params.WorkDir, want)
+	}
+	if _, err := os.Stat(want); !os.IsNotExist(err) {
+		t.Fatalf("resolveTemplate materialized the agent work_dir %q (stat err=%v); "+
+			"it runs every tick for every desired session, so creating here mints a husk "+
+			"for sessions that are never started (gas-oax3)", want, err)
+	}
+}

@@ -164,7 +164,13 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 
 	// Step 3: Expand dir template.
 	dirCtx := sessionSetupContextForAgent(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
-	workDir, err := resolveConfiguredWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
+	// Path-only. resolveTemplate runs every reconcile tick for every DESIRED
+	// session, including ones that are never created (create-budget caps,
+	// drains), so materializing here minted a directory per tick for sessions
+	// that never ran — the last tick-frequency husk vector (gas-oax3).
+	// Creation now belongs to the session-create path, which is reached only
+	// when a session is actually about to run in the directory.
+	workDir, err := resolveConfiguredWorkDirPath(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}

@@ -386,6 +386,12 @@ func (m *Manager) ensureRunning(ctx context.Context, id string, b beads.Bead, se
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
+	// The reconciler starts sessions the create path only queued, so this is a
+	// spawn point in its own right and owes the cwd the providers never create
+	// (gas-oax3). work_dir arrives from bead metadata, which records the path
+	// but guarantees nothing about this host being able to create it — so this
+	// must not be the reason a session fails to wake.
+	materializeWorkDirBestEffort(cfg.WorkDir, m.diskStderr)
 	started := false
 	// Refuse to resume if a prior escaped process for this session could not be
 	// confirmed dead: a survivor would race this replacement for the same work
@@ -507,6 +513,10 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, id string, b bea
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": provider})
 	}
 	cfg = runtime.SyncWorkDirEnv(cfg)
+	// Respawn bridge: same reasoning as ensureRunning — the reconciler is a
+	// spawn point, the providers never create the cwd, and a path this host
+	// cannot create must not silently stop respawns (gas-oax3).
+	materializeWorkDirBestEffort(cfg.WorkDir, m.diskStderr)
 	started := false
 	// Refuse to respawn if a prior escaped process for this session could not
 	// be confirmed dead: a survivor would race this replacement for the same
