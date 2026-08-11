@@ -828,20 +828,72 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 	if mode == nudgeDeliveryWaitIdle && !result.Delivered {
 		return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, stdout, stderr)
 	}
+	// The transport accepted the send. That is NOT delivery: herdr's `agent
+	// prompt` returns ok in ~0.5ms (acceptance, not submission) and tmux's
+	// send-keys succeeds regardless of what the TUI does with the keys. Printing
+	// "Nudged" here is what let a stand-down order sit unread in an input box
+	// while its sender read it as delivered (gas-jfy6, gas-q4jk).
+	confirmation := confirmNudgeDelivery(sp, target, message)
+	outcome, delivered := "delivered", true
+	switch {
+	case confirmation.Confirmed:
+	case confirmation.Probed:
+		outcome, delivered = "unconfirmed", false
+	default:
+		outcome, delivered = "sent_unconfirmed", false
+	}
+
 	if jsonOutput {
 		return writeCLIJSONLineOrExit(stdout, stderr, "gc session nudge", sessionNudgeJSON{
 			SchemaVersion: "1",
-			OK:            true,
+			OK:            delivered,
 			Target:        target.agentKey(),
 			SessionID:     target.sessionID,
 			SessionName:   target.sessionName,
 			Delivery:      string(mode),
 			Queued:        false,
-			Outcome:       "delivered",
+			Outcome:       outcome,
 		})
 	}
-	fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
-	return 0
+
+	switch outcome {
+	case "delivered":
+		fmt.Fprintf(stdout, "Nudged %s\n", target.agentKey()) //nolint:errcheck
+		return 0
+	case "unconfirmed":
+		// Fails closed: no word here may assert delivery, and the exit code has
+		// to carry it too, because callers branch on the status rather than
+		// reading the prose.
+		fmt.Fprintf(stderr, "gc session nudge: NOT DELIVERED to %s — the message is still sitting unsubmitted in its input box (%s). It is armed: the next submit in that session will fire it into whatever context is current. Use 'gc session submit %s' to flush it, or clear the box first.\n",
+			target.agentKey(), confirmation.Observed, target.agentKey()) //nolint:errcheck
+		return 1
+	default:
+		fmt.Fprintf(stdout, "Sent to %s — delivery NOT CONFIRMED (this transport has no delivery probe)\n", target.agentKey()) //nolint:errcheck
+		return 0
+	}
+}
+
+// nudgeConfirmWindow bounds the delivery probe. A submit drains the composer
+// within a frame or two, so this is generous; it is a ceiling on how long gc
+// waits before reporting honestly, not a retry budget.
+const nudgeConfirmWindow = 3 * time.Second
+
+// confirmNudgeDelivery asks the transport whether the payload actually entered
+// the conversation. A transport with no probe yields the zero value, which reads
+// as neither probed nor confirmed — never as delivered.
+func confirmNudgeDelivery(sp runtime.Provider, target nudgeTarget, message string) runtime.DeliveryConfirmation {
+	confirmer, ok := sp.(runtime.DeliveryConfirmer)
+	if !ok {
+		return runtime.DeliveryConfirmation{}
+	}
+	confirmation, err := confirmer.ConfirmDelivery(target.sessionName, message, nudgeConfirmWindow)
+	if err != nil {
+		// A probe failure is not a stranding and not a delivery. Report it as
+		// unprobed so the caller says "could not confirm" rather than inventing
+		// either verdict.
+		return runtime.DeliveryConfirmation{}
+	}
+	return confirmation
 }
 
 func shouldQueueManagedNudgeWake(target nudgeTarget, store beads.Store, sp runtime.Provider) (bool, error) {

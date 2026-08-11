@@ -1029,3 +1029,16 @@ func copyPath(src, dst string) error {
 	}
 	return os.WriteFile(dst, b, info.Mode().Perm())
 }
+
+// ConfirmDelivery implements runtime.DeliveryConfirmer.
+//
+// herdr's `agent prompt` returns outcome=ok in roughly half a millisecond — far
+// too fast to have typed the text, let the TUI settle, and delivered Enter. That
+// ok is ACCEPTANCE of the request, not confirmation of submission (gas-jfy6), so
+// the only honest confirmation is to look at the screen and see the composer
+// drained.
+func (p *Provider) ConfirmDelivery(name, sent string, within time.Duration) (runtime.DeliveryConfirmation, error) {
+	return runtime.ConfirmViaPeek(func(lines int) (string, error) {
+		return p.Peek(name, lines)
+	}, sent, within)
+}

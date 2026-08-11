@@ -1658,3 +1658,14 @@ func writePromptToDir(dir, agentName, raw string) (string, error) {
 	}
 	return f.Name(), nil
 }
+
+// ConfirmDelivery implements runtime.DeliveryConfirmer.
+//
+// send-keys succeeds regardless of what the TUI does with the keys, so a nil
+// error says nothing about whether the payload entered the conversation
+// (gas-q4jk). Reading the composer is the only transport-blind-proof answer.
+func (p *Provider) ConfirmDelivery(name, sent string, within time.Duration) (runtime.DeliveryConfirmation, error) {
+	return runtime.ConfirmViaPeek(func(lines int) (string, error) {
+		return p.Peek(name, lines)
+	}, sent, within)
+}
