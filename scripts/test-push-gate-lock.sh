@@ -314,6 +314,41 @@ else
         "close at line '${close_line:-none}', fan-out at line '${fanout_line:-none}'"
 fi
 
+# ---------------- memory-headroom admission (gas-mnpr gap 1) ----------------
+# Deterministic via the PUSH_GATE_FAKE_FREE_MEM_MB seam: a numeric value
+# replaces the probe, the literal 'fail' simulates an unprobeable host. Both
+# admit and block directions are asserted THROUGH the seam, so a seam the lib
+# ignores cannot pass these silently (the block direction would admit).
+MEMSLOTS="$WORK/mem-slots"
+mem_case() { # <fake> <floor> -> runs acquire in a clean process, echoes "rc=<n> out=<stderr>"
+    local out rc
+    out="$(PUSH_GATE_FAKE_FREE_MEM_MB="$1" PUSH_GATE_MIN_FREE_MEM_MB="$2" \
+        PUSH_GATE_MAX_WAIT_SECONDS=1 PUSH_GATE_POLL_SECONDS=1 PUSH_GATE_MAX_CONCURRENT=2 \
+        bash -c '. "$1"; fd=""; push_gate_acquire_slot "$2" fd mem-case' _ "$LIB" "$MEMSLOTS" 2>&1)"
+    rc=$?
+    printf 'rc=%s out=%s\n' "$rc" "$out"
+}
+
+MEM_RES="$(mem_case 512 4096)"
+assert_contains "mem.blocked_below_floor_times_out" "$MEM_RES" "rc=1"
+assert_contains "mem.blocked_message_names_memory" "$MEM_RES" "free memory"
+
+MEM_RES="$(mem_case 8192 4096)"
+assert_contains "mem.admitted_at_headroom" "$MEM_RES" "rc=0"
+
+MEM_RES="$(mem_case 1 0)"
+assert_contains "mem.floor_zero_disables" "$MEM_RES" "rc=0"
+
+MEM_RES="$(mem_case fail 99999)"
+assert_contains "mem.probe_failure_fails_open" "$MEM_RES" "rc=0"
+assert_contains "mem.probe_failure_diagnostic" "$MEM_RES" "probe"
+
+# Malformed floor falls back to the documented default (6144), which a
+# starved fake must still block against — proving the default is applied
+# rather than the check silently disabling.
+MEM_RES="$(mem_case 100 banana)"
+assert_contains "mem.malformed_floor_uses_default" "$MEM_RES" "rc=1"
+
 echo
 echo "push-gate-lock tests: $pass passed, $fail failed"
 [[ "$fail" -eq 0 ]]

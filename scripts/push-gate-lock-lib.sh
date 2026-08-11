@@ -100,11 +100,22 @@
 #       per-worktree `.git` file that cannot hold a directory
 #       (NFR4 fallback, never /tmp — see AGENTS.md Build Cache Conventions).
 #       Does not create the directory (push_gate_acquire_slot does).
+#   push_gate_free_mem_mb
+#       Print available memory in MiB (Linux MemAvailable; macOS free +
+#       inactive pages). Returns 1 with no output when the host cannot be
+#       measured. PUSH_GATE_FAKE_FREE_MEM_MB is the selftest seam — numeric
+#       replaces the probe, 'fail' simulates an unprobeable host.
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
 #       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 2),
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
-#       (default 15); each is validated and falls back to its default on a
-#       malformed value. holder_label defaults to
+#       (default 15), PUSH_GATE_MIN_FREE_MEM_MB (default 6144 — one measured
+#       ~2.3 GiB single-gate envelope with its 1.9 GiB single-process heavy
+#       tail, doubled with margin; 0 disables the headroom check); each is
+#       validated and falls back to its default on a malformed value.
+#       Admission requires BOTH a free slot and that much free memory —
+#       insufficient headroom waits and times out exactly like slot
+#       contention, while an unmeasurable host fails open with a
+#       diagnostic. holder_label defaults to
 #       ${GC_SESSION_NAME:-${GC_AGENT:-${GC_TEMPLATE:-unknown}}}. If the slot
 #       dir cannot be created (e.g. an unwritable parent), degrades the same
 #       way as a missing flock(1): diagnostic to stderr, empty fd, return 0
@@ -252,6 +263,44 @@ _push_gate_tunable() {
     printf '%s\n' "$_pgt_value"
 }
 
+# Print available memory in MiB: MemAvailable on Linux (/proc/meminfo),
+# free+inactive pages on macOS (vm_stat). PUSH_GATE_FAKE_FREE_MEM_MB is the
+# selftest seam: a numeric value replaces the probe entirely and the literal
+# 'fail' simulates an unprobeable host — the selftest asserts BOTH the admit
+# and the block direction through it, so a seam this function ignored could
+# not pass silently. Prints nothing and returns 1 when the host cannot be
+# measured; the admission caller fails OPEN on that, matching the pre-push
+# disk preflight's contract that a check which cannot measure the host must
+# never be why a gate stops working.
+push_gate_free_mem_mb() {
+    local _pgm_fake="${PUSH_GATE_FAKE_FREE_MEM_MB:-}"
+    if [[ -n "$_pgm_fake" ]]; then
+        if [[ "$_pgm_fake" =~ ^[0-9]+$ ]]; then
+            printf '%s\n' "$_pgm_fake"
+            return 0
+        fi
+        return 1
+    fi
+    if [[ -r /proc/meminfo ]]; then
+        local _pgm_kb
+        _pgm_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null)"
+        [[ "$_pgm_kb" =~ ^[0-9]+$ ]] || return 1
+        printf '%s\n' $(( _pgm_kb / 1024 ))
+        return 0
+    fi
+    if command -v vm_stat >/dev/null 2>&1; then
+        local _pgm_out _pgm_page _pgm_free _pgm_inactive
+        _pgm_out="$(vm_stat 2>/dev/null)" || return 1
+        _pgm_page="$(printf '%s\n' "$_pgm_out" | sed -n 's/.*page size of \([0-9][0-9]*\) bytes.*/\1/p' | head -n 1)"
+        _pgm_free="$(printf '%s\n' "$_pgm_out" | awk -F': *' '/^Pages free/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
+        _pgm_inactive="$(printf '%s\n' "$_pgm_out" | awk -F': *' '/^Pages inactive/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
+        [[ "$_pgm_page" =~ ^[0-9]+$ && "$_pgm_free" =~ ^[0-9]+$ && "$_pgm_inactive" =~ ^[0-9]+$ ]] || return 1
+        printf '%s\n' $(( (_pgm_free + _pgm_inactive) * _pgm_page / 1024 / 1024 ))
+        return 0
+    fi
+    return 1
+}
+
 # Acquire one of PUSH_GATE_MAX_CONCURRENT slots, polling with a bounded wait
 # on contention. See header for the full contract.
 push_gate_acquire_slot() {
@@ -277,10 +326,11 @@ push_gate_acquire_slot() {
         return 0
     fi
 
-    local _pgl_max _pgl_max_wait _pgl_poll
+    local _pgl_max _pgl_max_wait _pgl_poll _pgl_min_free
     _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
     _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
     _pgl_poll="$(_push_gate_tunable PUSH_GATE_POLL_SECONDS 15 1)"
+    _pgl_min_free="$(_push_gate_tunable PUSH_GATE_MIN_FREE_MEM_MB 6144 0)"
     local _pgl_host
     _pgl_host="$(hostname 2>/dev/null || echo unknown)"
 
@@ -296,36 +346,69 @@ push_gate_acquire_slot() {
     fi
 
     local _pgl_i _pgl_slot _pgl_fd _pgl_announced=0 _pgl_start=0
+    local _pgl_free_now="" _pgl_mem_blocked=0 _pgl_mem_warned=0
 
     while :; do
-        for (( _pgl_i = 0; _pgl_i < _pgl_max; _pgl_i++ )); do
-            _pgl_slot="$_pgl_slot_dir/slot-${_pgl_i}.lock"
-            _pgl_fd=$(( PUSH_GATE_FD_BASE + _pgl_i ))
-            if _push_gate_fd_in_use "$_pgl_fd"; then
-                continue
-            fi
-            eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
-            if flock -n "$_pgl_fd"; then
-                printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
-                eval "$_pgl_fd_var=\$_pgl_fd"
-                if [[ "$_pgl_announced" -eq 1 ]]; then
-                    echo "push-gate: slot-${_pgl_i} acquired after wait" >&2
+        # Memory-headroom admission (gas-mnpr): admitting a gate onto a
+        # starved host converts slot capacity into thrash — the measured
+        # single-gate envelope is ~2.3 GiB summed RSS with a 1.9 GiB
+        # single-process tail, on a host whose free RAM swings between
+        # 38 MB and 4 GB under load, and the incident box was 50% idle on
+        # CPU while it thrashed, so a count- or CPU-based rule admits
+        # straight into the failure. Insufficient headroom is treated
+        # exactly like every slot being busy: same announce-once, same
+        # bounded wait, same return 1. An unmeasurable host fails OPEN
+        # with one diagnostic.
+        _pgl_mem_blocked=0
+        if [[ "$_pgl_min_free" -gt 0 ]]; then
+            if _pgl_free_now="$(push_gate_free_mem_mb)"; then
+                if [[ "$_pgl_free_now" -lt "$_pgl_min_free" ]]; then
+                    _pgl_mem_blocked=1
                 fi
-                return 0
+            elif [[ "$_pgl_mem_warned" -eq 0 ]]; then
+                _pgl_mem_warned=1
+                echo "push-gate: free-memory probe unavailable — admitting without a headroom check" >&2
             fi
-            eval "exec ${_pgl_fd}>&-" || true
-        done
+        fi
+
+        if [[ "$_pgl_mem_blocked" -eq 0 ]]; then
+            for (( _pgl_i = 0; _pgl_i < _pgl_max; _pgl_i++ )); do
+                _pgl_slot="$_pgl_slot_dir/slot-${_pgl_i}.lock"
+                _pgl_fd=$(( PUSH_GATE_FD_BASE + _pgl_i ))
+                if _push_gate_fd_in_use "$_pgl_fd"; then
+                    continue
+                fi
+                eval "exec ${_pgl_fd}<>\"\$_pgl_slot\"" || continue
+                if flock -n "$_pgl_fd"; then
+                    printf '%s %s %s %s\n' "$$" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$_pgl_label" "$_pgl_host" >"$_pgl_slot" 2>/dev/null || true
+                    eval "$_pgl_fd_var=\$_pgl_fd"
+                    if [[ "$_pgl_announced" -eq 1 ]]; then
+                        echo "push-gate: slot-${_pgl_i} acquired after wait" >&2
+                    fi
+                    return 0
+                fi
+                eval "exec ${_pgl_fd}>&-" || true
+            done
+        fi
 
         if [[ "$_pgl_announced" -eq 0 ]]; then
             _pgl_announced=1
             _pgl_start="$(date +%s)"
-            echo "push-gate: all $_pgl_max slot(s) busy, waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s):" >&2
-            push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            if [[ "$_pgl_mem_blocked" -eq 1 ]]; then
+                echo "push-gate: low free memory (${_pgl_free_now} MiB < floor ${_pgl_min_free} MiB), waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s; PUSH_GATE_MIN_FREE_MEM_MB=0 disables)" >&2
+            else
+                echo "push-gate: all $_pgl_max slot(s) busy, waiting up to ${_pgl_max_wait}s (checking every ${_pgl_poll}s):" >&2
+                push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            fi
         fi
 
         if (( $(date +%s) - _pgl_start >= _pgl_max_wait )); then
-            echo "push-gate: timed out after ${_pgl_max_wait}s waiting for a free slot" >&2
-            push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            if [[ "$_pgl_mem_blocked" -eq 1 ]]; then
+                echo "push-gate: timed out after ${_pgl_max_wait}s waiting for free memory (${_pgl_free_now} MiB < floor ${_pgl_min_free} MiB; PUSH_GATE_MIN_FREE_MEM_MB=0 disables)" >&2
+            else
+                echo "push-gate: timed out after ${_pgl_max_wait}s waiting for a free slot" >&2
+                push_gate_describe_slots "$_pgl_slot_dir" "$_pgl_max" >&2
+            fi
             return 1
         fi
 
