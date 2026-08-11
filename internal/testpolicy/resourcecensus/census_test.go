@@ -1988,16 +1988,20 @@ func TestBootstrapPolicyOwnsListenerHelperDebt(t *testing.T) {
 func TestBootstrapPolicyOwnsNetListenDebtAndExactMediumOwners(t *testing.T) {
 	t.Parallel()
 
-	// Call baselines rebased to the gas-to2q merged tree (was 95 / 93); the
+	// Call baselines measured on the gas-to2q merged tree (was 95 / 93). The
 	// file counts and the reported_* regex totals are unchanged, so the growth
-	// is added calls in files this scope already tracked, not new surface.
+	// is one added call in files this scope already tracked, not new surface.
+	//
+	// These were briefly pinned at 119 / 117. That was a measurement taken while
+	// the merge conflict resolution was still in flight and never re-taken; the
+	// committed tree has always measured 96 / 94. Re-baselined in gas-i2po.
 	debt := findRow(t, bootstrapPolicy.Debt, ScopeUntagged, ResourceNetListen)
-	if debt.BaselineCalls != 119 || debt.BaselineFiles != 36 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
-		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 119/36, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
+	if debt.BaselineCalls != 96 || debt.BaselineFiles != 36 || debt.ReportedCalls != 92 || debt.ReportedFiles != 34 {
+		t.Fatalf("stream-listener source baseline/reported = %d/%d, %d/%d; want 96/36, 92/34", debt.BaselineCalls, debt.BaselineFiles, debt.ReportedCalls, debt.ReportedFiles)
 	}
 	smallDebt := findRow(t, bootstrapPolicy.SmallDebt, ScopeUntagged, ResourceNetListen)
-	if smallDebt.BaselineCalls != 117 || smallDebt.BaselineFiles != 35 {
-		t.Fatalf("stream-listener Small baseline = %d/%d, want 117/35", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
+	if smallDebt.BaselineCalls != 94 || smallDebt.BaselineFiles != 35 {
+		t.Fatalf("stream-listener Small baseline = %d/%d, want 94/35", smallDebt.BaselineCalls, smallDebt.BaselineFiles)
 	}
 	for _, row := range []*Baseline{debt, smallDebt} {
 		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
@@ -2030,12 +2034,17 @@ func TestBootstrapPolicyOwnsNetListenConfigDebt(t *testing.T) {
 	t.Parallel()
 
 	for _, rows := range [][]Baseline{bootstrapPolicy.Debt, bootstrapPolicy.SmallDebt} {
-		// 3/1 after the gas-to2q upstream merge: this scope's only ListenConfig
-		// file is census_test.go's own scanner fixtures, and the merge unions
-		// both lanes' fixture sets into it. Each side measured 1/1 alone.
+		// 1/1, unchanged by the gas-to2q upstream merge: this scope's only
+		// ListenConfig file is census_test.go's own scanner fixtures, and both
+		// sides measured 1/1 — so does the merged tree.
+		//
+		// This was briefly pinned at 3/1 on the rationale that the merge unions
+		// both lanes' fixture sets. That rationale was invented to explain a
+		// number taken from a mid-resolution measurement; the union never
+		// happened and the committed tree has always measured 1/1. gas-i2po.
 		row := findRow(t, rows, ScopeUntagged, ResourceNetListenConfig)
-		if row.BaselineCalls != 3 || row.BaselineFiles != 1 {
-			t.Fatalf("net.ListenConfig listener baseline = %d/%d, want 3/1", row.BaselineCalls, row.BaselineFiles)
+		if row.BaselineCalls != 1 || row.BaselineFiles != 1 {
+			t.Fatalf("net.ListenConfig listener baseline = %d/%d, want 1/1", row.BaselineCalls, row.BaselineFiles)
 		}
 		if row.OwnerBead != "ga-80po0c.2.2.2" || row.MigrationTarget != "P0.4c-listener" {
 			t.Fatalf("net.ListenConfig listener owner = %q/%q, want ga-80po0c.2.2.2/P0.4c-listener", row.OwnerBead, row.MigrationTarget)

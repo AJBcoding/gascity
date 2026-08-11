@@ -10,7 +10,7 @@ version = 2
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 681
+baseline_calls = 617
 baseline_files = 176
 reported_calls = 495
 reported_files = 135
@@ -23,7 +23,7 @@ expires = "2026-10-01"
 [[audit_baseline]]
 scope = "all"
 resource = "fixed_sleep"
-baseline_calls = 449
+baseline_calls = 437
 baseline_files = 162
 reported_calls = 447
 reported_files = 157
@@ -51,7 +51,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 485
+baseline_calls = 421
 baseline_files = 120
 reported_calls = 380
 reported_files = 98
@@ -64,7 +64,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 299
+baseline_calls = 287
 baseline_files = 115
 reported_calls = 295
 reported_files = 114
@@ -77,7 +77,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 128
+baseline_calls = 122
 baseline_files = 13
 reported_calls = 3960
 reported_files = 184
@@ -142,7 +142,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 119
+baseline_calls = 96
 baseline_files = 36
 reported_calls = 92
 reported_files = 34
@@ -155,7 +155,7 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "net_listen_config"
-baseline_calls = 3
+baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1
@@ -355,7 +355,7 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 478
+baseline_calls = 414
 baseline_files = 116
 reported_calls = 394
 reported_files = 105
@@ -368,7 +368,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "fixed_sleep"
-baseline_calls = 299
+baseline_calls = 287
 baseline_files = 115
 reported_calls = 287
 reported_files = 113
@@ -381,7 +381,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "cmd/gc+untagged"
 resource = "environment"
-baseline_calls = 122
+baseline_calls = 116
 baseline_files = 13
 reported_calls = 4348
 reported_files = 200
@@ -446,7 +446,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen"
-baseline_calls = 117
+baseline_calls = 94
 baseline_files = 35
 reported_calls = 92
 reported_files = 34
@@ -459,7 +459,7 @@ expires = "2026-10-01"
 [[small_debt]]
 scope = "untagged"
 resource = "net_listen_config"
-baseline_calls = 3
+baseline_calls = 1
 baseline_files = 1
 reported_calls = 1
 reported_files = 1

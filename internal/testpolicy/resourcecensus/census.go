@@ -123,7 +123,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeAll,
 			Resource:      ResourceSubprocess,
-			BaselineCalls: 681, BaselineFiles: 176, ReportedCalls: 495,
+			BaselineCalls: 617, BaselineFiles: 176, ReportedCalls: 495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
 			Invariant:       "tracked test source totals remain visible as audit evidence",
@@ -134,7 +134,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeAll,
 			Resource:      ResourceFixedSleep,
-			BaselineCalls: 449, BaselineFiles: 162, ReportedCalls: 447,
+			BaselineCalls: 437, BaselineFiles: 162, ReportedCalls: 447,
 			ReportedFiles:   157,
 			OwnerBead:       "ga-80po0c.2",
 			Invariant:       "tracked test source totals remain visible as audit evidence",
@@ -160,7 +160,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceSubprocess,
-			BaselineCalls: 485, BaselineFiles: 120, ReportedCalls: 380,
+			BaselineCalls: 421, BaselineFiles: 120, ReportedCalls: 380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
 			Invariant:       "untagged subprocess call/file totals cannot grow; reductions must lower this baseline",
@@ -171,7 +171,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceFixedSleep,
-			BaselineCalls: 299, BaselineFiles: 115, ReportedCalls: 295,
+			BaselineCalls: 287, BaselineFiles: 115, ReportedCalls: 295,
 			ReportedFiles:   114,
 			OwnerBead:       "ga-80po0c.2",
 			Invariant:       "untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline",
@@ -182,7 +182,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeCmdGCUntagged,
 			Resource:      ResourceEnvironment,
-			BaselineCalls: 128, BaselineFiles: 13,
+			BaselineCalls: 122, BaselineFiles: 13,
 			ReportedCalls:   3960,
 			ReportedFiles:   184,
 			OwnerBead:       "ga-80po0c.2.3",
@@ -246,7 +246,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceNetListen,
-			BaselineCalls: 119, BaselineFiles: 36,
+			BaselineCalls: 96, BaselineFiles: 36,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -258,7 +258,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceNetListenConfig,
-			BaselineCalls: 3, BaselineFiles: 1,
+			BaselineCalls: 1, BaselineFiles: 1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -453,7 +453,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceSubprocess,
-			BaselineCalls: 478, BaselineFiles: 116, ReportedCalls: 394,
+			BaselineCalls: 414, BaselineFiles: 116, ReportedCalls: 394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline",
@@ -464,7 +464,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceFixedSleep,
-			BaselineCalls: 299, BaselineFiles: 115, ReportedCalls: 287,
+			BaselineCalls: 287, BaselineFiles: 115, ReportedCalls: 287,
 			ReportedFiles:   113,
 			OwnerBead:       "ga-80po0c.2.1",
 			Invariant:       "untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline",
@@ -475,7 +475,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeCmdGCUntagged,
 			Resource:      ResourceEnvironment,
-			BaselineCalls: 122, BaselineFiles: 13,
+			BaselineCalls: 116, BaselineFiles: 13,
 			ReportedCalls:   4348,
 			ReportedFiles:   200,
 			OwnerBead:       "ga-80po0c.2.1",
@@ -539,7 +539,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceNetListen,
-			BaselineCalls: 117, BaselineFiles: 35,
+			BaselineCalls: 94, BaselineFiles: 35,
 			ReportedCalls:   92,
 			ReportedFiles:   34,
 			OwnerBead:       "ga-80po0c.2.2.2",
@@ -551,7 +551,7 @@ var bootstrapPolicy = Ledger{
 		{
 			Scope:         ScopeUntagged,
 			Resource:      ResourceNetListenConfig,
-			BaselineCalls: 3, BaselineFiles: 1,
+			BaselineCalls: 1, BaselineFiles: 1,
 			ReportedCalls:   1,
 			ReportedFiles:   1,
 			OwnerBead:       "ga-80po0c.2.2.2",
