@@ -141,7 +141,7 @@ func (c *orphanCPUCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 
 	res.Details = []string{
 		"These processes were reparented to PID 1, so their parent is gone and no session,",
-		"bead, or worktree check will ever account for them. They are burning CPU right now:",
+		"bead, or worktree check will ever account for them:",
 	}
 	for _, p := range burners {
 		res.Details = append(res.Details, fmt.Sprintf("  PID %d  %.1f%% avg  up %s  %s",
