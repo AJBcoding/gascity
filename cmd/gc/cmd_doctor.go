@@ -295,6 +295,11 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// (gc -> bd.real -> dolt) that operators routinely misread as CPU saturation.
 	// Advisory + read-only (/proc/stat); no config needed.
 	register(newForkRateCheck())
+	// Host-level orphan watch: processes reparented to init are owned by no
+	// session, so no witness, reaper, or salvage rule accounts for them. Four
+	// leaked busy loops burned 3.2 cores for 11h26m unnoticed (gas-7ipo).
+	// Advisory + read-only (one `ps`); it names PIDs and never signals them.
+	register(newOrphanCPUCheck())
 	// Managed Dolt ops checks (PR 3). Size + config drift are only
 	// meaningful when the workspace uses the managed bd/Dolt backend; rigs
 	// can inherit the city-managed server even when the city itself is not a
