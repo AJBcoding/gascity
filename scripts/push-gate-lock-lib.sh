@@ -122,10 +122,17 @@
 #   push_gate_acquire_slot <slot_dir> <fd_out_var> [holder_label]
 #       Reads tunables from env: PUSH_GATE_MAX_CONCURRENT (default 2),
 #       PUSH_GATE_MAX_WAIT_SECONDS (default 600), PUSH_GATE_POLL_SECONDS
-#       (default 15), PUSH_GATE_MIN_FREE_MEM_MB (default 6144 — one measured
-#       ~2.3 GiB single-gate envelope with its 1.9 GiB single-process heavy
-#       tail, doubled with margin; 0 disables the headroom check); each is
-#       validated and falls back to its default on a malformed value.
+#       (default 15), PUSH_GATE_MIN_FREE_MEM_MB (default 2304 — the measured
+#       ~2.3 GiB single-gate envelope, covering its 1.9 GiB single-process
+#       heavy tail; 0 disables the headroom check); each is validated and
+#       falls back to its default on a malformed value. The floor tracks the
+#       probe: it was 6144, the envelope doubled with margin, because
+#       push_gate_free_mem_mb reported a number inflated by swap-backed
+#       inactive pages. Now that the probe reports only memory obtainable
+#       without paging (gas-k5kh), the honest floor is the envelope itself —
+#       keeping 6144 against the corrected probe would have blocked every
+#       gate on a host that routinely sits near 2 GiB, converting a check
+#       that admitted too much into one that admits nothing.
 #       Admission requires BOTH a free slot and that much free memory —
 #       insufficient headroom waits and times out exactly like slot
 #       contention, while an unmeasurable host fails open with a
@@ -229,10 +236,40 @@ push_gate_slots_dir() {
     return 1
 }
 
+# Sum %CPU across a pid and all its descendants (gas-k5kh). Prints one
+# decimal, or nothing with return 1 when the pid is not in the process table.
+#
+# The whole tree, not the holder alone: the slot holder is the gate's shell,
+# which sleeps at ~0% while its `go`/compile/link children do the work, so a
+# holder-only reading would label every healthy gate wedged. The occupant
+# chain is the signal — a measured wedged run had its `go` parent at 0.0% and
+# its test-binary child at 0.0% together, while a progressing one shows the
+# children's CPU summed into the parent's line.
+_push_gate_tree_cpu() {
+    local _pgt_root="$1"
+    [[ "$_pgt_root" =~ ^[0-9]+$ ]] || return 1
+    ps -eo pid=,ppid=,%cpu= 2>/dev/null | awk -v root="$_pgt_root" '
+        { ppid[$1] = $2; cpu[$1] = $3 }
+        END {
+            if (!(root in cpu)) exit 1
+            want[root] = 1
+            changed = 1
+            while (changed) {
+                changed = 0
+                for (p in ppid) {
+                    if (!(p in want) && (ppid[p] in want)) { want[p] = 1; changed = 1 }
+                }
+            }
+            total = 0
+            for (p in want) if (p in cpu) total += cpu[p]
+            printf "%.1f", total
+        }' 2>/dev/null
+}
+
 # Print one diagnostic line per currently-occupied slot.
 push_gate_describe_slots() {
     local _pgd_dir="$1" _pgd_max="$2"
-    local _pgd_i _pgd_slot _pgd_line _pgd_pid
+    local _pgd_i _pgd_slot _pgd_line _pgd_pid _pgd_cpu _pgd_etime
     for (( _pgd_i = 0; _pgd_i < _pgd_max; _pgd_i++ )); do
         _pgd_slot="$_pgd_dir/slot-${_pgd_i}.lock"
         [[ -f "$_pgd_slot" ]] || continue
@@ -251,6 +288,18 @@ push_gate_describe_slots() {
         _pgd_pid="${_pgd_line%% *}"
         if [[ "$_pgd_pid" =~ ^[0-9]+$ ]] && ! kill -0 "$_pgd_pid" 2>/dev/null; then
             _pgd_line="$_pgd_line (holder pid dead — likely a leaked descendant)"
+        elif [[ "$_pgd_pid" =~ ^[0-9]+$ ]]; then
+            # Liveness, not just presence (gas-k5kh): occupancy alone reads the
+            # same for a gate that is progressing and one wedged at 0.0%, which
+            # is how two agents came to wait out a full 600s bound behind a run
+            # that could no longer produce a verdict anyone would use. Report
+            # the measured numbers and stop there — no threshold, no verdict,
+            # nothing here decides what they mean.
+            _pgd_cpu="$(_push_gate_tree_cpu "$_pgd_pid")" || _pgd_cpu=""
+            _pgd_etime="$(ps -o etime= -p "$_pgd_pid" 2>/dev/null | tr -d '[:space:]')"
+            if [[ -n "$_pgd_cpu" ]]; then
+                _pgd_line="$_pgd_line (tree ${_pgd_cpu}% CPU${_pgd_etime:+, ${_pgd_etime} elapsed})"
+            fi
         fi
         printf '  slot-%s: %s\n' "$_pgd_i" "$_pgd_line"
     done
@@ -277,15 +326,38 @@ _push_gate_tunable() {
     printf '%s\n' "$_pgt_value"
 }
 
-# Print available memory in MiB: MemAvailable on Linux (/proc/meminfo),
-# free+inactive pages on macOS (vm_stat). PUSH_GATE_FAKE_FREE_MEM_MB is the
-# selftest seam: a numeric value replaces the probe entirely and the literal
-# 'fail' simulates an unprobeable host — the selftest asserts BOTH the admit
-# and the block direction through it, so a seam this function ignored could
-# not pass silently. Prints nothing and returns 1 when the host cannot be
-# measured; the admission caller fails OPEN on that, matching the pre-push
-# disk preflight's contract that a check which cannot measure the host must
-# never be why a gate stops working.
+# Print available memory in MiB: MemAvailable on Linux (/proc/meminfo, or
+# PUSH_GATE_MEMINFO), free+speculative+purgeable pages on macOS (vm_stat).
+#
+# WHY NOT free+inactive (gas-k5kh)
+#   `inactive` is swap-backed, so counting it as available means planning to
+#   reclaim it by paging — which is the thrash the admission check exists to
+#   prevent. On a measured host (2026-08-09, reproduced 2026-08-11) the two
+#   formulas disagreed by 8x on the same box at the same instant:
+#       free+inactive        17493 MiB   <- what this used to report
+#       free+spec+purgeable   2129 MiB   <- what could be had without paging
+#   with swap 20856/22016 MiB (94.7%) full. The optimistic figure cleared a
+#   6144 MiB floor with room to spare and green-lit gate after gate onto a
+#   wedged box; one such admitted run ground for 63 minutes and could only
+#   ever have produced a false red. macOS's own signals are no better —
+#   `memory_pressure` called the same host "68% free".
+#
+#   Page classes the host does not report degrade to 0 rather than failing the
+#   probe: under-reporting errs toward waiting, and waiting is the safe
+#   direction here because an unmeasurable host fails OPEN and admits.
+#
+# PUSH_GATE_FAKE_FREE_MEM_MB is the selftest seam: a numeric value replaces
+# the probe entirely and the literal 'fail' simulates an unprobeable host —
+# the selftest asserts BOTH the admit and the block direction through it, so a
+# seam this function ignored could not pass silently. Because that seam
+# replaces the whole probe, it cannot cover the formula above; PUSH_GATE_MEMINFO
+# redirects the Linux read so the selftest can reach the vm_stat branch on any
+# platform (mirroring GC_TEST_LOCAL_MEMINFO in scripts/test-local-job-count).
+#
+# Prints nothing and returns 1 when the host cannot be measured; the admission
+# caller fails OPEN on that, matching the pre-push disk preflight's contract
+# that a check which cannot measure the host must never be why a gate stops
+# working.
 push_gate_free_mem_mb() {
     local _pgm_fake="${PUSH_GATE_FAKE_FREE_MEM_MB:-}"
     if [[ -n "$_pgm_fake" ]]; then
@@ -295,21 +367,27 @@ push_gate_free_mem_mb() {
         fi
         return 1
     fi
-    if [[ -r /proc/meminfo ]]; then
+    local _pgm_meminfo="${PUSH_GATE_MEMINFO:-/proc/meminfo}"
+    if [[ -r "$_pgm_meminfo" ]]; then
         local _pgm_kb
-        _pgm_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null)"
+        _pgm_kb="$(awk '/^MemAvailable:/ {print $2; exit}' "$_pgm_meminfo" 2>/dev/null)"
         [[ "$_pgm_kb" =~ ^[0-9]+$ ]] || return 1
         printf '%s\n' $(( _pgm_kb / 1024 ))
         return 0
     fi
     if command -v vm_stat >/dev/null 2>&1; then
-        local _pgm_out _pgm_page _pgm_free _pgm_inactive
+        local _pgm_out _pgm_page _pgm_free _pgm_spec _pgm_purge
         _pgm_out="$(vm_stat 2>/dev/null)" || return 1
         _pgm_page="$(printf '%s\n' "$_pgm_out" | sed -n 's/.*page size of \([0-9][0-9]*\) bytes.*/\1/p' | head -n 1)"
         _pgm_free="$(printf '%s\n' "$_pgm_out" | awk -F': *' '/^Pages free/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
-        _pgm_inactive="$(printf '%s\n' "$_pgm_out" | awk -F': *' '/^Pages inactive/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
-        [[ "$_pgm_page" =~ ^[0-9]+$ && "$_pgm_free" =~ ^[0-9]+$ && "$_pgm_inactive" =~ ^[0-9]+$ ]] || return 1
-        printf '%s\n' $(( (_pgm_free + _pgm_inactive) * _pgm_page / 1024 / 1024 ))
+        _pgm_spec="$(printf '%s\n' "$_pgm_out" | awk -F': *' '/^Pages speculative/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
+        _pgm_purge="$(printf '%s\n' "$_pgm_out" | awk -F': *' '/^Pages purgeable/ {gsub(/[^0-9]/, "", $2); print $2; exit}')"
+        # free and the page size are the probe; the other two classes are
+        # additive refinements a host may omit.
+        [[ "$_pgm_page" =~ ^[0-9]+$ && "$_pgm_free" =~ ^[0-9]+$ ]] || return 1
+        [[ "$_pgm_spec" =~ ^[0-9]+$ ]] || _pgm_spec=0
+        [[ "$_pgm_purge" =~ ^[0-9]+$ ]] || _pgm_purge=0
+        printf '%s\n' $(( (_pgm_free + _pgm_spec + _pgm_purge) * _pgm_page / 1024 / 1024 ))
         return 0
     fi
     return 1
@@ -408,7 +486,7 @@ push_gate_acquire_slot() {
     _pgl_max="$(_push_gate_tunable PUSH_GATE_MAX_CONCURRENT 2 1)"
     _pgl_max_wait="$(_push_gate_tunable PUSH_GATE_MAX_WAIT_SECONDS 600 0)"
     _pgl_poll="$(_push_gate_tunable PUSH_GATE_POLL_SECONDS 15 1)"
-    _pgl_min_free="$(_push_gate_tunable PUSH_GATE_MIN_FREE_MEM_MB 6144 0)"
+    _pgl_min_free="$(_push_gate_tunable PUSH_GATE_MIN_FREE_MEM_MB 2304 0)"
     local _pgl_host
     _pgl_host="$(hostname 2>/dev/null || echo unknown)"
 

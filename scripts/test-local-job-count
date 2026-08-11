@@ -128,13 +128,17 @@ detect_memory_kib() {
     fi
   fi
 
-  # macOS: measure actually-available memory (free+inactive pages) through
-  # the probe the push-gate admission check uses, so sizing and admission
-  # agree on one number. Sizing from total RAM picks the same job count at
-  # load 100 as at idle (gas-cebv; measured 2026-08-10: 11 jobs x 4 GiB
-  # budget = 44 GiB against 14.5 GiB actually available — a constant ~3x
-  # over-commit by construction, and the memory holders are compile/link
-  # processes with a measured 1.9 GiB single-process tail).
+  # macOS: measure actually-available memory (free+speculative+purgeable
+  # pages) through the probe the push-gate admission check uses, so sizing and
+  # admission agree on one number. Sizing from total RAM picks the same job
+  # count at load 100 as at idle (gas-cebv; measured 2026-08-10: 11 jobs x
+  # 4 GiB budget = 44 GiB against 14.5 GiB actually available — a constant
+  # ~3x over-commit by construction, and the memory holders are compile/link
+  # processes with a measured 1.9 GiB single-process tail). That 14.5 GiB was
+  # itself read off the pre-gas-k5kh probe, which counted swap-backed
+  # inactive pages; against the corrected probe the same host measured
+  # ~2 GiB, so the real over-commit was several times worse than ~3x and the
+  # count this produces on a loaded macOS host drops accordingly.
   if [[ "$best" -eq 0 ]]; then
     candidate="$(push_gate_free_mem_mb 2>/dev/null || true)"
     if [[ "$candidate" =~ ^[0-9]+$ && "$candidate" -gt 0 ]]; then

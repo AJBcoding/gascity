@@ -949,6 +949,44 @@ already lists as required; if it is absent the run proceeds uncapped with a
 warning rather than blocking. `GC_PUSH_GATE_NO_CAP=1` bypasses the cap
 entirely for one invocation.
 
+Admission needs both a free slot **and** `PUSH_GATE_MIN_FREE_MEM_MB` (default
+2304) MiB of free memory, because a free slot on a thrashing host is capacity
+in name only. Insufficient headroom waits and times out exactly like slot
+contention; a host that cannot be measured at all fails open with a
+diagnostic, and `PUSH_GATE_MIN_FREE_MEM_MB=0` disables the check.
+
+"Free" here means memory obtainable **without paging**: `MemAvailable` on
+Linux, and `free + speculative + purgeable` pages on macOS. It deliberately
+excludes macOS's `inactive` pages, which are swap-backed — counting them means
+planning to reclaim by paging, which is the thrash the check exists to
+prevent. The two formulas are not close. On one measured host (gas-k5kh,
+2026-08-09, reproduced 2026-08-11) at a single instant:
+
+| figure | MiB |
+|---|---|
+| `free + inactive` (what the probe reported before) | 17493 |
+| `free + speculative + purgeable` (what it reports now) | 2129 |
+
+with swap 94.7% full. macOS's own summaries are no better — `memory_pressure`
+called that host "68% free". The optimistic figure cleared the floor easily
+and admitted gate after gate onto a wedged box; one admitted run ground for
+63 minutes and could only ever have produced a false red. The floor moved
+from 6144 to 2304 in the same change: 6144 was the ~2.3 GiB single-gate
+envelope doubled with margin *because the probe over-reported*, and holding it
+against an honest probe would have blocked every gate on a host that normally
+sits near 2 GiB — trading a check that admitted too much for one that admits
+nothing.
+
+Slot holder lines carry liveness, not just presence: `tree N.N% CPU, MM:SS
+elapsed`, summed across the holder's whole process tree (the holder is the
+gate's shell, which idles while its `go`/compile/link children work, so a
+holder-only reading would call every healthy gate wedged). The line reports
+the measured numbers and draws no conclusion from them — nothing in the script
+decides what "wedged" means. This exists because occupancy alone reads
+identically for a gate that is progressing and one that has stalled, which is
+how two agents came to wait out a full 600s bound behind a run that could no
+longer produce a verdict anyone would use.
+
 The slot mechanics are covered by `scripts/test-push-gate-lock.sh`, run
 directly as the `push-gate-lock-selftest` job inside `test-local-parallel`
 itself (`fast` and `full` modes) rather than through a `go test` trampoline.
