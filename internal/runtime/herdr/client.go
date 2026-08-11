@@ -68,6 +68,28 @@ type envelope struct {
 	Error  *herdrError     `json:"error"`
 }
 
+// stderrError converts a failed invocation's stderr into an error. herdr
+// reports its OWN failures as a non-zero exit with the JSON error envelope on
+// stderr and nothing on stdout (measured against 0.7.5: agent get, pane
+// process-info and agent start all do this), so the typed *herdrError has to be
+// recovered here — the envelope-on-stdout path below is only reached by verbs
+// that succeed, which makes it unreachable for a herdr-reported error. Wrapping
+// with %w is what lets herdrErrorCode see the code; without it every caller that
+// branches on a code silently takes its failure path (Start's agent_pane_busy
+// retry breaks on attempt 0, resolveAgentNameTaken never adopts a live holder).
+// Stderr that is not an envelope — an unknown verb exits 2 with a usage string —
+// stays untyped with its text intact rather than being given an invented code.
+func stderrError(args []string, stderr []byte) error {
+	trimmed := strings.TrimSpace(string(stderr))
+	if strings.HasPrefix(trimmed, "{") {
+		var env envelope
+		if jerr := json.Unmarshal([]byte(trimmed), &env); jerr == nil && env.Error != nil {
+			return fmt.Errorf("herdr %v: %w", args, env.Error)
+		}
+	}
+	return fmt.Errorf("herdr %v: %s", args, stderr)
+}
+
 // run executes `herdr --session <session> <args…>` and returns the result
 // payload, or an error (transport failure or herdr-reported error).
 func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, error) {
@@ -76,7 +98,7 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+			return nil, stderrError(args, ee.Stderr)
 		}
 		return nil, fmt.Errorf("herdr %v: %w", args, err)
 	}
@@ -189,7 +211,7 @@ func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	if err != nil {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+			return "", stderrError(args, ee.Stderr)
 		}
 		return "", fmt.Errorf("herdr %v: %w", args, err)
 	}
