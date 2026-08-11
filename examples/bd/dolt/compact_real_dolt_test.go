@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -50,7 +51,28 @@ func TestCompactScriptRealDoltRemotePush(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sh", filepath.Join(root, "commands", "compact", "run.sh"))
-	cmd.Env = append(filteredEnv(
+	// gas-2jc: without this, a cancelled run wedges cmd.Wait indefinitely. The
+	// script leaves live dolt grandchildren holding the inherited stdout/stderr
+	// pipes, and Wait blocks until those pipes reach EOF — observed at ~7
+	// minutes under load, long past the 60s deadline above. WaitDelay bounds the
+	// post-exit I/O wait; Setpgid plus a process-group Cancel reaps the
+	// grandchildren instead of orphaning them to starve the host.
+	//
+	// Same shape as lsofOutputWithTimeout in cmd/gc/dolt_process_inspection.go,
+	// with a longer delay: that call reads a few lines, this one captures a full
+	// compaction log, and a 100ms delay could truncate a healthy run's output.
+	cmd.WaitDelay = 5 * time.Second
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
+			return err
+		}
+		return nil
+	}
+	cmd.Env = append(doltChildEnv(
 		"PATH",
 		"GC_CITY_PATH",
 		"GC_PACK_DIR",
@@ -174,7 +196,7 @@ func waitForDoltServerQueryForCompactTest(t *testing.T, doltPath string, port in
 			"--use-db", "beads",
 			"sql", "-q", "SELECT 1",
 		)
-		cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=")
+		cmd.Env = append(doltChildEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=")
 		lastOut, lastErr = cmd.CombinedOutput()
 		cancel()
 		if lastErr == nil {
@@ -207,7 +229,7 @@ func doltServerHeadForCompactTest(t *testing.T, doltPath string, port int) strin
 		"--use-db", "beads",
 		"sql", "-r", "csv", "-q", "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1",
 	)
-	cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=")
+	cmd.Env = append(doltChildEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=")
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("query server HEAD: %v\n%s", err, out)
