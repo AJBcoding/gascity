@@ -43,12 +43,17 @@ Send mail to the mayor:
 
 ```shell
 ~/my-city
-$ gc mail send mayor -s "Review needed" -m "Please look at the auth module changes in my-project"
+$ gc mail send mayor --from human -s "Review needed" -m "Please look at the auth module changes in my-project"
 Sent message mc-msg-8t8 to mayor
 ```
 
 `gc mail send` takes the recipient as a positional argument and the subject/body
 via `-s`/`-m` flags. (You can also pass just `<to> <body>` with no subject.)
+
+An agent is identified by the session it runs in, so it sends without naming
+itself. Your terminal has no session, so you name yourself with `--from human`.
+Mail refuses to send rather than guess an identity, because `human` is the
+authority the rest of the city reads your decisions from.
 
 Mail does not create wake demand by itself. Add `--notify` to request a turn for
 the recipient even when earlier mail is still unread. In a managed city, that

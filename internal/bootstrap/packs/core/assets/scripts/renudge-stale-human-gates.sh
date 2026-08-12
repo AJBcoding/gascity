@@ -223,7 +223,7 @@ Resolve with: gc bd gate resolve $gate_id"
 
         # Loud-fail: record the re-nudge only on a delivered send, so an
         # undeliverable one surfaces and retries next sweep.
-        if gc mail send "$ADDRESSEE" -s "$SUBJECT" -m "$BODY" --notify >/dev/null 2>&1; then
+        if gc mail send "$ADDRESSEE" --from controller -s "$SUBJECT" -m "$BODY" --notify >/dev/null 2>&1; then
             STATE="$(echo "$STATE" | jq --arg k "$gate_id" --arg now "$NOW_ISO" '.[$k] = $now')"
             write_state
             RENUDGED=$((RENUDGED + 1))

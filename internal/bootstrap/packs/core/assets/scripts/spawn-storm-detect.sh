@@ -57,6 +57,7 @@ while IFS= read -r bead_id; do
         TITLE_JSON=$(gc bd show "$bead_id" --json 2>/dev/null || true)
         TITLE=$(echo "$TITLE_JSON" | jq -r 'if type == "array" then (.[0].title // "unknown") else "unknown" end' 2>/dev/null || echo "unknown")
         gc mail send mayor/ \
+            --from controller \
             -s "SPAWN_STORM: bead $bead_id reset ${NEW}x" \
             -m "Bead $bead_id ($TITLE) has been reset to pool $NEW times (threshold: $THRESHOLD).
 This likely indicates a polecat crash loop on this specific work.
