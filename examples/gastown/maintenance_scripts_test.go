@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -10448,11 +10449,24 @@ func TestPruneBranchesNoOpWhenNoGcBranches(t *testing.T) {
 const wispTimestampLayout = "2006-01-02T15:04:05"
 
 // wispCompactEnv installs a `bd` stub that returns the supplied beadsJSON on
-// `bd list --json --all -n 0` and logs all other bd subcommands to BD_LOG.
-// BD_LOG is pre-created empty so skip-path tests can still assert on its
-// (empty) contents. TZ=UTC is pinned for cross-platform date parsing — see
-// wispTimestampLayout. jq is whatever is on PATH.
+// `bd list --include-infra --json --all -n 0` for the HQ scope, and logs all
+// other bd subcommands to BD_LOG. `gc rig list` returns nothing, so the sweep
+// covers the HQ scope only. BD_LOG is pre-created empty so skip-path tests can
+// still assert on its (empty) contents. TZ=UTC is pinned for cross-platform
+// date parsing — see wispTimestampLayout. jq is whatever is on PATH.
 func wispCompactEnv(t *testing.T, beadsJSON string) (bdLog string, env map[string]string) {
+	t.Helper()
+	return wispCompactEnvForScopes(t, "", map[string]string{"": beadsJSON})
+}
+
+// wispCompactEnvForScopes is wispCompactEnv with a per-scope bead ledger:
+// beadsByScope maps a rig name to the JSON `bd list` returns when invoked with
+// `--rig <name>`, with the empty key holding the HQ (no --rig) store. rigsJSON
+// is what `gc rig list --json` returns; empty means a city with no rigs.
+//
+// This is what makes the rig-store gap testable: before gas-0urx the script
+// issued exactly one bare `bd list`, so every scope but HQ went unswept.
+func wispCompactEnvForScopes(t *testing.T, rigsJSON string, beadsByScope map[string]string) (bdLog string, env map[string]string) {
 	t.Helper()
 	binDir := t.TempDir()
 	bdLog = filepath.Join(t.TempDir(), "bd.log")
@@ -10460,26 +10474,56 @@ func wispCompactEnv(t *testing.T, beadsJSON string) (bdLog string, env map[strin
 		t.Fatalf("WriteFile(bd log): %v", err)
 	}
 
+	// Dispatch `bd list` on the --rig value so each scope gets its own ledger.
+	// Scopes are emitted in sorted order purely for a stable stub.
+	scopes := make([]string, 0, len(beadsByScope))
+	for scope := range beadsByScope {
+		scopes = append(scopes, scope)
+	}
+	sort.Strings(scopes)
+	var scopeCases strings.Builder
+	for _, scope := range scopes {
+		pattern := scope
+		if pattern == "" {
+			pattern = `""`
+		}
+		fmt.Fprintf(&scopeCases, `  %s)
+    cat <<'EOF'
+%s
+EOF
+    ;;
+`, pattern, beadsByScope[scope])
+	}
+
 	stubPath := filepath.Join(binDir, "bd")
 	// Stub fails fast on any subcommand or flag shape the script doesn't
 	// currently use. This pins the script's bd contract — a regression that
-	// dropped `--json` or `--all` from `bd list` would otherwise silently
-	// pass because cat would still emit valid JSON.
+	// dropped `--json`, `--all`, or `--include-infra` from `bd list` would
+	// otherwise silently pass because cat would still emit valid JSON.
+	// `--include-infra` is load-bearing: wisps are infrastructure beads and
+	// `bd list` hides them without it, which made the whole sweep a no-op.
 	writeExecutable(t, stubPath, fmt.Sprintf(`#!/bin/sh
+scope=""
+prev=""
+for arg in "$@"; do
+  if [ "$prev" = "--rig" ]; then scope="$arg"; fi
+  prev="$arg"
+done
 case "$1" in
   list)
     case "$*" in
-      *"--json"*"--all"*"-n 0"*)
-        cat <<'EOF'
-%s
-EOF
-        exit 0
-        ;;
+      *"--include-infra"*"--json"*"--all"*"-n 0"*) ;;
       *)
         echo "bd list called with unexpected args: $*" >&2
         exit 2
         ;;
     esac
+    case "$scope" in
+%s      *)
+        printf '[]\n'
+        ;;
+    esac
+    exit 0
     ;;
   update|comment|delete)
     printf '%%s\n' "$*" >> "$BD_LOG"
@@ -10490,8 +10534,21 @@ EOF
     exit 2
     ;;
 esac
-`, beadsJSON))
-	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), "#!/bin/sh\nexit 0\n")
+`, scopeCases.String()))
+
+	gcBody := "#!/bin/sh\nexit 0\n"
+	if rigsJSON != "" {
+		gcBody = fmt.Sprintf(`#!/bin/sh
+if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
+  cat <<'EOF'
+%s
+EOF
+  exit 0
+fi
+exit 0
+`, rigsJSON)
+	}
+	writeMaintenanceGCStub(t, filepath.Join(binDir, "gc"), gcBody)
 
 	env = map[string]string{
 		"BD_LOG":       bdLog,
@@ -10834,7 +10891,7 @@ func TestWispCompactReportsNonZeroCounters(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$BD_LOG"
 case "$1 $2" in
-  "list --json")
+  "list --include-infra")
     cat <<'JSON'
 %s
 JSON
@@ -10863,7 +10920,7 @@ exit 0
 	if err != nil {
 		t.Fatalf("ReadFile(bd log): %v", err)
 	}
-	if !strings.Contains(string(logData), "list --json --all -n 0") {
+	if !strings.Contains(string(logData), "list --include-infra --json --all -n 0") {
 		t.Fatalf("bd list call not observed:\n%s", logData)
 	}
 
@@ -10887,7 +10944,7 @@ func TestWispCompactBSDDateZFallbackUsesUTC(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$BD_LOG"
 case "$1 $2" in
-  "list --json")
+  "list --include-infra")
     cat <<'JSON'
 %s
 JSON
@@ -10953,6 +11010,90 @@ exit 1
 	}
 	if !strings.Contains(string(bdData), "update ga-heartbeat --persistent") {
 		t.Fatalf("expected expired heartbeat to be promoted, got bd calls:\n%s", bdData)
+	}
+}
+
+// A bare `gc bd` resolves to the HQ/city store, so before gas-0urx the sweep
+// saw one store out of fourteen and rig wisps were never TTL-compacted —
+// measured at 8 leaked patrol wisps aged 19h-475h across 5 rigs, each one
+// looking to the deacon's starvation check like an agent holding work forever.
+// Every write has to carry the same --rig as the read that found the bead;
+// an unscoped `bd delete` would resolve to HQ and act on the wrong store.
+func TestWispCompactSweepsEveryRigStore(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	bead := func(id string) string {
+		return fmt.Sprintf(`[
+  {"id":%q,"status":"closed","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, id, pastTTL)
+	}
+	// The hq=true entry must be skipped: `gc rig list` reports the city root as
+	// a pseudo-rig that `gc --rig <cityName>` cannot resolve, and its store is
+	// what the bare HQ scope already sweeps.
+	rigs := `{"rigs":[{"name":"kit","hq":false},{"name":"python419","hq":false},{"name":"anthony","hq":true}]}`
+
+	bdLog, env := wispCompactEnvForScopes(t, rigs, map[string]string{
+		"":          bead("az-old"),
+		"kit":       bead("kit-old"),
+		"python419": bead("py-old"),
+	})
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	for _, want := range []string{
+		"delete az-old --force",
+		"delete kit-old --rig kit --force",
+		"delete py-old --rig python419 --force",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("expected %q in bd calls; rig stores must be swept with their own scope:\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "--rig anthony") {
+		t.Fatalf("hq pseudo-rig must not be swept as a rig; bd calls:\n%s", s)
+	}
+}
+
+// Stuck detection promotes a non-closed wisp past TTL so a stalled molecule
+// stays visible. Mail is not stalled work, and promoting it turns the mail
+// spool into permanent beads: the first correctly-scoped sweep of the HQ store
+// would have promoted 37 unread messages, the oldest 48 days old (gas-6uf3).
+func TestWispCompactSkipsUnreadMailPastTTL(t *testing.T) {
+	pastTTL := time.Now().Add(-48 * time.Hour).UTC().Format(wispTimestampLayout)
+	beads := fmt.Sprintf(`[
+  {"id":"az-mail","status":"open","issue_type":"message","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"az-mail-read","status":"closed","issue_type":"message","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]},
+  {"id":"az-mail-engaged","status":"open","issue_type":"message","ephemeral":true,"updated_at":%q,"comment_count":2,"labels":[]},
+  {"id":"az-stuck-mol","status":"in_progress","issue_type":"molecule","ephemeral":true,"updated_at":%q,"comment_count":0,"labels":[]}
+]`, pastTTL, pastTTL, pastTTL, pastTTL)
+
+	bdLog, env := wispCompactEnv(t, beads)
+	runScript(t, coreScriptPath("wisp-compact.sh"), env)
+
+	log, err := os.ReadFile(bdLog)
+	if err != nil {
+		t.Fatalf("ReadFile(bd log): %v", err)
+	}
+	s := string(log)
+	for _, banned := range []string{"update az-mail --persistent", "delete az-mail --force"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("unread mail past TTL must be left alone, not %q; bd calls:\n%s", banned, s)
+		}
+	}
+	// Everything the guard does NOT cover still behaves as before: closed mail
+	// is deleted, engaged mail keeps its proven-value promotion, and a stuck
+	// molecule is still promoted.
+	for _, want := range []string{
+		"delete az-mail-read --force",
+		"update az-mail-engaged --persistent",
+		"update az-stuck-mol --persistent",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("expected %q in bd calls:\n%s", want, s)
+		}
 	}
 }
 
