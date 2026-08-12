@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1234,6 +1235,225 @@ func TestGitPublicationRemotesExcludesSameDiskRemotes(t *testing.T) {
 	want := []string{"origin", "upstream"}
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("gitPublicationRemotes = %v, want %v (same-disk remotes must not confer durability)", got, want)
+	}
+}
+
+// TestBoundLandingBranches covers the advisory's truncation arm, which no gate
+// scenario reaches: the containment resolvers only ever produce a handful of
+// branches in a fixture repo, so the bound was never applied.
+//
+// Two properties carry the contract. The FIRST entry must survive truncation —
+// it is the branch the advisory tells the closer to stamp, so dropping it would
+// turn a precise correction into a guess. And the count in the marker must be
+// the number actually dropped: an advisory that says "(+2 more)" while hiding
+// four is worse than one that says nothing.
+func TestBoundLandingBranches(t *testing.T) {
+	branchList := func(n int) []string {
+		branches := make([]string, 0, n)
+		for i := range n {
+			branches = append(branches, fmt.Sprintf("branch-%d", i))
+		}
+		return branches
+	}
+
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{"nil is unchanged", nil, nil},
+		{"under the cap is unchanged", branchList(2), []string{"branch-0", "branch-1"}},
+		{
+			"exactly at the cap keeps every branch and adds no marker",
+			branchList(maxLandingBranches),
+			[]string{"branch-0", "branch-1", "branch-2", "branch-3", "branch-4"},
+		},
+		{
+			"one over the cap truncates and reports one dropped",
+			branchList(maxLandingBranches + 1),
+			[]string{"branch-0", "branch-1", "branch-2", "branch-3", "branch-4", "(+1 more)"},
+		},
+		{
+			"far over the cap reports the true dropped count",
+			branchList(maxLandingBranches + 7),
+			[]string{"branch-0", "branch-1", "branch-2", "branch-3", "branch-4", "(+7 more)"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := boundLandingBranches(tc.in)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("boundLandingBranches(%d branches) = %v, want %v", len(tc.in), got, tc.want)
+			}
+		})
+	}
+}
+
+// TestGitRemoteBranchesContainingBoundsTheAdvisory drives the same bound through
+// the resolver that feeds the advisory, so the cap is proved where it is
+// actually applied and not only on the helper. A commit on the base of many
+// branches is contained in all of them — the shape that produces an unbounded
+// list in a real repo.
+func TestGitRemoteBranchesContainingBoundsTheAdvisory(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+	base := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+
+	// Eight branches all containing the base commit, pushed so they are
+	// remote-tracking refs (only publication remotes are consulted).
+	for i := range 8 {
+		runGit(t, repoDir, "branch", fmt.Sprintf("landed-%d", i), base)
+	}
+	runGit(t, repoDir, "push", "origin", "--all")
+	runGit(t, repoDir, "fetch", "origin")
+
+	got := gitRemoteBranchesContaining(repoDir, base)
+	if len(got) != maxLandingBranches+1 {
+		t.Fatalf("gitRemoteBranchesContaining returned %d entries (%v), want %d branches plus one marker", len(got), got, maxLandingBranches)
+	}
+	if marker := got[len(got)-1]; !strings.HasPrefix(marker, "(+") {
+		t.Fatalf("last entry = %q, want a (+N more) truncation marker", marker)
+	}
+	if got[0] != "main" {
+		t.Errorf("first entry = %q, want the remote default branch %q to sort first even when the list is truncated", got[0], "main")
+	}
+}
+
+// TestRunWorkRecordCloseGateWarnsWithoutBlockingByDefault pins the wrapper's
+// enforcement wiring in the direction the migration depends on. The wrapper is
+// the only place GC_WORK_RECORD_ENFORCE enters the gate — everything below it
+// takes enforce as a parameter — so nothing else can catch this flag being
+// inverted, defaulted the wrong way, or hardcoded.
+//
+// The default matters more than the enforced path it mirrors: the gate ships
+// warn-only so beads predating the typed work record close without breakage,
+// and this bead violates the contract. A wrapper that blocked here would stop
+// every migrating close citywide, which is precisely why enforcement is opt-in.
+// The warning must still be printed — silent tolerance is not the promise.
+func TestRunWorkRecordCloseGateWarnsWithoutBlockingByDefault(t *testing.T) {
+	preFetched := map[string]beads.Bead{
+		"wr-shipped-nocommit": {ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
+	}
+	var stderr strings.Builder
+	t.Setenv(workRecordEnforceEnvVar, "")
+
+	// panicOnGetStore + preFetched keep this on the gate's decision path
+	// without a real store, exactly as the enforced-path test above does.
+	block := runWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, t.TempDir(), t.TempDir(), nil, panicOnGetStore{}, preFetched, &stderr)
+	if block {
+		t.Fatalf("close blocked with enforcement unset; the gate ships warn-only so pre-contract beads still close. stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "work-record gate (warn-only)") {
+		t.Fatalf("stderr = %q, want a warn-only violation; an unenforced gate must still report", got)
+	}
+}
+
+// TestRunWorkRecordCloseGateNeverBlocksOnStoreOpenFailure pins the wrapper's
+// fail-open-on-own-failure rule, the one place in this gate where failing open
+// is correct: when no store is handed in and the gate cannot open one, it has
+// read nothing and knows nothing, so blocking would punish a close for the
+// gate's own broken read.
+//
+// The pre-fetched bead violates the contract under enforcement, so a gate that
+// carried on with a nil store — or treated the open error as a violation —
+// would block here. block=false with empty stderr is the evidence it returned
+// at the open failure instead.
+func TestRunWorkRecordCloseGateNeverBlocksOnStoreOpenFailure(t *testing.T) {
+	preFetched := map[string]beads.Bead{
+		"wr-shipped-nocommit": {ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
+	}
+	// A city configured with a retired beads provider: the open fails hard, for
+	// a reason no fallback and no retry recovers from. Env overrides are cleared
+	// so the on-disk provider is what resolves.
+	cityDir := t.TempDir()
+	cityTOML := "[workspace]\nname = \"gate-open-failure-city\"\nprefix = \"ga\"\n\n[beads]\nprovider = \"coordstore\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	if _, err := openStoreAtForCityWithConfig(cityDir, cityDir, nil); err == nil {
+		t.Fatalf("precondition: opening a store for a retired provider must fail")
+	}
+
+	var stderr strings.Builder
+	t.Setenv(workRecordEnforceEnvVar, "1")
+
+	block := runWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, cityDir, cityDir, nil, nil, preFetched, &stderr)
+	if block {
+		t.Fatalf("close blocked when the gate could not open a store; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("gate wrote %q on its own store-open failure; it must stay silent when it has read nothing", got)
+	}
+}
+
+// TestGitCommitOnRemoteFailsClosedWhenRemotesUnreadable covers the arm that
+// separates "this rig has nowhere to publish" from "this gate cannot tell".
+// gitPublicationRemotes reports nil/nil when the remote table cannot be read at
+// all — a path that is not a repository, a repository the process cannot read —
+// and that is NOT the local-only topology whose durability check is skipped.
+//
+// The two look identical downstream (both yield an empty publication list), and
+// collapsing them is the expensive direction: a gate that answers "durable"
+// because it could not find any remotes certifies delivery it never checked,
+// which is the az-6n75 hole. A false at-risk costs one push; a false durable
+// costs the work.
+func TestGitCommitOnRemoteFailsClosedWhenRemotesUnreadable(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+
+	// Precondition: this commit IS durable when the remote table is readable,
+	// so a false below is attributable to the unreadable table and nothing else.
+	if !gitCommitOnRemote(repoDir, commit) {
+		t.Fatalf("precondition: pushed commit %s must read as durable in a healthy repo", commit)
+	}
+
+	notARepo := filepath.Join(t.TempDir(), "not-a-repo")
+	if err := os.MkdirAll(notARepo, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", notARepo, err)
+	}
+	if _, configured := gitPublicationRemotes(notARepo); configured != nil {
+		t.Fatalf("precondition: gitPublicationRemotes(%s) must report an unreadable remote table as nil", notARepo)
+	}
+	if gitCommitOnRemote(notARepo, commit) {
+		t.Fatalf("gitCommitOnRemote = true where the remote table could not be read; an unverifiable durability claim must fail closed")
+	}
+}
+
+// TestGitPublicationRemotesKeepsUnresolvableRemote pins the other half of the
+// same asymmetry, inside the gas-6tc self-remote filter. The filter excludes a
+// remote only on POSITIVE identification that its URL resolves back into this
+// repository. A remote whose URL resolves to no repository at all has not been
+// identified as self, so it must stay in the publication list and keep the
+// durability rule armed.
+//
+// The fixture is a half-configured remote — a refspec with no URL, the shape a
+// half-finished hand edit of .git/config leaves behind. git resolves such a
+// remote's URL to the remote NAME (`git remote get-url` prints "halfconfigured"
+// and exits 0), which is a bare relative path naming nothing. That is the
+// cheapest real repository shape that reaches the classifier's
+// resolves-to-nothing arm.
+//
+// Excluding it instead would let one malformed remote entry disarm durability
+// silently — the failure the self-remote exclusion was written to close,
+// arriving through a different door.
+func TestGitPublicationRemotesKeepsUnresolvableRemote(t *testing.T) {
+	repoDir := newGateRepo(t, "origin")
+	runGit(t, repoDir, "config", "remote.halfconfigured.fetch", "+refs/heads/*:refs/remotes/halfconfigured/*")
+
+	// Precondition: git reports this remote with its name standing in for the
+	// URL, so the classifier is handed a path that resolves to no repository.
+	if got := strings.TrimSpace(runGit(t, repoDir, "remote", "get-url", "halfconfigured")); got != "halfconfigured" {
+		t.Fatalf("precondition: get-url for the half-configured remote = %q, want the remote name", got)
+	}
+
+	publication, configured := gitPublicationRemotes(repoDir)
+	if strings.Join(configured, ",") != "halfconfigured,origin" {
+		t.Fatalf("configured = %v, want both remotes listed", configured)
+	}
+	if strings.Join(publication, ",") != "halfconfigured,origin" {
+		t.Fatalf("publication = %v, want the unresolvable remote kept; only a remote positively identified as self may be excluded", publication)
 	}
 }
 
