@@ -320,6 +320,17 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 	return claim
 }
 
+// runtimeContractWaiverExpiry is the single expiry shared by every waived
+// runtime.Provider entry. It is deliberately one date: the waivers all cover
+// the same gap (production runtimes with no provider-contract proof) and are
+// owned by one bead, so they should come due together rather than drift.
+//
+// Renewing this date does NOT discharge the obligation — it only buys time,
+// and the whole merge queue goes red the moment it lapses (Validate rejects an
+// expired waiver, and every branch runs that check). Track the real work, which
+// is proving the nine entries under runtimeProviderRunner, on gas-yjm3.
+var runtimeContractWaiverExpiry = time.Date(2026, time.November, 10, 0, 0, 0, 0, time.UTC)
+
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{
 		Constructor: constructor,
@@ -327,7 +338,7 @@ func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 		Disposition: DispositionWaived,
 		Waiver: &Waiver{
 			Owner:   runtimeContractWaiverOwner,
-			Expires: time.Date(2026, time.August, 12, 0, 0, 0, 0, time.UTC),
+			Expires: runtimeContractWaiverExpiry,
 			Reason:  reason,
 		},
 	}
