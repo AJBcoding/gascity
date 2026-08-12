@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
@@ -38,6 +39,15 @@ func TestHoldLabelRoutedToCheck(t *testing.T) {
 		// Excluded by definition: hold:external names a human/out-of-system
 		// dependency, never a routing gap, regardless of gc.routed_to state.
 		{ID: "H-4", Title: "held", Type: "task", Status: "open", Labels: []string{"hold:external"}},
+		// Excluded by definition: hold:none is the release marker left by
+		// `bd set-state <id> hold=none`, so the bead is not held and has no
+		// hold route to have drifted from. Flagging it would make --fix stamp
+		// gc.routed_to="none" — writing a bogus route into the sole persisted
+		// routing key on every released bead (gas-x284).
+		{
+			ID: "H-7", Title: "released", Type: "task", Status: "open", Labels: []string{"hold:none"},
+			Metadata: map[string]string{"gc.routed_to": "polecat"},
+		},
 		// No hold:* label at all — must be ignored even with empty gc.routed_to.
 		{ID: "T-1", Title: "work", Type: "task", Status: "open"},
 		// Generic over label value — must not require any special-casing of
@@ -72,7 +82,7 @@ func TestHoldLabelRoutedToCheck(t *testing.T) {
 			t.Fatalf("details missing %q:\n%s", want, details)
 		}
 	}
-	for _, notWant := range []string{"H-3", "H-4", "T-1"} {
+	for _, notWant := range []string{"H-3", "H-4", "H-7", "T-1"} {
 		if strings.Contains(details, notWant) {
 			t.Fatalf("details should not mention %q:\n%s", notWant, details)
 		}
@@ -121,6 +131,13 @@ func TestHoldLabelRoutedToCheck(t *testing.T) {
 	}
 	if got := h4.Metadata["gc.routed_to"]; got != "" {
 		t.Errorf("H-4 (hold:external) gc.routed_to = %q, want untouched empty", got)
+	}
+	h7, err := cityStore.Get("H-7")
+	if err != nil {
+		t.Fatalf("get H-7: %v", err)
+	}
+	if got := h7.Metadata["gc.routed_to"]; got != "polecat" {
+		t.Errorf("H-7 (hold:none) gc.routed_to = %q, want its live route %q left intact", got, "polecat")
 	}
 	t1, err := cityStore.Get("T-1")
 	if err != nil {
@@ -208,6 +225,29 @@ func TestHoldLabelRoutedToFixReportsListFailures(t *testing.T) {
 	}
 	if got := err.Error(); !strings.Contains(got, "city skipped") || !strings.Contains(got, "listing failed") {
 		t.Fatalf("Fix error = %q, want list failure detail", got)
+	}
+}
+
+// TestHoldLabelValueExemptionsMatchSharedConstants guards the one seam where
+// this check spells a hold value itself rather than importing it: the exempt
+// values are bare suffixes ("none") while beadmeta owns the full label
+// ("hold:none"). If the two ever drift, the check silently resumes flagging
+// released beads and --fix resumes overwriting their routes (gas-x284).
+func TestHoldLabelValueExemptionsMatchSharedConstants(t *testing.T) {
+	if got, want := "hold:"+holdLabelNoneValue, beadmeta.HoldNoneLabel; got != want {
+		t.Fatalf("holdLabelNoneValue builds %q, want beadmeta.HoldNoneLabel %q", got, want)
+	}
+	if _, held := holdLabelValue([]string{beadmeta.HoldNoneLabel}); held {
+		t.Fatalf("holdLabelValue(%q) reported a routing target; the release marker is not a hold", beadmeta.HoldNoneLabel)
+	}
+	if got, held := holdLabelValue([]string{beadmeta.HoldMayorLabel}); !held || got != "mayor" {
+		t.Fatalf("holdLabelValue(%q) = (%q, %v), want (\"mayor\", true)", beadmeta.HoldMayorLabel, got, held)
+	}
+	// A stray release marker must not mask a live hold. set-state swaps the
+	// dimension label, so the two only co-occur if someone hand-added one --
+	// and the exemption must not become a way to silence the check.
+	if got, held := holdLabelValue([]string{beadmeta.HoldNoneLabel, beadmeta.HoldMayorLabel}); !held || got != "mayor" {
+		t.Fatalf("holdLabelValue([none, mayor]) = (%q, %v), want (\"mayor\", true)", got, held)
 	}
 }
 

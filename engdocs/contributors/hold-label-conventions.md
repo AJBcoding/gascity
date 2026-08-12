@@ -1,6 +1,6 @@
 ---
 title: Hold and Blocked Label Conventions
-description: The canonical hold/blocked label taxonomy for this project's own bd tracker — which label to use, when to use status or a dependency edge instead, and what happened to the old ad hoc labels.
+description: The canonical hold/blocked label taxonomy for this project's own bd tracker — which label to use, how to set and clear one so both edges stay audited, when to use status or a dependency edge instead, and what happened to the old ad hoc labels.
 ---
 
 ## Why this exists
@@ -63,6 +63,80 @@ bd set-state <id> hold=external --reason "why, and who/what unblocks it"
 new one, and files an audit event bead. It does **not** touch `status`,
 `owner`, or `metadata` — update those separately (or add a dependency edge)
 if they also need to change.
+
+## Clearing a hold
+
+Releasing a hold is the same kind of write as setting one, so it uses the same
+command. The value is `none`:
+
+```bash
+bd set-state <id> hold=none --reason "what changed, and why it can proceed now"
+```
+
+That removes whatever `hold:` label the bead carried, adds `hold:none`, and
+files the event bead recording the release:
+
+```
+✓ Set hold = none on <id>
+  Previous: external
+  Event: <id>.2          # "State change: hold → none"
+                         # "Changed hold from external to none / Reason: ..."
+```
+
+**Never release a hold with a plain label removal:**
+
+```bash
+bd update <id> --remove-label hold:external   # WRONG — files no event
+```
+
+`bd set-state` files the audit event bead; `--remove-label` does not. The plain
+removal is the same mistake as setting a hold with `bd label add`, and it leaves
+holds audited on the way *in* and unaudited on the way *out*. The event ledger —
+the declared source of truth, of which the label is only a fast lookup cache —
+then drifts permanently from that cache, and drifts in one direction only, so
+"was this bead ever held, and who released it?" becomes unanswerable from the
+ledger alone (`gas-x284`).
+
+### `hold:none` is a release marker, not a third hold value
+
+The two canonical *hold* values are still `hold:mayor` and `hold:external`.
+`hold:none` records the **absence** of a hold, so it does not widen that
+taxonomy and needs no new architecture decision. Keeping it as a visible marker
+rather than a bare deletion is the point: the label cache then agrees with the
+event ledger about what happened, which is exactly what the plain removal breaks.
+
+Code must therefore treat `hold:none` as *not held*:
+
+- It stays out of `beadmeta.DispatchHoldLabels`, so a released bead is ordinary
+  dispatchable work again. Adding it there would starve released beads the same
+  way an unlifted hold does (`gas-kg6`).
+- Consumers that match the `hold:` **prefix** instead of that exact set must
+  exempt it explicitly. `holdLabelValue` in `cmd/gc/doctor_hold_label_routed_to.go`
+  is the live example: without the exemption, `gc doctor --fix` reads `hold:none`
+  as a routing target and backfills `gc.routed_to="none"` over the bead's real
+  route — corrupting the sole persisted routing key on every released bead.
+
+### Clearing a hold does not change the assignment
+
+`bd set-state` never touches `status`, `owner`, `assignee`, or `metadata` —
+setting a hold or clearing one. That is deliberate, and it matches what
+`gas-kg6` settled from the other side: a hold changes what dispatch will
+**serve**, never who **owns** the bead. The dispatch paths filter held beads;
+the assignment stays a real ownership fact throughout, so a parked bead's owner
+never goes invisible to the pool or to crash recovery.
+
+Clearing the hold therefore just restores the bead to its existing assignee —
+the next `gc hook --claim` from that session serves it again.
+
+One case needs a second, deliberate step. If the assignee is gone (pool workers
+mint a new identity on every restart), a cleared bead is owned by a session that
+will never ask for it again: no hold filter hides it, but unassigned pool routing
+will not pick it up either. Release the assignment explicitly:
+
+```bash
+bd set-state <id> hold=none --reason "..."
+bd update <id> --status=open --assignee=""
+```
 
 ## Retired labels
 

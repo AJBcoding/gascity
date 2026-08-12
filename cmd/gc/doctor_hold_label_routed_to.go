@@ -11,9 +11,17 @@ import (
 	"github.com/gastownhall/gascity/internal/doctor"
 )
 
-// holdLabelExternalValue is the one hold:<value> value that never implies a
-// routing gap: it names a human/out-of-system dependency, not an agent.
-const holdLabelExternalValue = "external"
+// holdLabelExternalValue and holdLabelNoneValue are the hold:<value> values
+// that never imply a routing gap. "external" names a human/out-of-system
+// dependency, not an agent. "none" is the release marker beadmeta.HoldNoneLabel
+// leaves behind, so the bead is not held at all and has no hold route it could
+// have drifted from — flagging it would make --fix stamp gc.routed_to="none"
+// over the bead's live route in the sole persisted routing key (ga-eld2x,
+// gas-x284).
+const (
+	holdLabelExternalValue = "external"
+	holdLabelNoneValue     = "none"
+)
 
 // holdLabelRoutedToCheck detects beads carrying a hold:<value> label whose
 // gc.routed_to metadata is missing or does not match <value>. gc.routed_to is
@@ -37,7 +45,7 @@ func (c *holdLabelRoutedToCheck) CanFix() bool { return true }
 func (c *holdLabelRoutedToCheck) WarmupEligible() bool { return false }
 
 // holdLabelValue returns the hold value carried by labels, if any
-// hold:<value> label is present and <value> is not "external".
+// hold:<value> label is present and <value> is neither "external" nor "none".
 func holdLabelValue(labels []string) (string, bool) {
 	for _, l := range labels {
 		val, ok := strings.CutPrefix(l, "hold:")
@@ -45,7 +53,7 @@ func holdLabelValue(labels []string) (string, bool) {
 			continue
 		}
 		val = strings.TrimSpace(val)
-		if val == "" || val == holdLabelExternalValue {
+		if val == "" || val == holdLabelExternalValue || val == holdLabelNoneValue {
 			continue
 		}
 		return val, true
