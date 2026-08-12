@@ -900,11 +900,12 @@ func reservedMailSenderIdentity(identifier string) (string, bool) {
 	}
 }
 
-// defaultMailIdentityCandidates returns ordered non-empty identity candidates
-// (GC_SESSION_ID, GC_ALIAS, GC_AGENT), falling back to ["human"] when all are
-// unset. Multiple candidates preserve compatibility for sessions whose concrete
-// ID is unavailable while still preferring the concrete mailbox when it exists.
-func defaultMailIdentityCandidates() []string {
+// ambientMailIdentityCandidates returns the ordered, de-duplicated identities
+// this process actually carries (GC_SESSION_ID, GC_ALIAS, GC_AGENT). It returns
+// nothing when all are unset and never substitutes a stand-in, so callers can
+// distinguish "this process is agent X" from "this process cannot say who it
+// is" — a distinction defaultMailIdentityCandidates deliberately erases.
+func ambientMailIdentityCandidates() []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(v string) {
@@ -918,10 +919,74 @@ func defaultMailIdentityCandidates() []string {
 	add(os.Getenv("GC_SESSION_ID"))
 	add(os.Getenv("GC_ALIAS"))
 	add(os.Getenv("GC_AGENT"))
-	if len(out) == 0 {
-		out = append(out, "human")
-	}
 	return out
+}
+
+// defaultMailIdentityCandidates returns ordered non-empty identity candidates
+// (GC_SESSION_ID, GC_ALIAS, GC_AGENT), falling back to ["human"] when all are
+// unset. Multiple candidates preserve compatibility for sessions whose concrete
+// ID is unavailable while still preferring the concrete mailbox when it exists.
+//
+// The "human" fallback answers "whose mailbox should I read?", where assuming
+// the operator is right at an operator's terminal and harmless elsewhere. It is
+// NOT an answer to "who is sending this?" — see resolveMailSenderCandidates.
+func defaultMailIdentityCandidates() []string {
+	if out := ambientMailIdentityCandidates(); len(out) > 0 {
+		return out
+	}
+	return []string{"human"}
+}
+
+// resolveMailSenderCandidates returns the identities a mail-writing command may
+// stamp as From, or false after explaining the refusal on stderr.
+//
+// Sending mail is an authority claim, so unlike the read paths this fails
+// CLOSED (gas-j2t7). "human" is the operator, and every procedural rule in a
+// city — merge authorizations, hold:mayor, shared-branch pushes — rests on
+// telling an operator order from an agent's suggestion. A crew session that
+// loses its ambient env must therefore not inherit the operator's voice by
+// default: az-wisp-9ft3r reached the mayor's inbox stamped From:human that way,
+// carrying four requests for authorization its sender did not hold. Defaulting
+// UP is the bug; in an authority channel, defaulting at all is.
+func resolveMailSenderCandidates(stderr io.Writer, cmdName string) ([]string, bool) {
+	candidates := ambientMailIdentityCandidates()
+	if len(candidates) == 0 {
+		fmt.Fprintf(stderr, "%s: no sender identity: GC_SESSION_ID, GC_ALIAS and GC_AGENT are all unset\n", cmdName)                 //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: refusing to send rather than stamping this message as the operator\n", cmdName)                     //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: an agent that lost its identity should re-prime the session, or pass --from <identity>\n", cmdName) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(stderr, "%s: if you are the operator, claim it explicitly: --from human\n", cmdName)                             //nolint:errcheck // best-effort stderr
+		return nil, false
+	}
+	return candidates, true
+}
+
+// isOperatorMailSenderClaim reports whether an explicit --from value claims the
+// reserved operator identity.
+//
+// It normalizes exactly as reservedMailSenderIdentity does, because that is what
+// finally resolves the sender: plain equality against "human" would let
+// "human/" and " human " through the guard below and still arrive as human.
+// The empty value also normalizes to human, so callers must handle "unset"
+// before consulting this.
+func isOperatorMailSenderClaim(from string) bool {
+	sender, ok := reservedMailSenderIdentity(from)
+	return ok && sender == "human"
+}
+
+// rejectAgentClaimingOperatorIdentity reports whether an explicit --from human
+// must be refused because this process is demonstrably an agent.
+//
+// Without it the fail-closed default above is bypassed by adding one flag, and
+// From:human stays unfalsifiable. The operator's own shell carries no ambient
+// agent identity, so their path is unaffected.
+func rejectAgentClaimingOperatorIdentity(stderr io.Writer, cmdName string) bool {
+	ambient := ambientMailIdentityCandidates()
+	if len(ambient) == 0 {
+		return false
+	}
+	fmt.Fprintf(stderr, "%s: refusing --from human: this session is %s\n", cmdName, strings.Join(ambient, ", ")) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: \"human\" is the operator's identity and cannot be claimed by an agent\n", cmdName) //nolint:errcheck // best-effort stderr
+	return true
 }
 
 // isStorelessMailProvider reports whether the configured mail provider
@@ -1358,7 +1423,10 @@ func resolveDefaultMailSenderForCommand(cityPath string, cfg *config.City, store
 }
 
 func resolveDefaultMailSenderForCommandCached(cityPath string, cfg *config.City, store beads.Store, stderr io.Writer, cmdName string, cache *mailIdentitySessionCache) (string, bool) {
-	candidates := defaultMailIdentityCandidates()
+	candidates, ok := resolveMailSenderCandidates(stderr, cmdName)
+	if !ok {
+		return "", false
+	}
 	for _, c := range candidates {
 		sender, err := resolveMailIdentityWithConfigCached(cityPath, cfg, store, c, cache)
 		if err == nil {
@@ -1491,9 +1559,12 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
-a recipient turn after sending. In a managed city, it can request a wake for
-a non-running recipient. Unread mail alone does not request a wake.
+to $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT. With none of those set this
+command refuses to send rather than stamping the message as the operator;
+an operator claims that identity explicitly with --from human.
+Use --notify to request a recipient turn after sending. In a managed city,
+it can request a wake for a non-running recipient.
+Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -1523,7 +1594,7 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	_ = cmd.Flags().MarkHidden("nudge")
 	cmd.Flags().BoolVar(&all, "all", false, "broadcast to all live sessions (excludes sender and human)")
-	cmd.Flags().StringVar(&from, "from", "", "sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or \"human\")")
+	cmd.Flags().StringVar(&from, "from", "", "sender identity (default: $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT; required when none is set)")
 	cmd.Flags().StringVar(&to, "to", "", "recipient address (alternative to positional argument)")
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
@@ -1598,6 +1669,7 @@ The message will continue to appear in inbox results.`,
 func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var subject string
 	var message string
+	var from string
 	var notify bool
 	var jsonOut bool
 	cmd := &cobra.Command{
@@ -1606,6 +1678,9 @@ func newMailReplyCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
+The sender defaults to $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT. With none of
+those set this command refuses to reply rather than stamping the message as
+the operator; an operator claims that identity explicitly with --from human.
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
@@ -1614,9 +1689,9 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 		RunE: func(_ *cobra.Command, args []string) error {
 			code := 0
 			if jsonOut {
-				code = cmdMailReplyJSON(args, subject, message, notify, true, stdout, stderr)
+				code = cmdMailReplyFromJSON(args, from, subject, message, notify, true, stdout, stderr)
 			} else {
-				code = cmdMailReply(args, subject, message, notify, stdout, stderr)
+				code = cmdMailReplyFrom(args, from, subject, message, notify, stdout, stderr)
 			}
 			if code != 0 {
 				return errExit
@@ -1626,6 +1701,7 @@ Use -s/--subject for the reply subject and -m/--message for the reply body.`,
 	}
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "reply subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "reply body text")
+	cmd.Flags().StringVar(&from, "from", "", "sender identity (default: $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT; required when none is set)")
 	cmd.Flags().BoolVar(&notify, "notify", false, "request a recipient turn (including a managed wake if not running), even with earlier unread mail")
 	cmd.Flags().BoolVar(&notify, "nudge", false, "alias for --notify")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
@@ -1803,7 +1879,8 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	sender := from
-	if sender == "" {
+	switch {
+	case sender == "":
 		if store != nil {
 			var ok bool
 			sender, ok = resolveDefaultMailSenderForCommandCached(cityPath, cfg, store, stderr, "gc mail send", idCache)
@@ -1811,13 +1888,24 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 				return 1
 			}
 		} else {
-			sender = defaultMailIdentity()
+			candidates, ok := resolveMailSenderCandidates(stderr, "gc mail send")
+			if !ok {
+				return 1
+			}
+			sender = candidates[0]
 		}
-	} else if sender != "human" && store != nil {
-		sender, err = resolveMailIdentityWithConfigCached(cityPath, cfg, store, sender, idCache)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+	case isOperatorMailSenderClaim(sender):
+		if rejectAgentClaimingOperatorIdentity(stderr, "gc mail send") {
 			return 1
+		}
+		sender = "human"
+	default:
+		if store != nil {
+			sender, err = resolveMailIdentityWithConfigCached(cityPath, cfg, store, sender, idCache)
+			if err != nil {
+				fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 		}
 	}
 
@@ -2223,12 +2311,13 @@ func doMailPeekWithJSON(mp mail.Provider, args []string, jsonOut bool, stdout, s
 	return 0
 }
 
-// cmdMailReply replies to a message.
-func cmdMailReply(args []string, subject, message string, notify bool, stdout, stderr io.Writer) int {
-	return cmdMailReplyJSON(args, subject, message, notify, false, stdout, stderr)
+// cmdMailReplyFrom replies to a message. An empty from resolves the sender from
+// the ambient session identity; see cmdMailReplyFromJSON.
+func cmdMailReplyFrom(args []string, from, subject, message string, notify bool, stdout, stderr io.Writer) int {
+	return cmdMailReplyFromJSON(args, from, subject, message, notify, false, stdout, stderr)
 }
 
-func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonOut bool, stdout, stderr io.Writer) int {
+func cmdMailReplyFromJSON(args []string, from, subject, message string, notify bool, jsonOut bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc mail reply: missing message ID") //nolint:errcheck // best-effort stderr
 		return 1
@@ -2240,7 +2329,22 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 	}
 	rec := openCityRecorder(stderr)
 
-	sender := defaultMailIdentity()
+	// Replying stamps a From just as sending does, so it fails closed on a
+	// missing ambient identity too (gas-j2t7).
+	sender := from
+	switch {
+	case sender == "":
+		senderCandidates, ok := resolveMailSenderCandidates(stderr, "gc mail reply")
+		if !ok {
+			return 1
+		}
+		sender = senderCandidates[0]
+	case isOperatorMailSenderClaim(sender):
+		if rejectAgentClaimingOperatorIdentity(stderr, "gc mail reply") {
+			return 1
+		}
+		sender = "human"
+	}
 	providerName := mailProviderName()
 	var store beads.Store
 	var cityPath string
@@ -2273,8 +2377,18 @@ func cmdMailReplyJSON(args []string, subject, message string, notify bool, jsonO
 			}
 			cfg, _ = loadCityConfig(cityPath, stderr)
 		}
-		if sender != "human" {
-			if store != nil {
+		if sender != "human" && store != nil {
+			// An explicit --from names the identity to resolve; without one the
+			// ambient chain does. Resolving the ambient chain either way would
+			// silently discard --from.
+			if from != "" {
+				resolved, err := resolveMailIdentityWithConfig(cityPath, cfg, store, from)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc mail reply: invalid sender %q: %v\n", from, err) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				sender = resolved
+			} else {
 				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
 				if !ok {
 					return 1

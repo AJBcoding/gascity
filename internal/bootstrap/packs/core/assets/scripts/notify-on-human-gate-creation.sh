@@ -188,7 +188,7 @@ Resolve with: gc bd gate resolve $gate_id"
     # a real session; it skips the nudge for the "human" recipient natively.
     # Loud-fail: on an undeliverable send, surface it and do NOT record the
     # gate as notified, so the next sweep retries.
-    if gc mail send "$ADDRESSEE" -s "$SUBJECT" -m "$BODY" --notify >/dev/null 2>&1; then
+    if gc mail send "$ADDRESSEE" --from controller -s "$SUBJECT" -m "$BODY" --notify >/dev/null 2>&1; then
         STATE="$(echo "$STATE" | jq --arg k "$gate_id" --arg now "$NOW" '.[$k] = $now')"
         NOTIFIED=$((NOTIFIED + 1))
     else

@@ -2429,6 +2429,9 @@ gc mail read <id> [flags]
 Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
+The sender defaults to $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT. With none of
+those set this command refuses to reply rather than stamping the message as
+the operator; an operator claims that identity explicitly with --from human.
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
@@ -2440,6 +2443,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT; required when none is set) |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | reply body text |
 | `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
@@ -2450,9 +2454,12 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
-a recipient turn after sending. In a managed city, it can request a wake for
-a non-running recipient. Unread mail alone does not request a wake.
+to $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT. With none of those set this
+command refuses to send rather than stamping the message as the operator;
+an operator claims that identity explicitly with --from human.
+Use --notify to request a recipient turn after sending. In a managed city,
+it can request a wake for a non-running recipient.
+Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -2477,7 +2484,7 @@ gc mail send --all "Status update: tests passing"
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
-| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
+| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT; required when none is set) |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |

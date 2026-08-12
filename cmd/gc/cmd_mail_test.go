@@ -2004,9 +2004,9 @@ func TestCmdMailReply_FallsBackToGCSessionIDWhenAliasMissing(t *testing.T) {
 	t.Setenv("GC_AGENT", "codeprobe-worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-2", "reply body"}, "", "", false, &stdout, &stderr)
+	code := cmdMailReplyFrom([]string{"gc-2", "reply body"}, "", "", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Replied to gc-2") {
 		t.Fatalf("stdout = %q, want reply confirmation", stdout.String())
@@ -2054,9 +2054,11 @@ func TestCmdMailReplyHumanNotifyQueuesNudge(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{original.ID, "reply body"}, "", "", true, &stdout, &stderr)
+	// No ambient identity here, so the operator claims "human" explicitly
+	// rather than inheriting it by default (gas-j2t7).
+	code := cmdMailReplyFrom([]string{original.ID, "reply body"}, "human", "", "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "to alice") {
 		t.Fatalf("stdout = %q, want reply addressed to alice", stdout.String())
@@ -2089,9 +2091,11 @@ func TestCmdMailReplyExecProviderNotifyQueuesNudge(t *testing.T) {
 	t.Setenv("GC_MAIL", "exec:"+script)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-1", "reply body"}, "", "", true, &stdout, &stderr)
+	// No ambient identity here, so the operator claims "human" explicitly
+	// rather than inheriting it by default (gas-j2t7).
+	code := cmdMailReplyFrom([]string{"gc-1", "reply body"}, "human", "", "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	assertQueuedMailNudge(t, cityPath, sessionID, stderr.String())
@@ -2106,7 +2110,7 @@ func TestMailReplyNudgeAliasQueuesNudge(t *testing.T) {
 	if cmd.Flags().Lookup("nudge") == nil {
 		t.Fatal("reply command missing --nudge alias")
 	}
-	cmd.SetArgs([]string{"gc-1", "--nudge", "reply body"})
+	cmd.SetArgs([]string{"gc-1", "--nudge", "--from", "human", "reply body"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("reply --nudge: %v; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
 	}
@@ -2126,9 +2130,11 @@ func TestCmdMailReplyExecProviderNotifyWithoutCityWarnsAndSendsReply(t *testing.
 	t.Chdir(t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-1", "reply body"}, "", "", true, &stdout, &stderr)
+	// No ambient identity here, so the operator claims "human" explicitly
+	// rather than inheriting it by default (gas-j2t7).
+	code := cmdMailReplyFrom([]string{"gc-1", "reply body"}, "human", "", "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Replied to gc-1") {
 		t.Fatalf("stdout = %q, want reply confirmation", stdout.String())
@@ -2160,9 +2166,9 @@ func TestCmdMailReplyExecProviderNotifyResolvesNonHumanSender(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-1", "reply body"}, "", "", true, &stdout, &stderr)
+	code := cmdMailReplyFrom([]string{"gc-1", "reply body"}, "", "", "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	assertQueuedMailNudgeMessage(t, cityPath, sessionID, "You have mail from bob", stderr.String())
@@ -2265,7 +2271,7 @@ func TestMailCommandsRejectMissingIDBeforeProviderCall(t *testing.T) {
 		{
 			name: "reply",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdMailReply(nil, "", "", false, stdout, stderr)
+				return cmdMailReplyFrom(nil, "", "", "", false, stdout, stderr)
 			},
 			wantStderr: "gc mail reply: missing message ID\n",
 		},
