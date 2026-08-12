@@ -12,6 +12,24 @@ const (
 	HoldExternalLabel = "hold:external"
 )
 
+// HoldNoneLabel is the release marker the sanctioned clear leaves behind:
+// `bd set-state <id> hold=none --reason "..."`. set-state removes whatever
+// label the bead carried in the hold: dimension, adds this one, and files the
+// audit event bead that a plain `bd update --remove-label` never files. That
+// missing event is the whole reason clearing goes through set-state like
+// setting does: holds were audited on the way in and unaudited on the way out,
+// so the event ledger — the declared source of truth — drifted permanently, and
+// in one direction only, from the label cache (gas-x284).
+//
+// It is a value in the hold: dimension, but it is not a hold. It names a bead
+// whose hold has been LIFTED, so it must stay out of DispatchHoldLabels below:
+// a released bead is ordinary work again, and filtering on this value would
+// starve it exactly the way an unlifted hold does (gas-kg6). Consumers that
+// match the hold: prefix rather than the DispatchHoldLabels set must exclude
+// this value explicitly — see holdLabelValue in cmd/gc, where treating it as a
+// hold would have backfilled gc.routed_to="none" over live routes.
+const HoldNoneLabel = "hold:none"
+
 // DispatchHoldLabels is the complete set of hold label values naming a bead
 // whose required next actor or condition is, by construction, not the worker
 // looking at it. Two different questions consume this list, and they answer

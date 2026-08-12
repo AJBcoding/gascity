@@ -24,3 +24,19 @@ func TestDispatchHoldLabelsMatchCanonicalHoldValues(t *testing.T) {
 		}
 	}
 }
+
+// TestHoldNoneLabelIsNotADispatchHold pins the load-bearing omission: hold:none
+// is the release marker `bd set-state <id> hold=none` leaves behind, so it names
+// a bead that is NOT held and must stay out of DispatchHoldLabels. Adding it
+// there would strand every released bead — the exact starvation loop gas-kg6
+// reported, re-created by the mechanism meant to end it (gas-x284).
+func TestHoldNoneLabelIsNotADispatchHold(t *testing.T) {
+	if HoldNoneLabel != "hold:none" {
+		t.Fatalf("HoldNoneLabel = %q, want %q", HoldNoneLabel, "hold:none")
+	}
+	for i, v := range DispatchHoldLabels {
+		if v == HoldNoneLabel {
+			t.Fatalf("DispatchHoldLabels[%d] = %q: the release marker must never filter dispatch", i, v)
+		}
+	}
+}
