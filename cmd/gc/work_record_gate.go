@@ -65,15 +65,27 @@ func validWorkOutcome(v string) bool {
 
 // isWorkRecordGatedBead reports whether the work-record close contract applies
 // to bead. It applies to worker-claimable work units — plain task beads — and
-// deliberately NOT to control/structural beads (anything carrying gc.kind:
-// workflow roots, scope/run/check/drain steps, etc.) or non-task beads (convoy,
-// message). Those use the disjoint control-plane gc.outcome vocabulary and are
-// closed by the dispatch engine, not by a worker reporting a work outcome.
+// deliberately NOT to control/structural beads or non-task beads (convoy,
+// message). Those use the disjoint control-plane gc.outcome vocabulary (see
+// the beadmeta.WorkOutcomeMetadataKey doc) and are closed by the dispatch
+// engine, not by a worker reporting a work outcome.
+//
+// Control-plane beads are recognized by any of: a non-task type, a gc.kind
+// stamp, or a step marker (gc.step_ref / gc.step_id). The step markers matter
+// because the formulas-v2 dispatch paths (internal/dispatch control/ralph
+// expansion and retry) create step beads that carry gc.step_ref but neither a
+// Type nor a gc.kind — under a two-arm predicate those speak gc.outcome yet
+// fall inside the work-record contract, so enforcement refuses closes the
+// design says it must not gate.
 func isWorkRecordGatedBead(bead beads.Bead) bool {
 	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
 		return false
 	}
 	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
+		return false
+	}
+	if strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey]) != "" ||
+		strings.TrimSpace(bead.Metadata[beadmeta.StepIDMetadataKey]) != "" {
 		return false
 	}
 	return true

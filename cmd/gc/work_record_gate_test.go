@@ -218,6 +218,29 @@ func TestIsWorkRecordGatedBead(t *testing.T) {
 		},
 		{name: "convoy bead is not gated", bead: beads.Bead{Type: "convoy"}, want: false},
 		{name: "message bead is not gated", bead: beads.Bead{Type: "message"}, want: false},
+		{
+			// The live two-arm control that motivated the step-marker arm:
+			// formulas-v2 dispatch creates step beads with NO type and NO
+			// gc.kind, only gc.step_ref. Arm A (this shape) was refused under
+			// GC_WORK_RECORD_ENFORCE=1; arm B (same bead + gc.kind) closed.
+			// The bead speaks control-plane gc.outcome, so it must not be
+			// gated — regardless of how it came to lack a type.
+			name: "untyped kindless step bead with gc.step_ref is not gated",
+			bead: beads.Bead{Metadata: map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.do-work"}},
+			want: false,
+		},
+		{
+			name: "untyped kindless step bead with gc.step_id is not gated",
+			bead: beads.Bead{Metadata: map[string]string{beadmeta.StepIDMetadataKey: "step-7"}},
+			want: false,
+		},
+		{
+			// Defense in depth across arms: even a task-typed bead carrying a
+			// step marker speaks the control-plane vocabulary.
+			name: "task-typed bead carrying a step marker is not gated",
+			bead: beads.Bead{Type: "task", Metadata: map[string]string{beadmeta.StepRefMetadataKey: "mol-do-work.drain"}},
+			want: false,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
