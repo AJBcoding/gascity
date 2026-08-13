@@ -23,6 +23,58 @@ import (
 // path resolves nowhere, is reported as a real remote, which keeps the
 // durability rule armed rather than silently disabling it.
 
+// Remote is one configured remote, classified for durability purposes.
+type Remote struct {
+	// Name is the remote's configured name.
+	Name string
+	// URL is the remote's fetch URL, empty when it could not be read.
+	URL string
+	// Self reports that the URL resolves back into this same repository, so
+	// the remote confers no durability.
+	Self bool
+	// Publication reports that the remote may be consulted as evidence that
+	// work has been delivered. It is not simply !Self: a remote whose name
+	// cannot be passed to git is neither self-classifiable nor usable as
+	// evidence, so it is excluded from both.
+	Publication bool
+}
+
+// Remotes returns every configured remote, classified. It is the single
+// classification pass the durability accessors below project from; callers that
+// need to describe the topology to a human (rather than just filter it) use it
+// directly.
+//
+// An unreadable remote list is an error rather than an empty list, so no caller
+// can mistake a broken probe for "nothing to publish to".
+func (g *Git) Remotes() ([]Remote, error) {
+	out, err := g.run("remote")
+	if err != nil {
+		return nil, fmt.Errorf("listing remotes: %w", err)
+	}
+	selfCommon := CommonDir(g.workDir)
+	remotes := []Remote{}
+	for _, name := range strings.Fields(out) {
+		if strings.HasPrefix(name, "-") {
+			// Unprobeable as a git argument, so it cannot be cleared as
+			// self-referential — it counts as configured (the repo is not
+			// local-only) but never as publication.
+			remotes = append(remotes, Remote{Name: name})
+			continue
+		}
+		urlOut, urlErr := g.run("remote", "get-url", name)
+		if urlErr != nil {
+			// Unreadable URL: treat as a publication remote so the durability
+			// rule stays armed rather than silently skipped.
+			remotes = append(remotes, Remote{Name: name, Publication: true})
+			continue
+		}
+		url := strings.TrimSpace(urlOut)
+		self := IsSelfRemoteURL(url, selfCommon)
+		remotes = append(remotes, Remote{Name: name, URL: url, Self: self, Publication: !self})
+	}
+	return remotes, nil
+}
+
 // PublicationRemotes returns the names of the repository's remotes that can
 // confer durability — every configured remote except those whose URL resolves
 // back into this same repository — alongside the full configured list it was
@@ -30,35 +82,18 @@ import (
 //
 // Callers need both because an empty publication list is ambiguous on its own:
 // no remotes at all is a local-only repo, while remotes that all filter out is
-// the herdr-src misconfiguration, and callers may answer those differently. An
-// unreadable remote list is an error rather than an empty list, so no caller can
-// mistake a broken probe for "nothing to publish to".
+// the herdr-src misconfiguration, and callers may answer those differently.
 func (g *Git) PublicationRemotes() (publication, configured []string, err error) {
-	out, err := g.run("remote")
+	remotes, err := g.Remotes()
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing remotes: %w", err)
+		return nil, nil, err
 	}
-	selfCommon := CommonDir(g.workDir)
 	publication, configured = []string{}, []string{}
-	for _, name := range strings.Fields(out) {
-		configured = append(configured, name)
-		if strings.HasPrefix(name, "-") {
-			// Unprobeable as a git argument, so it cannot be cleared as
-			// self-referential — it counts as configured (the repo is not
-			// local-only) but never as publication.
-			continue
+	for _, r := range remotes {
+		configured = append(configured, r.Name)
+		if r.Publication {
+			publication = append(publication, r.Name)
 		}
-		urlOut, urlErr := g.run("remote", "get-url", name)
-		if urlErr != nil {
-			// Unreadable URL: treat as a publication remote so the durability
-			// rule stays armed rather than silently skipped.
-			publication = append(publication, name)
-			continue
-		}
-		if IsSelfRemoteURL(strings.TrimSpace(urlOut), selfCommon) {
-			continue
-		}
-		publication = append(publication, name)
 	}
 	return publication, configured, nil
 }
