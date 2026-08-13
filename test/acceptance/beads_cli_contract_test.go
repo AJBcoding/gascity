@@ -686,8 +686,6 @@ func TestBdBasicCRUD(t *testing.T) {
 	})
 }
 
-// TestBdDependencies exercises all dependency operations against a single
-// shared beads directory.
 // TestBdClaimLease pins the claim-lease verbs the controller's lease-renewal
 // sweep rides (gas-76r): a claim stamps a lease, the holder may push it forward
 // with bd heartbeat, and a non-holder may not. The Go side pins only the argv it
@@ -725,6 +723,8 @@ func TestBdClaimLease(t *testing.T) {
 	})
 }
 
+// TestBdDependencies exercises all dependency operations against a single
+// shared beads directory.
 func TestBdDependencies(t *testing.T) {
 	dir := initBeadsDir(t)
 
