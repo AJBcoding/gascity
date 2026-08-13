@@ -42,7 +42,10 @@
 # still blocks; but a read that succeeds and finds no in-progress
 # assignment leaves nothing to check, and the push is allowed — the same
 # "no session, nothing to check" semantics every unmatched branch already
-# has.
+# has. Whenever the assignee fallback is the deciding signal (deploy-gate
+# branches, or any branch that doesn't embed a bead id), a successful read
+# returning MORE THAN ONE in-progress row is also ambiguity — no single
+# bead owns this push — and blocks rather than guessing .[0] (gas-3nub).
 #
 # This file ONLY defines functions and one default-value assignment;
 # sourcing it must not produce output or otherwise mutate state.
@@ -71,6 +74,15 @@ POG_READ_ATTEMPTS="${POG_READ_ATTEMPTS:-3}"
 # *and* the failure is ambiguous (a failed bd read) rather than a clean
 # "no such assignment". Not a valid bead id by construction.
 POG_AMBIGUOUS_SENTINEL="__pog_unresolved_ambiguous__"
+
+# Sibling sentinel for the other ambiguous shape (gas-3nub): the assignee
+# fallback read SUCCEEDED but returned more than one in-progress row, and
+# no branch-derived id narrows the choice. Taking .[0] there asserts a
+# fact the data does not support — the observed failure judged a
+# polecat/gas-kg6 push against an unrelated bead that merely sorted first.
+# More than one row is ambiguity, not an answer; the caller owns the
+# fail-closed message. Not a valid bead id by construction.
+POG_AMBIGUOUS_MULTI_SENTINEL="__pog_unresolved_multiple_in_progress__"
 
 # _pog_timeout <seconds> <cmd...>: run <cmd...> bounded by <seconds>,
 # mirroring the timeout/gtimeout fallback shim in
@@ -117,20 +129,39 @@ _pog_read_with_retry() {
 
 # _pog_resolve_bead_id: prints the bead id this push should be checked
 # against; prints nothing if none can be resolved. Resolution order:
-#   1. The current branch name, matched against ga-[0-9a-z]{6}(\.[0-9]+)* —
-#      the bead's own id format, extended with zero or more repeated
-#      sub-bead suffixes because this repo's real branch convention is
-#      builder/<bead-id>-<slug> and sub-beads are routine at any nesting
-#      depth: a single-level sub-bead (e.g. ga-fip9ps.1) as well as a
-#      grandchild (e.g. ga-o3ko1j.4.3). The suffix group must repeat (`*`),
-#      not just appear once (`?`) — a single optional group truncates a
-#      grandchild id after its first dotted segment, misresolving to the
-#      wrong (and possibly closed) parent/child bead instead of the actual
-#      grandchild bead the branch is for. The literal 6-char-only pattern
-#      would misresolve to the root bead on any sub-bead's own branch.
-#   2. Falls back to this session's single in-progress assignment
+#   1. The current branch name, matched against
+#      (^|/)[a-z]{2,4}-[0-9a-z]{3,}(\.[0-9]+)* (leading slash stripped) —
+#      a prefix-agnostic bead id: 2-4 letter rig prefix, dash, 3+ char
+#      body, extended with zero or more repeated sub-bead suffixes because
+#      branch conventions embed ids at any nesting depth
+#      (builder/<bead-id>-<slug>, polecat/<bead-id>): a single-level
+#      sub-bead (e.g. ga-fip9ps.1) as well as a grandchild
+#      (e.g. ga-o3ko1j.4.3). The suffix group must repeat (`*`), not just
+#      appear once (`?`) — a single optional group truncates a grandchild
+#      id after its first dotted segment, misresolving to the wrong (and
+#      possibly closed) parent/child bead instead of the actual grandchild
+#      bead the branch is for. Prefix-agnostic because the earlier literal
+#      ga-[0-9a-z]{6} never matched other rigs' ids — gascity's gas-
+#      prefix with 3-4 char bodies missed on both halves — silently
+#      killing this path for a whole rig and dropping every push to the
+#      weaker assignee fallback (gas-3nub). Each bound earns its keep:
+#      anchored to a path-segment start so ordinary hyphenated words can't
+#      false-resolve mid-word (staging/gascity-lane must not yield
+#      ascity-lane); prefix capped at 4 letters — every rig prefix in this
+#      city is 2-3 — so real non-bead segments like
+#      integration/deploy-20260804 stay unmatched; body UNbounded because
+#      a bounded quantifier stops mid-run rather than failing on a longer
+#      id, truncating it exactly like the single-optional-suffix bug
+#      above. A false resolve here is a false BLOCK (the id fails its
+#      bd show), which trains agents to bypass the guard — the boundary
+#      tests in scripts/test-push-ownership-guard.sh pin these shapes.
+#   2. Falls back to this session's in-progress assignment
 #      (bd list --assignee="$GC_AGENT" --status=in_progress --json) when
-#      the branch name doesn't match.
+#      the branch name doesn't match — but only a SINGLE row is an
+#      answer. More than one row when this fallback is the deciding
+#      signal is ambiguity, resolved to POG_AMBIGUOUS_MULTI_SENTINEL so
+#      the caller fails closed instead of judging the push against an
+#      arbitrary .[0] pick (gas-3nub).
 # If both resolve and disagree, the branch match wins (it's the more
 # specific signal) and a warning goes to stderr — this is a best-effort
 # cross-check, not a hard failure, since branch-naming habits can
@@ -167,23 +198,40 @@ _pog_resolve_bead_id() {
 
     local branch_id=""
     if [[ -n "$branch" ]]; then
-        branch_id="$(grep -oE 'ga-[0-9a-z]{6}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="$(grep -oE '(^|/)[a-z]{2,4}-[0-9a-z]{3,}(\.[0-9]+)*' <<<"$branch" | head -1 || true)"
+        branch_id="${branch_id#/}"
     fi
 
     # assignee_read_failed distinguishes "the read failed" (ambiguity) from
     # "the read succeeded and found nothing" (a clean answer):
     # _pog_read_with_retry returns non-zero only when every attempt failed or
     # produced no output, and a successful `[]` read is non-empty, so its exit
-    # status separates the two cleanly.
+    # status separates the two cleanly. A successful read with MORE THAN ONE
+    # row is a third shape (gas-3nub): assignee_multi_count carries the row
+    # count and assignee_candidates the ids, assignee_id stays empty — the
+    # fallback has no single answer, and which sentinel/allow that becomes is
+    # decided below, where we know whether the fallback is the deciding
+    # signal. The non-array guard keeps a weird-but-successful non-list
+    # response on today's path (empty id, nothing to check) instead of
+    # miscounting an object's keys as rows.
     local assignee_id=""
     local assignee_read_failed=0
+    local assignee_multi_count=0
+    local assignee_candidates=""
     if [[ -n "${GC_AGENT:-}" ]]; then
         if ! command -v bd >/dev/null 2>&1; then
             assignee_read_failed=1
         else
             local list_json
             if list_json="$(_pog_read_with_retry bd list --assignee="$GC_AGENT" --status=in_progress --json)"; then
-                assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+                local assignee_row_count
+                assignee_row_count="$(jq -r 'if type == "array" then length else 0 end' <<<"$list_json" 2>/dev/null || printf '0')"
+                if [[ "$assignee_row_count" -gt 1 ]]; then
+                    assignee_multi_count="$assignee_row_count"
+                    assignee_candidates="$(jq -r '[.[].id // empty] | join(" ")' <<<"$list_json" 2>/dev/null || true)"
+                else
+                    assignee_id="$(jq -r '.[0].id // empty' <<<"$list_json" 2>/dev/null || true)"
+                fi
             else
                 assignee_read_failed=1
             fi
@@ -202,6 +250,14 @@ _pog_resolve_bead_id() {
         # Discarding the branch-derived id means the assignee read is the ONLY
         # signal left for this branch shape, so a failed read is ambiguity, not
         # "nothing to check" — hand the caller the sentinel so it fails closed.
+        # The same holds when the read succeeds but returns several rows: no
+        # single bead owns this push, and picking .[0] would judge it against
+        # an arbitrary one (gas-3nub).
+        if [[ $assignee_multi_count -gt 1 ]]; then
+            echo "push-ownership-guard: deploy-gate branch '$branch' ignores its branch-embedded id, and this session has $assignee_multi_count in-progress beads ($assignee_candidates); no single bead can own this push" >&2
+            printf '%s' "$POG_AMBIGUOUS_MULTI_SENTINEL"
+            return
+        fi
         if [[ -z "$assignee_id" && $assignee_read_failed -eq 1 ]]; then
             printf '%s' "$POG_AMBIGUOUS_SENTINEL"
             return
@@ -214,11 +270,22 @@ _pog_resolve_bead_id() {
         echo "push-ownership-guard: WARNING branch name resolves to $branch_id but this session's in-progress assignment is $assignee_id; using $branch_id (branch name wins)" >&2
     fi
 
+    # With a branch-derived id the fallback is only a cross-check, so a
+    # multi-row fallback is irrelevant here (and under it assignee_id is
+    # deliberately empty, which also keeps the disagreement warning above
+    # from firing against an arbitrary row).
     if [[ -n "$branch_id" ]]; then
         printf '%s' "$branch_id"
-    else
-        printf '%s' "$assignee_id"
+        return
     fi
+
+    if [[ $assignee_multi_count -gt 1 ]]; then
+        echo "push-ownership-guard: branch '$branch' does not embed a bead id, and this session has $assignee_multi_count in-progress beads ($assignee_candidates); no single bead can own this push — re-push from a branch embedding the bead id (e.g. polecat/<bead-id>) or reduce the in-progress list to one" >&2
+        printf '%s' "$POG_AMBIGUOUS_MULTI_SENTINEL"
+        return
+    fi
+
+    printf '%s' "$assignee_id"
 }
 
 # assert_bead_still_claimed: the exported guard. Returns 0 to allow the
@@ -232,6 +299,10 @@ assert_bead_still_claimed() {
     id="$(_pog_resolve_bead_id)"
     if [[ "$id" == "$POG_AMBIGUOUS_SENTINEL" ]]; then
         echo "push-ownership-guard: BLOCKED — deploy-gate branch: could not read this session's in-progress assignment (bd unreachable or not on PATH), so ownership cannot be verified; re-run the push first — if it keeps failing, bd/Dolt needs attention. Last resort: git push --no-verify" >&2
+        return 1
+    fi
+    if [[ "$id" == "$POG_AMBIGUOUS_MULTI_SENTINEL" ]]; then
+        echo "push-ownership-guard: BLOCKED — this session holds more than one in-progress bead and none can be singled out for this push (candidates in the resolver note above), so ownership cannot be verified against a specific bead. Reduce this session's in-progress claims to one, or re-push from a branch embedding the bead id. If this block is wrong, bypass ONLY the ownership check with: POG_DISABLE=1 git push (unlike git push --no-verify, that keeps the pre-push test gate)" >&2
         return 1
     fi
     if [[ -z "$id" ]]; then
