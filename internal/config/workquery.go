@@ -511,11 +511,29 @@ func ephemeralScanMemoShell(memoVar, status string) string {
 		memoVar + `_done=1; fi; `
 }
 
+// ephemeralAssignedInProgressProbeScript is the ephemeral-store sibling of the
+// `bd list --status in_progress` crash-recovery query, in the same tier-1 slot.
+// It excludes candidates parked on a canonical dispatch hold
+// (beadmeta.DispatchHoldLabels) inside its own jq selection, the equivalent
+// fall-through to the bd-list tier's nheld serve gate (gas-kg6, #5114 review):
+// without it a held ephemeral bead exited the script as the sole candidate, the
+// Go-side filter then stripped it, and the hook reported no_work while ready
+// work sat unqueried below — the same starvation, wearing a drain label.
+// Filtering before the `.[:1]` truncation also lets a second, unheld
+// in_progress candidate be served instead of being shadowed by a held first.
+//
+// Failure mode differs from the bd-list tier's fail-open serve, deliberately:
+// this probe's jq consumes the memoized `bd query` stdout, so unparseable
+// output yields an empty candidate and the probe falls through — it never
+// serves raw stdout, with or without the hold filter. The hold-transparent
+// existence probes (ephemeralAssignedReadyProbeScript) are out of scope per
+// ga-5736js.
 func ephemeralAssignedInProgressProbeScript(shellVar string, topo QueryTopology) string {
 	_ = topo
+	filter := `[.[] | select((.assignee // "") == $id)` + excludeHoldLabelsJQClause() + `] | .[:1]`
 	return ephemeralScanMemoShell(ephemeralInProgressMemoVar, "in_progress") +
 		`r=$(printf "%s" "$` + ephemeralInProgressMemoVar + `" | ` +
-		`jq --arg id "$` + shellVar + `" '[.[] | select((.assignee // "") == $id)] | .[:1]' 2>/dev/null); ` +
+		`jq --arg id "$` + shellVar + `" ` + shellquote.Quote(filter) + ` 2>/dev/null); ` +
 		`[ -n "$r" ] && [ "$r" != "[]" ] && printf "%s" "$r" && exit 0; `
 }
 
