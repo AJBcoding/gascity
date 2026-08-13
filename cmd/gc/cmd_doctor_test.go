@@ -1069,3 +1069,38 @@ func TestWriteDoctorJSONProjectsTimedOut(t *testing.T) {
 		t.Fatalf("timed_out appears %d times, want exactly 1 (only the abandoned check); out=%s", n, buf.String())
 	}
 }
+
+// TestBuildDoctorChecksRegistersRigSelfRemoteCheck pins the wiring for the
+// self-referential-remote check (gas-9sg). The check itself is unit-tested in
+// internal/doctor; what a unit test cannot catch is a check that is correct and
+// never registered, which reports nothing forever and looks exactly like a
+// clean city. Suspended rigs are excluded here as they are for every sibling
+// rig check.
+func TestBuildDoctorChecksRegistersRigSelfRemoteCheck(t *testing.T) {
+	cityDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "demo"},
+		Rigs: []config.Rig{
+			{Name: "active", Path: "active", Prefix: "ac"},
+			{Name: "sleeping", Path: "sleeping", Prefix: "sl", Suspended: true},
+		},
+	}
+	checks := buildDoctorChecks(cityDir, cfg, nil, buildDoctorChecksOpts{
+		ControllerRunning:    true,
+		SkipCityDoltCheck:    true,
+		SkipManagedDoltCheck: true,
+		SkipRigDoltChecks:    true,
+	})
+
+	names := doctorCheckNames(checks)
+	if doctorCheckIndex(names, "rig:active:self-remote") < 0 {
+		t.Errorf("rig:active:self-remote not registered; names=%v", names)
+	}
+	if doctorCheckIndex(names, "rig:sleeping:self-remote") >= 0 {
+		t.Errorf("suspended rig registered a self-remote check; names=%v", names)
+	}
+}
