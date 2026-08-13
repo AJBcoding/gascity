@@ -193,9 +193,9 @@ func (g *Git) HasUncommittedWork() bool {
 }
 
 // HasUnpushedCommits reports whether HEAD has commits not reachable from
-// any remote tracking branch. Used as a safety check before removing a
-// worktree — unpushed commits represent completed work that would be lost.
-// If the probe fails, it returns true to fail closed.
+// any publication remote's tracking branches. Used as a safety check before
+// removing a worktree — unpushed commits represent completed work that would be
+// lost. If the probe fails, it returns true to fail closed.
 func (g *Git) HasUnpushedCommits() bool {
 	has, err := g.HasUnpushedCommitsResult()
 	if err != nil {
@@ -206,8 +206,29 @@ func (g *Git) HasUnpushedCommits() bool {
 
 // HasUnpushedCommitsResult is like HasUnpushedCommits but preserves git
 // probe errors for callers that need to expose the precise failure reason.
+//
+// Only PUBLICATION remotes count as delivery (see publication.go): a remote
+// whose URL resolves back into this same repository has published nothing
+// off-host, so a blanket --remotes reads its snapshots of local branches as
+// pushed and clears genuinely unpublished work for reclamation (gas-9sg).
+//
+// A repo with no publication remotes — none configured at all, or all of them
+// self-referential — has nowhere it could have published to, so every commit is
+// unpushed. That is the fail-closed answer this probe already gave a repo with
+// no remotes, now extended to the topology that only looked like it had one.
 func (g *Git) HasUnpushedCommitsResult() (bool, error) {
-	out, err := g.run("log", "HEAD", "--oneline", "--not", "--remotes")
+	publication, _, err := g.PublicationRemotes()
+	if err != nil {
+		return false, fmt.Errorf("checking unpushed commits: %w", err)
+	}
+	if len(publication) == 0 {
+		return true, nil
+	}
+	args := []string{"log", "HEAD", "--oneline", "--not"}
+	for _, name := range publication {
+		args = append(args, "--glob=refs/remotes/"+name+"/*")
+	}
+	out, err := g.run(args...)
 	if err != nil {
 		return false, fmt.Errorf("checking unpushed commits: %w", err)
 	}
