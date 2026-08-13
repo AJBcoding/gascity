@@ -203,7 +203,12 @@ func leaseWatchdogRuntime(stores map[string]beads.Store) (*CityRuntime, *bytes.B
 func runningSnapshot(sessionNames ...string) *sessionBeadSnapshot {
 	infos := make([]sessionpkg.Info, 0, len(sessionNames))
 	for _, name := range sessionNames {
-		infos = append(infos, sessionpkg.Info{ID: "sb-" + name, SessionName: name, State: sessionpkg.StateActive})
+		infos = append(infos, sessionpkg.Info{
+			ID:                  "sb-" + name,
+			SessionName:         name,
+			SessionNameMetadata: name,
+			State:               sessionpkg.StateActive,
+		})
 	}
 	return newSessionBeadSnapshotFromInfos(infos)
 }
@@ -342,5 +347,66 @@ func TestLeaseLapsesWhenSessionStopsRunning(t *testing.T) {
 	if store.leaseExpires[id].After(now) {
 		t.Fatalf("lease still valid at %s for a session that stopped running; reclaim could never fire",
 			now.Format(time.RFC3339))
+	}
+}
+
+// TestLeaseRenewalRenewsAnAliasAssignedHolder proves holder matching speaks the
+// confined session-class assignee vocabulary, not the derived runtime
+// SessionName. Claims are stamped alias-first, so a pool worker whose bead is
+// assigned to its alias ("nux") must still have its lease renewed; matching on
+// Info.SessionName — which falls back to sessionNameFor(ID) — misses it and
+// silently renews nothing. Same class the SkipsLiveSessionAssignedByAlias
+// regressions guard elsewhere in the tree.
+func TestLeaseRenewalRenewsAnAliasAssignedHolder(t *testing.T) {
+	store := newLeaseRenewingMemStore()
+	seedInProgressBead(t, store, "nux")
+	cr, _ := leaseWatchdogRuntime(map[string]beads.Store{"rig": store})
+	snapshot := newSessionBeadSnapshotFromInfos([]sessionpkg.Info{{
+		ID:                  "sb-pool-1",
+		Alias:               "nux",
+		SessionNameMetadata: "claude-mc-xyz",
+		State:               sessionpkg.StateActive,
+	}})
+
+	t0 := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	if got := cr.runLeaseRenewalWatchdog(t0, snapshot); got != 1 {
+		t.Fatalf("renewed = %d, want 1 for a bead assigned to the holder's alias", got)
+	}
+}
+
+// TestNilSessionSnapshotIsRetriedNotTreatedAsSuccess proves a failed
+// sessions-class read is not stamped as a complete sweep.
+// loadSessionBeadSnapshot returns nil both when the store is unavailable and
+// when the query errors; treating that as "no running sessions" would spend a
+// full cadence of lease margin on a transient failure instead of taking the
+// backoff path this watchdog already has.
+func TestNilSessionSnapshotIsRetriedNotTreatedAsSuccess(t *testing.T) {
+	store := newLeaseRenewingMemStore()
+	seedInProgressBead(t, store, "sess-a")
+	cr, _ := leaseWatchdogRuntime(map[string]beads.Store{"rig": store})
+
+	t0 := time.Date(2026, 8, 8, 12, 0, 0, 0, time.UTC)
+	if got := cr.runLeaseRenewalWatchdog(t0, nil); got != 0 {
+		t.Fatalf("renewed = %d, want 0 from a failed snapshot read", got)
+	}
+	if !cr.leaseRenewalLastSuccess.IsZero() {
+		t.Fatal("leaseRenewalLastSuccess stamped by a failed sessions-class read")
+	}
+	if cr.leaseRenewalFailures != 1 {
+		t.Fatalf("leaseRenewalFailures = %d, want 1", cr.leaseRenewalFailures)
+	}
+
+	// The retry rides the failure backoff, not a full cadence: gated inside
+	// the retry delay, and eligible immediately after it.
+	interval := leaseRenewalInterval(5 * time.Minute)
+	retry := leaseRenewalRetryDelay(1, interval)
+	if retry <= 0 || retry >= interval {
+		t.Fatalf("retry delay = %v, want >0 and < the %v cadence", retry, interval)
+	}
+	if got := cr.runLeaseRenewalWatchdog(t0.Add(retry-time.Second), runningSnapshot("sess-a")); got != 0 {
+		t.Fatalf("renewed = %d inside the retry delay, want 0 (gated)", got)
+	}
+	if got := cr.runLeaseRenewalWatchdog(t0.Add(retry), runningSnapshot("sess-a")); got != 1 {
+		t.Fatalf("renewed = %d after the retry delay, want 1", got)
 	}
 }

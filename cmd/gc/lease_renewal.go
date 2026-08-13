@@ -290,13 +290,29 @@ func (cr *CityRuntime) runLeaseRenewalWatchdog(now time.Time, sessionBeads *sess
 	}
 	cr.leaseRenewalLastAttempt = now
 
+	// A nil snapshot is a FAILED sessions-class read — loadSessionBeadSnapshot
+	// returns nil both when the store is unavailable and when the query errors
+	// (city_runtime.go) — not an empty fleet. Stamping it as a complete sweep
+	// would spend a full cadence of lease margin on a transient failure; route
+	// it through the same backoff a failed renewal uses.
+	if sessionBeads == nil {
+		cr.leaseRenewalFailures++
+		return 0
+	}
+
 	running := map[string]bool{}
 	for _, info := range sessionBeads.OpenInfos() {
 		if info.State != sessionpkg.StateActive {
 			continue
 		}
-		if name := strings.TrimSpace(info.SessionName); name != "" {
-			running[name] = true
+		// Match holders on the confined assignee vocabulary, not the derived
+		// runtime SessionName: claims are stamped alias-first and
+		// Info.SessionName falls back to sessionNameFor(ID), which
+		// internal/session/assignee_identities.go deliberately excludes.
+		for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+			if id = strings.TrimSpace(id); id != "" {
+				running[id] = true
+			}
 		}
 	}
 	if len(running) == 0 {
