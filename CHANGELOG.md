@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`gc doctor` now detects wasted work: orders failing at a pathological rate,
+  and agents that spawn without making progress.** Three token leaks ran for
+  hours on a live city and every one was found by a human doing a manual sweep
+  — an order retrying ~2,000x/day against an endpoint it could never reach,
+  held beads spawning a polecat every ~2 minutes that could only decline (one
+  woke 130 times in 19.25h), and three Dolt-only orders failing 100% for 19h on
+  a MySQL city. The shape they share is work dispatched to an actor that cannot
+  complete it, where every component behaves correctly in isolation and the
+  waste lives in the disagreement between them — which is why per-component
+  health checks never saw it. The new `wasted-work` check reasons over outcomes
+  in the event log instead: it alarms when an order's failures/firings reach
+  100% over at least 5 firings, or 50% over at least 20 (two gates, because a
+  total failure is unambiguous on few samples while a partial rate needs more
+  before it can be told apart from genuine flake), and when an agent woke at
+  least 10 times in 6h having neither claimed nor closed any non-mail bead. It
+  reports the most common failure message, which is what makes it actionable —
+  "exit status 78" says misconfiguration rather than flake. Findings are
+  advisory: waste must be loud, but gating the city's dispatch on it would
+  trade a token leak for a throughput stall.
+
+  Progress is attributed through `payload.assignee`, not the event `actor`
+  field. Measured against a live 72MB log, `actor` carries no agent identity at
+  all — it is `cache-reconcile` on all 9,518 `bead.closed` events and `gc` on
+  all 1,368 `session.woke` events — so an actor-based detector would have
+  reported every agent in the city as idle. Mail is excluded from progress: the
+  known spawn-loop agent closed two beads during its 19h of doing nothing and
+  both were messages, so counting them would have silenced the alarm on the
+  incident the check exists to catch.
+
+- **`events.ReadTailSince` reads a trailing time window from the event log.**
+  `ReadFilteredTail` bounds a tail read by count, so a time predicate never
+  stops its backward walk — `Filter{Since: t}` with a useful limit pays for the
+  whole log. On a 70MB log that measured 348ms to return 143 events, where the
+  time-bounded walk returns a full 24h (19,269 events) in 158ms.
+
 ### Fixed
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
