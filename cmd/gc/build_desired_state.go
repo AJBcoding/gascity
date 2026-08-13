@@ -1635,6 +1635,14 @@ func defaultScaleCheckCountsAndDemand(cfg *config.City, targets []defaultScaleCh
 			if strings.TrimSpace(b.Assignee) != "" {
 				continue
 			}
+			// Route-scoped and unassigned: this is a Tier 3 pool-demand query
+			// deciding what to DO, so a parked bead is not demand (ga-5736js).
+			// Counting one spawns a slot the dispatcher then correctly refuses
+			// to serve, and since nothing about the bead changes it is counted
+			// again every tick — a spawn loop that cannot self-drain (gas-qckc).
+			if beadHasDispatchHold(b.Labels) {
+				continue
+			}
 			template := controllerDemandRouteTarget(cfg, b, group.templates)
 			if _, ok := group.templates[template]; !ok {
 				continue

@@ -982,6 +982,129 @@ func TestDefaultScaleCheckCountsAndDemandLeavesUnmatchedInstanceSuffixAlone(t *t
 	}
 }
 
+// TestDefaultScaleCheckCountsAndDemandExcludesHeldBeads pins the pool-demand
+// probe to the hold-label contract in internal/beadmeta/hold_labels.go: this is
+// a route-scoped, unassigned Tier 3 query deciding what to DO, so a held bead
+// contributes no demand.
+//
+// Without the filter the spawner and the claimer disagree about the same bead
+// and the pool cannot self-drain: demand counts a held+routed bead, the
+// reconciler spawns a slot, the agent evaluates it through the dispatcher path
+// (filterReadyByRoute), which correctly excludes holds and finds nothing
+// claimable, the unclaimed slot retires, and the still-ready bead is counted
+// again on the next tick. Measured at 14 respawns in 41 minutes on one bead,
+// each a full provider session doing no work (gas-qckc, py-6fmk1).
+//
+// Iterate beadmeta.DispatchHoldLabels rather than naming labels literally so a
+// future hold value is covered without editing this test.
+func TestDefaultScaleCheckCountsAndDemandExcludesHeldBeads(t *testing.T) {
+	const template = "hello-world/polecat"
+	if len(beadmeta.DispatchHoldLabels) == 0 {
+		t.Fatal("beadmeta.DispatchHoldLabels is empty; the hold contract has no values to enforce")
+	}
+	for _, label := range beadmeta.DispatchHoldLabels {
+		t.Run(label, func(t *testing.T) {
+			store := beads.NewMemStore()
+			if _, err := store.Create(beads.Bead{
+				Title:  "routed pool work parked on " + label,
+				Type:   "task",
+				Status: "open",
+				Labels: []string{label},
+				Metadata: map[string]string{
+					beadmeta.RoutedToMetadataKey: template,
+				},
+			}); err != nil {
+				t.Fatalf("create held routed bead: %v", err)
+			}
+
+			counts, demand, partialTemplates, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+				template: template,
+				storeKey: "rig:hello-world",
+				store:    store,
+			}})
+			if len(errs) != 0 {
+				t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+			}
+			if len(partialTemplates) != 0 {
+				t.Fatalf("partialTemplates = %v, want none", partialTemplates)
+			}
+			if got := counts[template]; got != 0 {
+				t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 0 for a ready unassigned bead labeled %q", template, got, label)
+			}
+			if got := demand[template].WorkBeadIDs; len(got) != 0 {
+				t.Fatalf("WorkBeadIDs = %v, want none for a bead labeled %q", got, label)
+			}
+		})
+	}
+
+	// Control: the same bead without a hold label is ordinary pool demand. This
+	// is what keeps the fix a filter rather than a blanket suppression.
+	t.Run("unheld", func(t *testing.T) {
+		store := beads.NewMemStore()
+		work, err := store.Create(beads.Bead{
+			Title:  "routed pool work",
+			Type:   "task",
+			Status: "open",
+			Metadata: map[string]string{
+				beadmeta.RoutedToMetadataKey: template,
+			},
+		})
+		if err != nil {
+			t.Fatalf("create routed bead: %v", err)
+		}
+
+		counts, demand, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+			template: template,
+			storeKey: "rig:hello-world",
+			store:    store,
+		}})
+		if len(errs) != 0 {
+			t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+		}
+		if got := counts[template]; got != 1 {
+			t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 1 for an unheld routed bead", template, got)
+		}
+		if got := demand[template].WorkBeadIDs; !reflect.DeepEqual(got, []string{work.ID}) {
+			t.Fatalf("WorkBeadIDs = %v, want [%s]", got, work.ID)
+		}
+	})
+}
+
+// TestDefaultScaleCheckCountsAndDemandCountsHeldAssignedBeadsNowhere documents
+// the boundary the hold contract draws: the pool-demand probe already skips
+// every assigned bead, held or not, because assigned work is answered by the
+// assignee-scoped tiers (filterReadyByAssignee) which stay hold-TRANSPARENT by
+// design. Adding the hold filter here must not change that — a held bead's
+// owner must remain visible to those tiers and to crash recovery (ga-5736js).
+func TestDefaultScaleCheckCountsAndDemandCountsHeldAssignedBeadsNowhere(t *testing.T) {
+	const template = "hello-world/polecat"
+	store := beads.NewMemStore()
+	if _, err := store.Create(beads.Bead{
+		Title:    "held work already owned by a session",
+		Type:     "task",
+		Status:   "open",
+		Assignee: "hello-world/polecat-1",
+		Labels:   []string{beadmeta.HoldMayorLabel},
+		Metadata: map[string]string{
+			beadmeta.RoutedToMetadataKey: template,
+		},
+	}); err != nil {
+		t.Fatalf("create held assigned bead: %v", err)
+	}
+
+	counts, _, _, errs := defaultScaleCheckCountsAndDemand(nil, []defaultScaleCheckTarget{{
+		template: template,
+		storeKey: "rig:hello-world",
+		store:    store,
+	}})
+	if len(errs) != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand errs = %v", errs)
+	}
+	if got := counts[template]; got != 0 {
+		t.Fatalf("defaultScaleCheckCountsAndDemand[%q] = %d, want 0: assigned work is not fresh pool demand", template, got)
+	}
+}
+
 func TestDefaultScaleCheckCountsUsesLiveReadyWhenCachedRowWasAssigned(t *testing.T) {
 	const template = "gascity/workflows.codex-min"
 	backing := beads.NewMemStore()

@@ -2330,6 +2330,32 @@ func beadLabelsContain(labels []string, want string) bool {
 	return false
 }
 
+// beadHasDispatchHold reports whether labels carry any canonical dispatch hold
+// value (beadmeta.DispatchHoldLabels) — a bead deliberately parked because its
+// required next actor or condition is, by construction, not the caller.
+//
+// This is the typed-bead shape of the hold check. Route-scoped, unassigned
+// tiers that decide what to DO — the control dispatcher's routed/run-target
+// tiers and the Tier 3 pool-demand probe — must call it. The assignee-scoped
+// demand/liveness tiers (filterReadyByAssignee) answer the opposite question,
+// "does a session still need to EXIST", and stay hold-transparent by design;
+// they must never call it (ga-5736js). See internal/beadmeta/hold_labels.go.
+//
+// It exists because the same three-line loop was open-coded at each new
+// route-scoped tier and a tier was missed each time — ga-5736js, then gas-kg6,
+// then the pool-demand probe (gas-qckc). The hook path's JSON shape
+// (isHeldHookCandidate) and the shell-flag renderer
+// (controlReadyExcludeHoldLabelsShellArgs) read different inputs and keep their
+// own spellings of the same contract.
+func beadHasDispatchHold(labels []string) bool {
+	for _, hold := range beadmeta.DispatchHoldLabels {
+		if beadLabelsContain(labels, hold) {
+			return true
+		}
+	}
+	return false
+}
+
 type orderTrackingSweepResult struct {
 	trackingClosed  int
 	wispClosed      int
