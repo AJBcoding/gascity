@@ -288,6 +288,7 @@ func gitCommitOnRemote(repoDir, commit string) bool {
 // misconfiguration, and the durability rule answers those two differently
 // (gas-avv). Both results are nil when the remote list could not be read, which
 // callers treat as fail-closed.
+//
 // The classification itself lives in internal/git (git.PublicationRemotes),
 // where the durability probes that gate worktree reclamation can also reach it.
 // Keeping one implementation is the point: this gate was fixed for
