@@ -252,6 +252,13 @@ func (g *Git) HasUnreachableCommits() bool {
 // `git worktree remove` deletes the checkout, not refs/heads, so commits a
 // local branch still reaches survive the removal.
 //
+// The blanket --remotes is correct HERE and must not be "fixed" to match the
+// publication filter above. This asks a LOCAL reachability question, and a
+// self-referential remote's refs/remotes/<name>/* entries live in this repo's
+// own ref store: they genuinely keep the objects alive across a worktree
+// removal, whatever they say about durability. Publication is the question
+// where those refs lie (gas-9sg); orphaning is not.
+//
 // The distinction is load-bearing for merge workflows that delete the branch
 // from the remote after merging. Once the remote branch is gone — and once a
 // squash-merge has given the merged change a different SHA on the target branch
