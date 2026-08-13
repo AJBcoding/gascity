@@ -540,6 +540,75 @@ test_bead_id_branch_resolves_multi_level_subbead_id() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression (gas-3nub): the branch pattern hardcoded the ga- prefix and a
+# 6-char id body, so it NEVER matched other rigs' ids — gascity's gas- prefix
+# with 3-4 char bodies missed on both halves, silently killing the primary
+# resolution path for the entire rig. Pins a non-ga- prefix with a 4-char
+# body resolving via the branch name, observed the same way as the sibling
+# branch-wins test: force the assignee fallback to disagree so the resolver's
+# warning names the id it actually picked.
+test_bead_id_branch_resolves_non_ga_prefix() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "polecat/gas-3nub")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"gas-other1"}]' > "$fbd/fake-bd-state/list-json"
+    write_show_json "$fbd" "gas-3nub" "in_progress" "agent-x" "tmpl-x" "[]"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "gas-3nub" <<<"$out" && grep -q "gas-other1" <<<"$out"; then
+        record_pass "resolve/branch-resolves-non-ga-prefix (rc=0, warning names gas-3nub as the branch-derived id)"
+    else
+        record_fail "resolve/branch-resolves-non-ga-prefix" "expected rc=0 with the branch-derived gas-3nub named (prefix-agnostic pattern), got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# The live gas-3nub incident, end to end: pushing polecat/gas-kg6 from a
+# session holding THREE in-progress beads, where the first-sorting one
+# (gas-axez) is routed to another template. The dead branch pattern dropped
+# resolution to the assignee fallback's arbitrary .[0] pick, and the push
+# was blocked on gas-axez's routing — a bead unrelated to the push. With the
+# prefix-agnostic pattern the branch resolves gas-kg6 directly and the push
+# is judged on the right bead. Needs an id-aware fake bd (same technique as
+# the deploy-gate test above) because the discriminator is which bead the
+# guard consults, not just which id a warning names. Also pins that the
+# branch-vs-fallback disagreement warning stays quiet here: with multiple
+# in-progress rows the fallback has no single answer to disagree with, and
+# warning against an arbitrary .[0] pick was spurious noise.
+test_bead_id_branch_wins_over_multi_row_fallback() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "polecat/gas-kg6")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    cat > "$fbd/bd" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+case "$1" in
+  show)
+    case "$2" in
+      gas-kg6)  printf '[{"id":"gas-kg6","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"tmpl-x"},"labels":[]}]' ;;
+      gas-axez) printf '[{"id":"gas-axez","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"gastown.mayor"},"labels":[]}]' ;;
+      gas-px0)  printf '[{"id":"gas-px0","status":"in_progress","assignee":"agent-x","metadata":{"gc.routed_to":"gastown.mayor"},"labels":[]}]' ;;
+      *) exit 1 ;;
+    esac
+    ;;
+  list)
+    printf '[{"id":"gas-axez"},{"id":"gas-kg6"},{"id":"gas-px0"}]'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+FAKE
+    chmod +x "$fbd/bd"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && ! grep -qi "WARNING" <<<"$out"; then
+        record_pass "resolve/branch-wins-over-multi-row-fallback (rc=0, judged on gas-kg6, no spurious disagreement warning)"
+    else
+        record_fail "resolve/branch-wins-over-multi-row-fallback" "expected rc=0 with no spurious warning (branch must resolve gas-kg6, not an arbitrary fallback row), got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
 test_bead_id_fallback_used_when_branch_no_match() {
     local repo fbd out rc
     repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
@@ -717,6 +786,80 @@ test_fallback_cannot_detect_staleness_after_status_leaves_in_progress() {
     rm -rf "$repo" "$fbd"
 }
 
+# Regression (gas-3nub): when the branch name doesn't resolve an id and the
+# assignee fallback finds MORE THAN ONE in-progress row, that is ambiguity,
+# not an answer — taking .[0] silently asserted a fact the data does not
+# support and judged the push against an arbitrary bead. The guard must
+# block with a message that names every candidate and the POG_DISABLE
+# escape (which keeps the test gate, unlike --no-verify), and must never
+# call `bd show` on a guessed id — no show-json is configured, so a stray
+# show would surface as an "unreachable" BLOCKED line naming one id only.
+test_multi_row_fallback_without_branch_id_blocks() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "chore/unrelated-cleanup")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"gas-axez"},{"id":"gas-px0"}]' > "$fbd/fake-bd-state/list-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "gas-axez" <<<"$out" && grep -q "gas-px0" <<<"$out" \
+        && grep -q "POG_DISABLE" <<<"$out" && ! grep -qi "unreachable" <<<"$out"; then
+        record_pass "resolve/multi-row-fallback-without-branch-id-blocks (rc=$rc, names both candidates + POG_DISABLE, no guessed bd show)"
+    else
+        record_fail "resolve/multi-row-fallback-without-branch-id-blocks" "expected rc!=0 naming both candidate ids and POG_DISABLE without any guessed 'bd show', got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Same ambiguity on the deploy/*-gate branch shape, where the branch-derived
+# id is deliberately discarded: with the assignee read as the only signal,
+# more than one in-progress row leaves no single bead to verify — block and
+# name the candidates rather than picking .[0].
+test_deploy_gate_multi_row_fallback_blocks() {
+    local repo fbd out rc
+    repo="$(new_repo_with_branch "deploy/ga-g5ihlp-gate")"
+    fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+    write_fake_bd "$fbd"
+    printf '[{"id":"ga-mit0gh"},{"id":"ga-other01"}]' > "$fbd/fake-bd-state/list-json"
+    out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "ga-mit0gh" <<<"$out" && grep -q "ga-other01" <<<"$out" \
+        && grep -q "POG_DISABLE" <<<"$out" && ! grep -qi "unreachable" <<<"$out"; then
+        record_pass "resolve/deploy-gate-multi-row-fallback-blocks (rc=$rc, names both candidates + POG_DISABLE)"
+    else
+        record_fail "resolve/deploy-gate-multi-row-fallback-blocks" "expected rc!=0 naming both candidate ids and POG_DISABLE, got rc=$rc, output: $out"
+    fi
+    rm -rf "$repo" "$fbd"
+}
+
+# Boundary pin for the prefix-agnostic pattern (gas-3nub): real non-bead
+# branch names in this city must stay UNMATCHED, or their pushes would
+# false-resolve a garbage id and fail closed on a bead that doesn't exist —
+# the false-block-teaches-bypass dynamic the pattern fix exists to end.
+# integration/deploy-20260804 pins the 4-letter prefix cap (deploy- is 6);
+# staging/gascity-lane pins the path-segment anchor (no mid-word
+# ascity-lane match); feat/mysql-first-class-backend pins both. Each must
+# fall through to a clean-empty fallback and allow (nothing to check).
+test_branch_pattern_ignores_non_bead_hyphenated_branches() {
+    local branch repo fbd out rc all_ok=1 detail=""
+    for branch in "integration/deploy-20260804" "staging/gascity-lane" "feat/mysql-first-class-backend"; do
+        repo="$(new_repo_with_branch "$branch")"
+        fbd="$(mktemp -d "${TMPDIR:-/tmp}/gc-pog-fakebd.XXXXXX")"
+        write_fake_bd "$fbd"
+        # No list-json (fake answers "[]") and no show-json: any false
+        # branch-id resolve would call `bd show`, fail, and BLOCK.
+        out="$(run_guard "$repo" "$fbd" "agent-x" "tmpl-x" 2>&1)"; rc=$?
+        if [[ $rc -ne 0 ]] || grep -qi "BLOCKED" <<<"$out"; then
+            all_ok=0
+            detail="$detail [$branch: rc=$rc out=$out]"
+        fi
+        rm -rf "$repo" "$fbd"
+    done
+    if [[ $all_ok -eq 1 ]]; then
+        record_pass "resolve/branch-pattern-ignores-non-bead-hyphenated-branches (all allowed, nothing to check)"
+    else
+        record_fail "resolve/branch-pattern-ignores-non-bead-hyphenated-branches" "expected rc=0 and no BLOCKED for every non-bead branch shape;$detail"
+    fi
+}
+
 # ---------------------------------------------------------------------------
 # Hook wiring — real .githooks/pre-push, real bare remote.
 #
@@ -854,6 +997,8 @@ run_all() {
     test_retry_parse_failure_message_mentions_retry_before_no_verify
     test_bead_id_branch_wins_and_warns_on_disagreement
     test_bead_id_branch_resolves_multi_level_subbead_id
+    test_bead_id_branch_resolves_non_ga_prefix
+    test_bead_id_branch_wins_over_multi_row_fallback
     test_bead_id_fallback_used_when_branch_no_match
     test_bead_id_deploy_gate_branch_prefers_live_assignee
     test_bead_id_deploy_gate_branch_allows_when_no_live_assignee
@@ -861,6 +1006,9 @@ run_all() {
     test_retry_recovers_bead_id_fallback_from_transient_failure
     test_allow_when_no_bead_id_resolvable
     test_fallback_cannot_detect_staleness_after_status_leaves_in_progress
+    test_multi_row_fallback_without_branch_id_blocks
+    test_deploy_gate_multi_row_fallback_blocks
+    test_branch_pattern_ignores_non_bead_hyphenated_branches
     test_hook_blocks_push_on_stale_claim
     test_hook_no_verify_bypasses_guard
     test_hook_allows_push_on_clean_claim
