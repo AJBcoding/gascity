@@ -3631,6 +3631,88 @@ func TestControllerStateCitySuspensionRecordsEvents(t *testing.T) {
 	}
 }
 
+func TestControllerStateRigSuspensionRecordsEvents(t *testing.T) {
+	cases := []struct {
+		name          string
+		initial       func(*config.City)
+		mutate        func(*controllerState) error
+		wantSuspended bool
+		wantEventType string
+	}{
+		{
+			name: "suspend rig",
+			mutate: func(cs *controllerState) error {
+				return cs.SuspendRig("rig1")
+			},
+			wantSuspended: true,
+			wantEventType: events.RigSuspended,
+		},
+		{
+			name: "resume rig",
+			initial: func(cfg *config.City) {
+				cfg.Rigs[0].SuspendedOnStart = true
+			},
+			mutate: func(cs *controllerState) error {
+				return cs.ResumeRig("rig1")
+			},
+			wantSuspended: false,
+			wantEventType: events.RigResumed,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs, tomlPath := newControllerStateMutationHarness(t)
+			ep := events.NewFake()
+			cs.eventProv = ep
+
+			if tc.initial != nil {
+				cfg, err := config.Load(fsys.OSFS{}, tomlPath)
+				if err != nil {
+					t.Fatalf("load config: %v", err)
+				}
+				tc.initial(cfg)
+				content, err := cfg.Marshal()
+				if err != nil {
+					t.Fatalf("marshal initial config: %v", err)
+				}
+				if err := os.WriteFile(tomlPath, content, 0o644); err != nil {
+					t.Fatalf("write initial config: %v", err)
+				}
+			}
+
+			if err := tc.mutate(cs); err != nil {
+				t.Fatalf("mutation failed: %v", err)
+			}
+
+			st, err := suspensionstate.Load(fsys.OSFS{}, filepath.Dir(tomlPath))
+			if err != nil {
+				t.Fatalf("load suspension state: %v", err)
+			}
+			if v, ok := suspensionstate.ExplicitRig(st, "rig1"); !ok || v != tc.wantSuspended {
+				t.Fatalf("runtime state ExplicitRig = (%v, %v), want (%v, true)", v, ok, tc.wantSuspended)
+			}
+
+			gotEvents, err := ep.List(events.Filter{})
+			if err != nil {
+				t.Fatalf("list events: %v", err)
+			}
+			if len(gotEvents) != 1 {
+				t.Fatalf("recorded events = %+v, want exactly one %s event", gotEvents, tc.wantEventType)
+			}
+			if gotEvents[0].Type != tc.wantEventType {
+				t.Fatalf("recorded event type = %q, want %q", gotEvents[0].Type, tc.wantEventType)
+			}
+			if gotEvents[0].Subject != "rig1" {
+				t.Fatalf("recorded event subject = %q, want %q", gotEvents[0].Subject, "rig1")
+			}
+			if gotEvents[0].Actor != "gc" {
+				t.Fatalf("recorded event actor = %q, want %q", gotEvents[0].Actor, "gc")
+			}
+		})
+	}
+}
+
 func TestControllerStateMutationErrorDoesNotPokeController(t *testing.T) {
 	cs, _ := newControllerStateMutationHarness(t)
 

@@ -5273,6 +5273,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'rig.provision.progress';
 } & TypedEventStreamEnvelopeRigProvisionProgress) | ({
+    type: 'rig.resumed';
+} & TypedEventStreamEnvelopeRigResumed) | ({
+    type: 'rig.suspended';
+} & TypedEventStreamEnvelopeRigSuspended) | ({
     type: 'session.cold_start_timeout';
 } & TypedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
@@ -6449,6 +6453,42 @@ export type TypedEventStreamEnvelopeRigProvisionProgress = {
 };
 
 /**
+ * TypedEventStreamEnvelope rig.resumed
+ */
+export type TypedEventStreamEnvelopeRigResumed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'rig.resumed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope rig.suspended
+ */
+export type TypedEventStreamEnvelopeRigSuspended = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'rig.suspended';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope session.cold_start_timeout
  */
 export type TypedEventStreamEnvelopeSessionColdStartTimeout = {
@@ -7080,6 +7120,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeRequestResultSessionSubmit) | ({
     type: 'rig.provision.progress';
 } & TypedTaggedEventStreamEnvelopeRigProvisionProgress) | ({
+    type: 'rig.resumed';
+} & TypedTaggedEventStreamEnvelopeRigResumed) | ({
+    type: 'rig.suspended';
+} & TypedTaggedEventStreamEnvelopeRigSuspended) | ({
     type: 'session.cold_start_timeout';
 } & TypedTaggedEventStreamEnvelopeSessionColdStartTimeout) | ({
     type: 'session.crashed';
@@ -8314,6 +8358,44 @@ export type TypedTaggedEventStreamEnvelopeRigProvisionProgress = {
     subject?: string;
     ts: string;
     type: 'rig.provision.progress';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope rig.resumed
+ */
+export type TypedTaggedEventStreamEnvelopeRigResumed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'rig.resumed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope rig.suspended
+ */
+export type TypedTaggedEventStreamEnvelopeRigSuspended = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: NoPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'rig.suspended';
     workflow?: WorkflowEventProjection;
 };
 

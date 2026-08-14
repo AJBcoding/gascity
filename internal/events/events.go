@@ -181,6 +181,17 @@ const (
 	SupervisorRequest = "supervisor.request"
 	CitySuspended     = "city.suspended"
 	CityResumed       = "city.resumed"
+	// RigSuspended fires when a rig's runtime suspension is recorded — via
+	// CLI (`gc rig suspend`) or the dashboard API. Suspension removes the
+	// rig's agents from the desired state AND stops its rig-scoped orders
+	// from firing, so the flip must be attributable on the event bus: a
+	// silent suspension left every rig-scoped order in a city unfired for
+	// 2.5 days with no audit trail of who or when (gas-9gny). Subject is
+	// the rig name.
+	RigSuspended = "rig.suspended"
+	// RigResumed fires when a rig's runtime suspension is lifted. Subject
+	// is the rig name.
+	RigResumed = "rig.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -337,6 +348,7 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	CitySuspended, CityResumed,
+	RigSuspended, RigResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
