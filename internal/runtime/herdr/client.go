@@ -125,6 +125,12 @@ type agentInfo struct {
 	TerminalID  string `json:"terminal_id"`
 	AgentStatus string `json:"agent_status"`
 	Cwd         string `json:"cwd"`
+	// StateChangeSeq is the session-global monotonic sequence number herdr
+	// stamped at this agent's last status transition. It carries no wall-clock
+	// meaning and does not advance while a status persists (a working agent's
+	// seq is frozen for the whole turn); its one guarantee is that a changed
+	// value proves a transition happened since the previous observation.
+	StateChangeSeq int64 `json:"state_change_seq"`
 }
 
 // startupBootBudgetMS is the bound every wait that can land inside an agent's

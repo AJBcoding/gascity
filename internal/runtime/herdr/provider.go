@@ -794,17 +794,13 @@ func (p *Provider) SendKeys(name string, keys ...string) error {
 func (p *Provider) Capabilities() runtime.ProviderCapabilities {
 	return runtime.ProviderCapabilities{
 		CanReportAttachment: false, // no clean IsAttached query
-		CanReportActivity:   false, // no GetLastActivity
+		CanReportActivity:   true,  // derived by observation — see activity.go
 		CanStream:           false, // socket-event streaming is a later optimization
 		CanAttachTTY:        true,  // agent attach
 	}
 }
 
 // ── best-effort / unsupported (the contract permits these) ───────────────────
-
-// GetLastActivity is unsupported (herdr exposes no activity timestamp); it
-// returns the zero time.
-func (p *Provider) GetLastActivity(_ string) (time.Time, error) { return time.Time{}, nil }
 
 // ClearScrollback is a no-op: herdr exposes no scrollback-clear op.
 func (p *Provider) ClearScrollback(_ string) error { return nil }
