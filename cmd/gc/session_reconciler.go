@@ -1562,6 +1562,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		return rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 	}
+	// gas-eere: one suspension-state read for the whole pass — the preserve
+	// gate below resolves effective (city/agent/rig) suspension per session
+	// against this snapshot instead of re-reading the file per bead.
+	suspState := loadSuspensionStateBestEffort(cityPath)
 	phaseStart = time.Now()
 	for i := range orderedRows {
 		if ctx != nil && ctx.Err() != nil {
@@ -1732,7 +1736,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// The two trace-payload reads (pending_create_claim, state) read the typed
 			// snapshot: Info.PendingCreateClaimMetadata (the verbatim raw-string mirror,
 			// Step 6a) and Info.MetadataState (Step 5a).
-			preserveNamed := preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName)
+			preserveNamed := preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName, cityPath, suspState)
 			// #3630: the configured spec is present this tick — reset any
 			// suspend-drain confirmation window so a later genuine removal still
 			// gets the full confirmation buffer.

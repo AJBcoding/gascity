@@ -28,6 +28,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 type countingMetadataStore struct {
@@ -8509,10 +8511,121 @@ func TestPreserveConfiguredNamedSessionBead_StateGate(t *testing.T) {
 				Labels:   []string{sessionBeadLabel, "agent:mayor"},
 				Metadata: meta,
 			}
-			got := preserveConfiguredNamedSessionBead(b, cfg, cityName)
+			got := preserveConfiguredNamedSessionBead(b, cfg, cityName, "", suspensionstate.State{})
 			if got != tc.want {
 				t.Fatalf("preserveConfiguredNamedSessionBead(state=%q sleep_reason=%q last_woke_at=%q) = %v, want %v",
 					tc.state, tc.sleepReason, tc.lastWokeAt, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestPreserveConfiguredNamedSessionBead_EffectiveSuspensionReleases covers
+// gas-eere: a named session whose backing agent is effectively suspended —
+// rig suspended_on_start, a runtime rig override, the agent's own suspended
+// flag, or city suspension — must NOT be preserved. Preserve marks the
+// session desired, which starves the reconciler's "suspended" drain/close and
+// keeps pack-agent runtimes (witness et al.) cycling on a suspended rig
+// forever. Both the raw-bead and session.Info siblings are asserted on every
+// case so the equivalence contract holds through the new gate.
+func TestPreserveConfiguredNamedSessionBead_EffectiveSuspensionReleases(t *testing.T) {
+	cityName := "test-city"
+	workspace := config.Workspace{Name: cityName}
+	rigDir := t.TempDir()
+	baseCfg := func() *config.City {
+		return &config.City{
+			Workspace:     workspace,
+			Rigs:          []config.Rig{{Name: "kit", Path: rigDir}},
+			Agents:        []config.Agent{{Name: "witness", Dir: "kit", StartCommand: "true"}},
+			NamedSessions: []config.NamedSession{{Template: "witness", Dir: "kit", Mode: "always"}},
+		}
+	}
+	identity := "kit/witness"
+	sessionName := config.NamedSessionRuntimeName(cityName, workspace, identity)
+	suspended, resumed := true, false
+
+	cases := []struct {
+		name   string
+		mutate func(*config.City)
+		state  func() suspensionstate.State
+		want   bool
+	}{
+		{
+			name:  "unsuspended holds",
+			state: func() suspensionstate.State { return suspensionstate.State{} },
+			want:  true,
+		},
+		{
+			name:   "rig suspended_on_start releases",
+			mutate: func(cfg *config.City) { cfg.Rigs[0].SuspendedOnStart = true },
+			state:  func() suspensionstate.State { return suspensionstate.State{} },
+			want:   false,
+		},
+		{
+			name: "runtime rig suspension releases",
+			state: func() suspensionstate.State {
+				var st suspensionstate.State
+				suspensionstate.SetRig(&st, "kit", &suspended)
+				return st
+			},
+			want: false,
+		},
+		{
+			name:   "runtime resume overrides rig suspended_on_start and holds",
+			mutate: func(cfg *config.City) { cfg.Rigs[0].SuspendedOnStart = true },
+			state: func() suspensionstate.State {
+				var st suspensionstate.State
+				suspensionstate.SetRig(&st, "kit", &resumed)
+				return st
+			},
+			want: true,
+		},
+		{
+			name:   "agent suspended flag releases",
+			mutate: func(cfg *config.City) { cfg.Agents[0].Suspended = true },
+			state:  func() suspensionstate.State { return suspensionstate.State{} },
+			want:   false,
+		},
+		{
+			name: "runtime city suspension releases",
+			state: func() suspensionstate.State {
+				var st suspensionstate.State
+				suspensionstate.SetCity(&st, &suspended)
+				return st
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := baseCfg()
+			if tc.mutate != nil {
+				tc.mutate(cfg)
+			}
+			b := beads.Bead{
+				ID:     "gm-eere-" + tc.name,
+				Title:  "witness",
+				Type:   sessionBeadType,
+				Status: "open",
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":               sessionName,
+					"template":                   identity,
+					"agent_name":                 identity,
+					"state":                      "active",
+					namedSessionMetadataKey:      "true",
+					namedSessionIdentityMetadata: identity,
+					namedSessionModeMetadata:     "always",
+				},
+			}
+			st := tc.state()
+			if got := preserveConfiguredNamedSessionBead(b, cfg, cityName, "", st); got != tc.want {
+				t.Fatalf("preserveConfiguredNamedSessionBead = %v, want %v", got, tc.want)
+			}
+			info := sessiontest.SeedBead(t, b)
+			if got := preserveConfiguredNamedSessionBeadInfo(info, cfg, cityName, "", st); got != tc.want {
+				t.Fatalf("preserveConfiguredNamedSessionBeadInfo = %v, want %v", got, tc.want)
 			}
 		})
 	}

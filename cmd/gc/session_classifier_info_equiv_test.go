@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/session/sessiontest"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // TestSessionClassifierInfoEquivalence is the byte-identical oracle for P2 of
@@ -1061,7 +1062,7 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 	// its spec AND hit the keep-alias true branch under namedSpecCfg, so the
 	// preserveConfiguredNamedSessionBead equivalence case below is a real
 	// true-branch comparison, not a trivial both-false pass.
-	if !preserveConfiguredNamedSessionBead(beadsByShape["named"], namedSpecCfg, "") {
+	if !preserveConfiguredNamedSessionBead(beadsByShape["named"], namedSpecCfg, "", "", suspensionstate.State{}) {
 		t.Fatal("preserveConfiguredNamedSessionBead(named, namedSpecCfg) = false; fixture/cfg no longer exercise the keep-alias true branch")
 	}
 
@@ -1085,8 +1086,12 @@ func TestSessionClassifierInfoEquivalence(t *testing.T) {
 			func(i session.Info) bool { return configuredNamedSessionBeadHasSpecInfo(i, namedSpecCfg, "") },
 		},
 		"preserveConfiguredNamedSessionBead": {
-			func(b beads.Bead) bool { return preserveConfiguredNamedSessionBead(b, namedSpecCfg, "") },
-			func(i session.Info) bool { return preserveConfiguredNamedSessionBeadInfo(i, namedSpecCfg, "") },
+			func(b beads.Bead) bool {
+				return preserveConfiguredNamedSessionBead(b, namedSpecCfg, "", "", suspensionstate.State{})
+			},
+			func(i session.Info) bool {
+				return preserveConfiguredNamedSessionBeadInfo(i, namedSpecCfg, "", "", suspensionstate.State{})
+			},
 		},
 	}
 

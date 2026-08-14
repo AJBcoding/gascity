@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // sessionBeadLabel is the label for all session beads.
@@ -273,7 +274,7 @@ func canRebindConfiguredNamedSession(b beads.Bead, identity, sessionName, backin
 	return sn == sessionName || sn == identity
 }
 
-func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName string) bool {
+func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName, cityPath string, suspState suspensionstate.State) bool {
 	if cfg == nil || !isNamedSessionBead(b) {
 		return false
 	}
@@ -283,6 +284,14 @@ func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName
 	}
 	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
 	if !ok {
+		return false
+	}
+	// gas-eere: a named session whose backing agent is effectively suspended
+	// (city, agent flag, or rig — the same resolver the awake bridge uses)
+	// must not be preserved. Preserve marks the session desired, which makes
+	// the reconciler's "suspended" drain/close unreachable and keeps the
+	// runtime cycling on a suspended rig forever.
+	if isAgentEffectivelySuspendedWith(cfg, cityPath, spec.Agent, suspState) {
 		return false
 	}
 	if strings.TrimSpace(b.Metadata["session_name"]) != spec.SessionName {
@@ -325,7 +334,7 @@ func preserveConfiguredNamedSessionBead(b beads.Bead, cfg *config.City, cityName
 // Info.LastWokeAt) so the identity match and terminal-state gate are byte-identical
 // to the raw form; isNamedSessionInfo / namedSessionIdentityInfo are the proven
 // leaf siblings and findNamedSessionSpec keys off the same projected identity.
-func preserveConfiguredNamedSessionBeadInfo(i session.Info, cfg *config.City, cityName string) bool {
+func preserveConfiguredNamedSessionBeadInfo(i session.Info, cfg *config.City, cityName, cityPath string, suspState suspensionstate.State) bool {
 	if cfg == nil || !isNamedSessionInfo(i) {
 		return false
 	}
@@ -335,6 +344,11 @@ func preserveConfiguredNamedSessionBeadInfo(i session.Info, cfg *config.City, ci
 	}
 	spec, ok := findNamedSessionSpec(cfg, cityName, identity)
 	if !ok {
+		return false
+	}
+	// gas-eere: mirror of the raw form's effective-suspension gate — a named
+	// session on a suspended city/agent/rig releases instead of preserving.
+	if isAgentEffectivelySuspendedWith(cfg, cityPath, spec.Agent, suspState) {
 		return false
 	}
 	if strings.TrimSpace(i.SessionNameMetadata) != spec.SessionName {
@@ -2148,6 +2162,10 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 
 	// Classify and close beads with no matching desired entry.
 	if !skipClose {
+		// gas-eere: one suspension-state read for the whole classification
+		// loop — the preserve gate resolves effective (city/agent/rig)
+		// suspension per bead against this snapshot.
+		suspState := loadSuspensionStateBestEffort(cityPath)
 		for _, b := range openBeads {
 			sn := b.Metadata["session_name"]
 			if sn == "" {
@@ -2176,7 +2194,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					continue
 				}
 			}
-			if preserveConfiguredNamedSessionBead(b, cfg, cityName) {
+			if preserveConfiguredNamedSessionBead(b, cfg, cityName, cityPath, suspState) {
 				continue
 			}
 			if spec, conflict, err := findConflictingNamedSessionSpecForBead(cfg, cityName, b); err != nil {
