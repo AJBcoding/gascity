@@ -43,6 +43,8 @@ HOOK="$REPO_ROOT/.githooks/pre-push"
 SELECTOR="$REPO_ROOT/scripts/ci-static-select"
 RUNNER="$REPO_ROOT/scripts/test-local-parallel"
 OWNERSHIP_GUARD="$REPO_ROOT/scripts/push-ownership-guard.sh"
+JOB_COUNT="$REPO_ROOT/scripts/test-local-job-count"
+PUSH_GATE_LOCK_LIB="$REPO_ROOT/scripts/push-gate-lock-lib.sh"
 
 pass=0; fail=0
 record_pass() { echo "  ok   $1"; pass=$((pass + 1)); }
@@ -104,6 +106,9 @@ install_hook() {
     cp "$HOOK" "$repo/.githooks/pre-push"
     chmod +x "$repo/.githooks/pre-push"
     cp "$OWNERSHIP_GUARD" "$repo/scripts/push-ownership-guard.sh"
+    cp "$JOB_COUNT" "$repo/scripts/test-local-job-count"
+    chmod +x "$repo/scripts/test-local-job-count"
+    cp "$PUSH_GATE_LOCK_LIB" "$repo/scripts/push-gate-lock-lib.sh"
     printf 'test-fast-parallel:\n\t@echo SUITE-RAN\n' > "$repo/Makefile"
     git -C "$repo" config core.hooksPath .githooks
 }
@@ -405,6 +410,119 @@ test_disk_preflight_fails_open_when_df_unreadable() {
         record_pass "disk/fails-open-when-df-unreadable (unmeasurable disk does not block the push)"
     else
         record_fail "disk/fails-open-when-df-unreadable" "expected fail-open reaching the suite, got rc=$rc output: $out"
+    fi
+    rm -rf "$remote" "$work" "$stub"
+}
+
+# stub_df_with_free_kib writes a fake `df` into <dir> that always reports
+# <free_kib> available on any target, in the same `df -Pk` column layout the
+# hook parses (NR==2, field 4). Lets a test pin an exact free-space number
+# instead of depending on the real host's disk (gas-206j).
+stub_df_with_free_kib() { # stub_df_with_free_kib <dir> <free_kib>
+    local dir="$1" free_kib="$2"
+    cat > "$dir/df" <<EOF
+#!/bin/sh
+printf 'Filesystem     1024-blocks      Used Available Capacity Mounted on\n'
+printf 'stubfs         100000000  50000000 %s  50%% /\n' "$free_kib"
+EOF
+    chmod +x "$dir/df"
+}
+
+# gas-206j: the flat 10 GiB floor passed at 26 GiB free while an 11-shard
+# sweep wanted ~31 GiB (11 shards x ~2.8 GiB test binaries each, concurrent —
+# scripts/test-go-test-shard runs plain `go test`, which builds its binary to
+# a temp dir and removes it when that shard's process exits, so peak disk is
+# bounded by concurrent shards, not total shards ever run). The default floor
+# must scale with the job count the runner will actually use.
+test_disk_preflight_default_scales_with_job_count() {
+    local remote work stub out rc
+    read -r remote work <<<"$(setup_scenario)"
+    git -C "$work" checkout -q wb
+    stub="$(mktemp -d "${TMPDIR:-/tmp}/gc-pwg-stub.XXXXXX")"
+    # 32 GiB: above the old flat 10 GiB floor, below 11 jobs x 3 GiB = 33 GiB.
+    stub_df_with_free_kib "$stub" $((32 * 1024 * 1024))
+    out="$(cd "$work" && PATH="$stub:$PATH" GC_PREPUSH_MIN_FREE_GIB= LOCAL_TEST_JOBS=11 git push origin wb 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && [[ -z "$(remote_sha "$remote" "refs/heads/wb")" ]] \
+        && grep -q "REFUSING" <<<"$out" \
+        && grep -q "33 GiB" <<<"$out" \
+        && ! grep -q "SUITE-RAN" <<<"$out"; then
+        record_pass "disk/default-scales-with-job-count (11 jobs -> 33 GiB floor refuses 32 GiB free)"
+    else
+        record_fail "disk/default-scales-with-job-count" "expected refusal citing a 33 GiB floor, got rc=$rc output: $out"
+    fi
+    rm -rf "$remote" "$work" "$stub"
+}
+
+test_disk_preflight_default_allows_above_scaled_floor() {
+    local remote work stub out rc
+    read -r remote work <<<"$(setup_scenario)"
+    git -C "$work" checkout -q wb
+    stub="$(mktemp -d "${TMPDIR:-/tmp}/gc-pwg-stub.XXXXXX")"
+    # 34 GiB clears 11 jobs x 3 GiB = 33 GiB.
+    stub_df_with_free_kib "$stub" $((34 * 1024 * 1024))
+    out="$(cd "$work" && PATH="$stub:$PATH" GC_PREPUSH_MIN_FREE_GIB= LOCAL_TEST_JOBS=11 git push origin wb 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "SUITE-RAN" <<<"$out" && ! grep -q "REFUSING" <<<"$out"; then
+        record_pass "disk/default-allows-above-scaled-floor (11 jobs -> 33 GiB floor allows 34 GiB free)"
+    else
+        record_fail "disk/default-allows-above-scaled-floor" "expected the suite to run above the scaled floor, got rc=$rc output: $out"
+    fi
+    rm -rf "$remote" "$work" "$stub"
+}
+
+test_disk_preflight_default_floor_of_floor_stays_10gib() {
+    local remote work stub out rc
+    read -r remote work <<<"$(setup_scenario)"
+    git -C "$work" checkout -q wb
+    stub="$(mktemp -d "${TMPDIR:-/tmp}/gc-pwg-stub.XXXXXX")"
+    # 1 job x 3 GiB = 3 GiB must NOT become the floor: the original
+    # evidence-based 10 GiB (an incident host had 6.9 GiB free and that was
+    # not enough) stays the floor-of-the-floor regardless of job count.
+    stub_df_with_free_kib "$stub" $((8 * 1024 * 1024))
+    out="$(cd "$work" && PATH="$stub:$PATH" GC_PREPUSH_MIN_FREE_GIB= LOCAL_TEST_JOBS=1 git push origin wb 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] \
+        && grep -q "REFUSING" <<<"$out" \
+        && grep -q "10 GiB" <<<"$out" \
+        && ! grep -q "SUITE-RAN" <<<"$out"; then
+        record_pass "disk/default-floor-of-floor-stays-10gib (1 job stays at 10 GiB, not 3 GiB)"
+    else
+        record_fail "disk/default-floor-of-floor-stays-10gib" "expected refusal citing the 10 GiB floor-of-the-floor even at 1 job, got rc=$rc output: $out"
+    fi
+    rm -rf "$remote" "$work" "$stub"
+}
+
+test_disk_preflight_default_falls_back_when_job_count_unavailable() {
+    local remote work stub out rc
+    read -r remote work <<<"$(setup_scenario)"
+    git -C "$work" checkout -q wb
+    # Remove the job-count probe entirely so it genuinely cannot run — must
+    # fail open to the ORIGINAL flat 10 GiB, never to an unbounded floor.
+    rm -f "$work/scripts/test-local-job-count" "$work/scripts/push-gate-lock-lib.sh"
+    stub="$(mktemp -d "${TMPDIR:-/tmp}/gc-pwg-stub.XXXXXX")"
+    stub_df_with_free_kib "$stub" $((8 * 1024 * 1024))
+    out="$(cd "$work" && PATH="$stub:$PATH" GC_PREPUSH_MIN_FREE_GIB= LOCAL_TEST_JOBS= git push origin wb 2>&1)"; rc=$?
+    if [[ $rc -ne 0 ]] && grep -q "REFUSING" <<<"$out" && grep -q "10 GiB" <<<"$out"; then
+        record_pass "disk/default-falls-back-when-job-count-unavailable (missing probe -> original 10 GiB)"
+    else
+        record_fail "disk/default-falls-back-when-job-count-unavailable" "expected fallback to the 10 GiB floor, got rc=$rc output: $out"
+    fi
+    rm -rf "$remote" "$work" "$stub"
+}
+
+test_disk_preflight_default_uses_real_job_count_script() {
+    local remote work stub out rc
+    read -r remote work <<<"$(setup_scenario)"
+    git -C "$work" checkout -q wb
+    stub="$(mktemp -d "${TMPDIR:-/tmp}/gc-pwg-stub.XXXXXX")"
+    # Absurd free space clears whatever a real, unmocked test-local-job-count
+    # returns on this host — proves the wiring (path, invocation, arithmetic)
+    # works end to end without pinning a host-dependent exact number.
+    stub_df_with_free_kib "$stub" $((999999 * 1024 * 1024))
+    out="$(cd "$work" && PATH="$stub:$PATH" GC_PREPUSH_MIN_FREE_GIB= LOCAL_TEST_JOBS= git push origin wb 2>&1)"; rc=$?
+    if [[ $rc -eq 0 ]] && grep -q "SUITE-RAN" <<<"$out" && ! grep -q "REFUSING" <<<"$out"; then
+        record_pass "disk/default-uses-real-job-count-script (huge free space clears the real probe's floor)"
+    else
+        record_fail "disk/default-uses-real-job-count-script" "expected the suite to run via the real job-count probe, got rc=$rc output: $out"
     fi
     rm -rf "$remote" "$work" "$stub"
 }
@@ -749,6 +867,11 @@ run_all() {
     test_disk_preflight_blocks_push_below_floor
     test_disk_preflight_zero_floor_disables
     test_disk_preflight_fails_open_when_df_unreadable
+    test_disk_preflight_default_scales_with_job_count
+    test_disk_preflight_default_allows_above_scaled_floor
+    test_disk_preflight_default_floor_of_floor_stays_10gib
+    test_disk_preflight_default_falls_back_when_job_count_unavailable
+    test_disk_preflight_default_uses_real_job_count_script
     test_disk_preflight_precedes_suite_exec
     test_leaf_change_scopes_to_its_package
     test_widely_depended_change_selects_dependents
@@ -773,7 +896,7 @@ run_all() {
     # This file runs without `set -e`, so a mistyped case name above would
     # vanish silently instead of failing. Pin the case count so lost coverage
     # is loud.
-    local expected_cases=30
+    local expected_cases=35
     if [[ $((pass + fail)) -ne $expected_cases ]]; then
         echo "FAIL: recorded $((pass + fail)) cases, want $expected_cases — a case was lost or double-counted"
         return 1

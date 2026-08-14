@@ -144,9 +144,32 @@ fi
 # cannot answer, matching the session-spawn preflight in internal/session: a
 # check that cannot measure the disk must never be why a push stops working.
 #
-# The floor is evidence-backed rather than round: the incident host had 6.9 GiB
-# free and that was NOT enough. Override with GC_PREPUSH_MIN_FREE_GIB; 0 disables.
-min_free_gib="${GC_PREPUSH_MIN_FREE_GIB:-10}"
+# The floor-of-the-floor (10 GiB) is evidence-backed rather than round: the
+# incident host had 6.9 GiB free and that was NOT enough even for a single
+# job. Above that, the floor scales with how many shards will actually run
+# concurrently: scripts/test-go-test-shard runs plain `go test`, which builds
+# each shard's binary to a temp dir and removes it when that shard's process
+# exits, so peak disk is bounded by concurrent shards, not total shards ever
+# run — jobs x ~2.8 GiB (rounded up to 3) per shard is the honest number, not
+# an inflated one (gas-206j: a flat 10 GiB floor passed at 26 GiB free while
+# an 11-shard sweep wanted ~31 GiB). Read jobs the same way the runner does
+# (scripts/test-local-parallel), honoring LOCAL_TEST_JOBS first. Fails open to
+# the original flat 10 GiB if the probe is missing or unusable — a sizing
+# probe that cannot answer must never make the floor stricter than before.
+# Override the whole result with GC_PREPUSH_MIN_FREE_GIB; 0 disables.
+per_shard_gib=3
+default_jobs="${LOCAL_TEST_JOBS:-}"
+if [ -z "$default_jobs" ]; then
+  default_jobs="$("$worktree/scripts/test-local-job-count" 2>/dev/null || true)"
+fi
+if ! [ "$default_jobs" -gt 0 ] 2>/dev/null; then
+  default_jobs=1
+fi
+default_min_free_gib=$((default_jobs * per_shard_gib))
+if [ "$default_min_free_gib" -lt 10 ]; then
+  default_min_free_gib=10
+fi
+min_free_gib="${GC_PREPUSH_MIN_FREE_GIB:-$default_min_free_gib}"
 if [ "$min_free_gib" != "0" ]; then
   # -P for POSIX single-line output, -k for KiB units: portable across the
   # macOS and Linux hosts this repo builds on. The `|| true` is load-bearing:
