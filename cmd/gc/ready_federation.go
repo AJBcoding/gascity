@@ -59,6 +59,21 @@ package main
 // API. Promoting it to an error is a defensible product decision, but it is a
 // behavior change that has to land on BOTH surfaces at once.
 //
+// # Every leg answers the SAME question
+//
+// The legs are not wrapped alike. A work store sits behind cmd/gc's bead-policy
+// layer, which rewrites a TierIssues read to TierBoth before it reaches the
+// backend; a relocated class store has no such layer, because openStorageRoutes
+// keys the class map straight to the engine value the provider returned. So a
+// query that leaves TierMode at its zero value asks the work legs one question
+// and the class leg a narrower one, and the merge presents the two as one
+// answer. The class store's ephemeral tier — the wisps an orchestration step
+// runs as — drops out with no error and no short-array signal (ga-8lyxc).
+//
+// Every read below therefore states beads.FederatedReadTier explicitly on every
+// leg. That is the tier the policy-wrapped legs have always answered at, so it
+// changes nothing for a city that relocates no class.
+//
 // # Single-store cities take none of this
 //
 // relocatedGraphLegStore gates on STORE IDENTITY, the same rule the API's
@@ -189,11 +204,40 @@ func federateReadyBeads(legs []readyLeg, q beads.ReadyQuery) ([]beads.Bead, erro
 // The read is a direct store.List rather than the live handle's, because that
 // handle overrides TierMode to TierBoth and would silently discard the caller's
 // tier selection. The API's list arm reads the store directly for the same
-// reason.
+// reason. The caller states the tier it wants (readReadyCandidates), so nothing
+// here has to guess it.
 func federateListBeads(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, error) {
 	return federateBeadLegs(legs, func(store beads.Store) ([]beads.Bead, error) {
 		return store.List(q)
 	})
+}
+
+// federateListBeadsWithOwner is federateListBeads plus a record of which leg
+// served each merged row.
+//
+// It is separate rather than a widened federateListBeads because only the
+// crash-recovery arm needs the ownership map, and every other caller would then
+// carry a map it discards. The merge rule is the same one federateBeadLegs
+// applies — first leg to return an id wins — restated here rather than shared,
+// because sharing it would mean threading a per-leg callback through the read
+// closure that federateBeadLegs deliberately keeps store-shaped.
+func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, map[string]readyLeg, error) {
+	var merged []beads.Bead
+	owner := make(map[string]readyLeg)
+	for _, leg := range legs {
+		rows, err := leg.store.List(q)
+		if err != nil {
+			return nil, nil, fmt.Errorf("%s store: %w", leg.label, err)
+		}
+		for _, b := range rows {
+			if _, seen := owner[b.ID]; seen {
+				continue
+			}
+			owner[b.ID] = leg
+			merged = append(merged, b)
+		}
+	}
+	return merged, owner, nil
 }
 
 // federateBeadLegs runs read against every leg in order and merges the results,

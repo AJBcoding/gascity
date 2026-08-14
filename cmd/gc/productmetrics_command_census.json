@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 203,
+  "next_id": 205,
   "permanent_ids": [
     {
       "name": "help",
@@ -282,7 +282,7 @@
       "notice_policy": "eligible",
       "classification": "beads-city-use-mysql",
       "owner": "immediate",
-      "id": 201
+      "id": 203
     },
     {
       "path": "gc beads health",
@@ -315,6 +315,23 @@
       "classification": "beads-list",
       "owner": "immediate",
       "id": 15
+    },
+    {
+      "path": "gc beads metadata-cas",
+      "aliases": [],
+      "conditional_modes": [
+        "beads-machine-output"
+      ],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-metadata-cas",
+      "owner": "immediate",
+      "id": 202
     },
     {
       "path": "gc beads show",
@@ -3581,7 +3598,7 @@
       "notice_policy": "eligible",
       "classification": "session-key",
       "owner": "immediate",
-      "id": 202
+      "id": 204
     },
     {
       "path": "gc session kill",
@@ -3992,6 +4009,21 @@
       "classification": "storage-migrate",
       "owner": "immediate",
       "id": 198
+    },
+    {
+      "path": "gc storage recover-stranded",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "storage-recover-stranded",
+      "owner": "immediate",
+      "id": 201
     },
     {
       "path": "gc storage status",
