@@ -8,6 +8,21 @@ import (
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
+// InWorktreesLane reports whether path resolves under cityPath's worktrees
+// root — a pure path-membership check, not a claim about who creates the
+// leaf directory. A pack with no pre_start hook (the SDK has zero hardcoded
+// roles, so this is legitimate) may still put a plain, gc-created directory
+// there. Callers deciding whether to MkdirAll must also check that the
+// agent actually configures pre_start before treating this lane as
+// "someone else creates it, defer to ValidateWorktreeWorkspace" (gas-g9qg,
+// DECISION 3 of gas-tvn5).
+func InWorktreesLane(cityPath, path string) bool {
+	if path == "" {
+		return false
+	}
+	return pathutil.PathWithin(WorktreesRoot(cityPath), path)
+}
+
 // ValidateWorktreeWorkspace refuses a resolved work_dir that sits in the one
 // lane where a linked worktree is genuinely expected — under the city's
 // worktrees root — but is not one.
@@ -30,13 +45,10 @@ import (
 // resolution. Failing closed on a missing path would refuse every polecat's
 // first spawn.
 func ValidateWorktreeWorkspace(cityPath, path string) error {
-	if path == "" {
+	if !InWorktreesLane(cityPath, path) {
 		return nil
 	}
 	root := WorktreesRoot(cityPath)
-	if !pathutil.PathWithin(root, path) {
-		return nil
-	}
 
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {

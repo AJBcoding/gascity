@@ -2063,3 +2063,156 @@ func TestPassthroughEnvWithholdsControllerTokenFromChildProcess(t *testing.T) {
 		t.Errorf("child process received the controller token: %s", out)
 	}
 }
+
+// gastownPolecatWorkDirSpec mirrors the shipped
+// work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}" resolved for a
+// literal rig/agent pair, without needing template expansion.
+const gastownPolecatWorkDirSpec = ".gc/worktrees/gascity/polecats/gastown.rictus"
+
+// gastownPolecatPreStart mirrors the shipped polecat/refinery pre_start hook
+// (worktree-setup.sh): its mere presence, not its content, is what tells
+// resolveConfiguredWorkDir that "git worktree add" — not gc — owns leaf
+// creation for this agent's work_dir.
+var gastownPolecatPreStart = []string{"{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"}
+
+// DECISION 3 of gas-tvn5 (split to gas-g9qg): a work_dir under the city's
+// worktrees root must not be MkdirAll'd into existence, because "git worktree
+// add" (run by the pack's pre_start hook) runs after resolution and creates
+// the leaf itself. Resolving a first-spawn work_dir must leave it unmade.
+func TestResolveConfiguredWorkDir_WorktreesLaneMissingPathAcceptedWithoutCreating(t *testing.T) {
+	city := t.TempDir()
+	a := &config.Agent{WorkDir: gastownPolecatWorkDirSpec, PreStart: gastownPolecatPreStart}
+
+	dir, err := resolveConfiguredWorkDir(city, "gascity", "", a, nil)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDir() = %v, want nil (pre_start creates the worktree)", err)
+	}
+	if _, statErr := os.Stat(dir); !os.IsNotExist(statErr) {
+		t.Fatalf("resolveConfiguredWorkDir() created %q; the worktrees lane must leave leaf creation to `git worktree add`", dir)
+	}
+}
+
+// The py-3xe5 harm: a plain directory under the worktrees root is not a
+// workspace (no git, no code, no .beads). Once gc stops minting it itself,
+// one can still arrive there some other way (e.g. a stale husk from before
+// this fix) and must be refused loudly, not silently handed to a session.
+func TestResolveConfiguredWorkDir_WorktreesLaneHuskRefusedLoudly(t *testing.T) {
+	city := t.TempDir()
+	a := &config.Agent{WorkDir: gastownPolecatWorkDirSpec, PreStart: gastownPolecatPreStart}
+
+	husk, err := resolveConfiguredWorkDirPath(city, "gascity", "", a, nil)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDirPath() = %v", err)
+	}
+	if err := os.MkdirAll(husk, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := resolveConfiguredWorkDir(city, "gascity", "", a, nil); err == nil {
+		t.Fatal("resolveConfiguredWorkDir() = nil error, want refusal (plain-directory husk under the worktrees root)")
+	}
+}
+
+// Not every pack backs a worktrees-root work_dir with git: the SDK has zero
+// hardcoded roles, and a pool-agent template with no pre_start hook (e.g. a
+// generic "ant" worker, mirroring the shape cmdSessionNew's pool-template
+// tests use) relies on gc's own MkdirAll because nothing else will ever
+// create that directory. This is the regression TestResolveConfiguredWorkDir
+// almost shipped without: the worktrees root alone is not sufficient to
+// switch behavior, only worktrees-root-AND-pre_start is.
+func TestResolveConfiguredWorkDir_WorktreesLaneWithoutPreStartStillAutoCreates(t *testing.T) {
+	city := t.TempDir()
+	a := &config.Agent{WorkDir: ".gc/worktrees/demo/ants/ant-fenrir"}
+
+	dir, err := resolveConfiguredWorkDir(city, "gascity", "", a, nil)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDir() = %v, want nil (no pre_start hook; gc must keep creating it)", err)
+	}
+	info, statErr := os.Stat(dir)
+	if statErr != nil {
+		t.Fatalf("resolveConfiguredWorkDir() did not create %q: %v", dir, statErr)
+	}
+	if !info.IsDir() {
+		t.Fatalf("resolveConfiguredWorkDir() created %q, want a directory", dir)
+	}
+}
+
+// A worktree that already exists (resumed session, or a respawn that races
+// pre_start) must keep resolving cleanly — this is not a regression target,
+// just the companion case to the husk refusal above.
+func TestResolveConfiguredWorkDir_WorktreesLaneLinkedWorktreeAccepted(t *testing.T) {
+	city := t.TempDir()
+	a := &config.Agent{WorkDir: gastownPolecatWorkDirSpec, PreStart: gastownPolecatPreStart}
+
+	dir, err := resolveConfiguredWorkDirPath(city, "gascity", "", a, nil)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDirPath() = %v", err)
+	}
+	gitTarget := filepath.Join(city, "repo", ".git", "worktrees", "rictus")
+	if err := os.MkdirAll(gitTarget, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".git"), []byte("gitdir: "+gitTarget+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := resolveConfiguredWorkDir(city, "gascity", "", a, nil)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDir() = %v, want nil (already a linked worktree)", err)
+	}
+	if got != dir {
+		t.Errorf("resolveConfiguredWorkDir() = %q, want %q", got, dir)
+	}
+}
+
+// The regression the mayor required before this could ship (gas-tvn5): a
+// blanket "explicit + missing => fail" refuses the mayor and every witness,
+// whose agent dirs are outside the worktrees lane and are still expected to
+// auto-create on first boot.
+func TestResolveConfiguredWorkDir_AgentDirsLaneStillAutoCreatesMissingDir(t *testing.T) {
+	city := t.TempDir()
+
+	for _, tc := range []struct {
+		name string
+		a    *config.Agent
+	}{
+		{"mayor", &config.Agent{WorkDir: ".gc/agents/mayor"}},
+		{"witness", &config.Agent{WorkDir: ".gc/agents/gascity/witness"}},
+	} {
+		dir, err := resolveConfiguredWorkDir(city, "gascity", "", tc.a, nil)
+		if err != nil {
+			t.Fatalf("%s: resolveConfiguredWorkDir() = %v, want nil (agent dirs still auto-create)", tc.name, err)
+		}
+		info, statErr := os.Stat(dir)
+		if statErr != nil {
+			t.Fatalf("%s: resolveConfiguredWorkDir() did not create %q: %v", tc.name, dir, statErr)
+		}
+		if !info.IsDir() {
+			t.Fatalf("%s: resolveConfiguredWorkDir() created %q, want a directory", tc.name, dir)
+		}
+	}
+}
+
+// The other production shape from gas-tvn5: an external plain repo checkout
+// (.git is a DIR, e.g. ~/PycharmProjects/kit) sits outside the worktrees
+// root and must resolve unchanged — no validation, no creation attempted
+// against a path that already exists as a real repo.
+func TestResolveConfiguredWorkDir_ExternalRepoLaneUnaffected(t *testing.T) {
+	external := filepath.Join(t.TempDir(), "kit")
+	if err := os.MkdirAll(filepath.Join(external, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	city := t.TempDir()
+	a := &config.Agent{WorkDir: external}
+
+	got, err := resolveConfiguredWorkDir(city, "gascity", "", a, nil)
+	if err != nil {
+		t.Fatalf("resolveConfiguredWorkDir() = %v, want nil (external repo checkout outside the worktrees root)", err)
+	}
+	if got != external {
+		t.Errorf("resolveConfiguredWorkDir() = %q, want %q", got, external)
+	}
+}

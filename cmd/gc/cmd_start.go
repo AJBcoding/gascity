@@ -1417,10 +1417,34 @@ func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *c
 // Reserved for the session-start path, where a concrete session is about to run
 // in the directory; callers needing only the path must use
 // resolveConfiguredWorkDirPath.
+//
+// An agent under the city's worktrees root with a pre_start hook configured
+// (e.g. the gastown polecat/refinery convention) delegates leaf-directory
+// creation to that hook's "git worktree add", which runs after this
+// resolves: materializing here means validating rather than creating.
+// MkdirAll'ing it first would mint the plain-directory husk
+// ValidateWorktreeWorkspace refuses (DECISION 1 of gas-tvn5), and treating a
+// missing directory as an error would refuse every polecat's and refinery's
+// first spawn (DECISION 3 of gas-tvn5, split to gas-g9qg because the blanket
+// form is unsafe — every gastown agent sets work_dir explicitly, so
+// "explicit" narrows nothing). A path that already exists in that lane but
+// is not a usable workspace still fails loudly.
+//
+// The worktrees root alone is not sufficient: the SDK has zero hardcoded
+// roles, and a pack may put a plain (non-git) per-session directory there
+// with no pre_start hook, relying on gc to create it — the shape a bare
+// "ant" pool-agent template exercises. Without pre_start nothing else will
+// ever create the leaf, so that lane keeps auto-creating unchanged.
 func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
 	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
 	if err != nil {
 		return "", err
+	}
+	if a != nil && len(a.PreStart) > 0 && workdirutil.InWorktreesLane(cityPath, dir) {
+		if err := workdirutil.ValidateWorktreeWorkspace(cityPath, dir); err != nil {
+			return "", err
+		}
+		return dir, nil
 	}
 	return resolveAgentDir(cityPath, dir)
 }

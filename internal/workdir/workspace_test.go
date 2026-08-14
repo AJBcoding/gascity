@@ -120,6 +120,57 @@ func TestValidateWorktreeWorkspace_RefusesNonDirectoryPath(t *testing.T) {
 	}
 }
 
+func TestInWorktreesLane_UnderRootTrue(t *testing.T) {
+	city := t.TempDir()
+	if !InWorktreesLane(city, polecatWorkDir(city)) {
+		t.Error("InWorktreesLane() = false, want true (path is under the worktrees root)")
+	}
+}
+
+// Agent dirs and external repo checkouts are not worktrees, and neither
+// carries a session-scoped identity under the worktrees root.
+func TestInWorktreesLane_OutsideRootFalse(t *testing.T) {
+	city := t.TempDir()
+	mayor := filepath.Join(city, ".gc", "agents", "mayor")
+	external := filepath.Join(t.TempDir(), "kit")
+
+	for _, tc := range []struct {
+		name string
+		path string
+	}{
+		{"agent dir", mayor},
+		{"external repo", external},
+	} {
+		if InWorktreesLane(city, tc.path) {
+			t.Errorf("InWorktreesLane(%s) = true, want false (outside the worktrees root)", tc.name)
+		}
+	}
+}
+
+func TestInWorktreesLane_EmptyPathFalse(t *testing.T) {
+	if InWorktreesLane(t.TempDir(), "") {
+		t.Error("InWorktreesLane() = true, want false for an empty path")
+	}
+}
+
+// WorktreesRoot is env-overridable; the lane check must follow it rather
+// than assuming <city>/.gc/worktrees.
+func TestInWorktreesLane_HonorsWorktreesRootOverride(t *testing.T) {
+	city := t.TempDir()
+	root := t.TempDir()
+	t.Setenv("GC_WORKTREES_DIR", root)
+
+	underOverride := filepath.Join(root, "gascity", "polecats", "gastown.rictus")
+	if !InWorktreesLane(city, underOverride) {
+		t.Error("InWorktreesLane() = false, want true (under the overridden worktrees root)")
+	}
+
+	// The default location is no longer the worktrees lane once overridden.
+	if InWorktreesLane(city, polecatWorkDir(city)) {
+		t.Error("InWorktreesLane() = true, want false (outside the overridden worktrees root)")
+	}
+}
+
 // WorktreesRoot is env-overridable; the refusal lane must follow it rather
 // than assuming <city>/.gc/worktrees.
 func TestValidateWorktreeWorkspace_HonorsWorktreesRootOverride(t *testing.T) {
