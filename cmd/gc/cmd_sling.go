@@ -776,6 +776,11 @@ func (r cliBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if err := r.deps.Store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
+	if assignee := strings.TrimSpace(req.Assignee); assignee != "" {
+		if err := r.deps.Store.Update(req.BeadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			return fmt.Errorf("setting assignee on %s: %w", req.BeadID, err)
+		}
+	}
 	return nil
 }
 

@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/graphroute"
 	"github.com/gastownhall/gascity/internal/graphv2"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
@@ -628,6 +629,32 @@ func slingPlainBead(opts SlingOpts, deps SlingDeps, beadID string, result SlingR
 	return finalize(opts, deps, beadID, "bead", result)
 }
 
+// resolveRouteAssignee returns the identity to stamp on a bead's assignee
+// field alongside gc.routed_to, and a non-fatal warning if resolution
+// itself failed. It returns ("", "") for a pool target: pool routing must
+// leave assignee untouched so the claiming member can stamp its own
+// identity on pickup (the established contract -- see reopenForReassign).
+// It returns the configured identity for a target that resolves to a
+// [[named_session]]: such a target has one stable identity and no separate
+// claim step, so nothing else will ever set assignee for it. Without this,
+// gc.routed_to is the only record of the route and any find-work query
+// filtering --assignee=$GC_AGENT (the documented pool consumption pattern)
+// silently never sees the work (gas-7e2h).
+func resolveRouteAssignee(a config.Agent, deps SlingDeps) (assignee, warning string) {
+	target := strings.TrimSpace(agentutil.RoutedToIdentity(&a))
+	if target == "" {
+		return "", ""
+	}
+	spec, ok, err := session.ResolveNamedSessionSpecForConfigTarget(deps.Cfg, deps.CityName, target, a.Dir)
+	if err != nil {
+		return "", fmt.Sprintf("resolving named-session assignee for %s: %v", target, err)
+	}
+	if !ok {
+		return "", ""
+	}
+	return spec.Identity, ""
+}
+
 // finalize executes the sling command, records telemetry, sets merge
 // metadata, creates auto-convoy, pokes the controller, and signals nudge.
 func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result SlingResult) (SlingResult, error) {
@@ -641,12 +668,17 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
 		}
+		assignee, assigneeWarn := resolveRouteAssignee(a, deps)
+		if assigneeWarn != "" {
+			result.MetadataErrors = append(result.MetadataErrors, assigneeWarn)
+		}
 		req := RouteRequest{
-			BeadID:  beadID,
-			Target:  agentutil.RoutedToIdentity(&a),
-			WorkDir: rigDir,
-			Env:     slingEnv,
-			Force:   opts.Force,
+			BeadID:   beadID,
+			Target:   agentutil.RoutedToIdentity(&a),
+			Assignee: assignee,
+			WorkDir:  rigDir,
+			Env:      slingEnv,
+			Force:    opts.Force,
 		}
 		if err := deps.Router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
@@ -1695,12 +1727,17 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				failed++
 				continue
 			}
+			assignee, assigneeWarn := resolveRouteAssignee(a, deps)
+			if assigneeWarn != "" {
+				batchResult.MetadataErrors = append(batchResult.MetadataErrors, assigneeWarn)
+			}
 			req := RouteRequest{
-				BeadID:  child.ID,
-				Target:  a.QualifiedName(),
-				WorkDir: rigDir,
-				Env:     childEnv,
-				Force:   opts.Force,
+				BeadID:   child.ID,
+				Target:   a.QualifiedName(),
+				Assignee: assignee,
+				WorkDir:  rigDir,
+				Env:      childEnv,
+				Force:    opts.Force,
 			}
 			if err := deps.Router.Route(context.Background(), req); err != nil {
 				childResult.Failed = true
