@@ -3245,6 +3245,139 @@ func TestDeliverSlingNudgeQueuesFencedReminderAndStartsPollerForAsleepSession(t 
 	}
 }
 
+// The sling caller of the delivery-confirmation contract (gas-l6ov, same
+// defect family as gas-jfy6): transport acceptance with the payload still
+// sitting in the composer is NOT delivery. Orders dispatch through this path,
+// so a false "Nudged" here is an order that reports propelled and is never
+// read. It must not claim delivery, must not stamp delivered-at, and must fall
+// back to the queued path so the dispatcher redelivers.
+func TestDeliverSlingNudgeQueuesInsteadOfClaimingDeliveryWhenPayloadStaysInTheInputBox(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors[info.SessionName] = nil
+	// The shape actually peeked on the fleet: the multi-line sling reminder
+	// collapses to a paste placeholder that never leaves the composer.
+	fake.PeekOutput = map[string]string{
+		info.SessionName: "● grinding on the previous order\n\n> [Pasted text #13 +15 lines]",
+	}
+
+	prev := startNudgePoller
+	startNudgePoller = func(_, _, _ string) error { return nil }
+	t.Cleanup(func() { startNudgePoller = prev })
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+	}
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, fake, store, dir, &stdout, &stderr)
+
+	if strings.Contains(stdout.String(), "Nudged") {
+		t.Fatalf("stdout asserts delivery for a payload still in the input box: %q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "input box") {
+		t.Fatalf("stderr = %q, want the stranded-payload hazard named", stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "Queued nudge for") {
+		t.Fatalf("stdout = %q, want queued-fallback report", stdout.String())
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, target.agent.QualifiedName(), time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending) != 1 || len(inFlight) != 0 || len(dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want 1/0/0 (unconfirmed live nudge must queue for redelivery)", len(pending), len(inFlight), len(dead))
+	}
+	refetched, err := store.Get(info.ID)
+	if err != nil {
+		t.Fatalf("store.Get(%s): %v", info.ID, err)
+	}
+	if raw := strings.TrimSpace(refetched.Metadata[session.MetadataLastNudgeDeliveredAt]); raw != "" {
+		t.Fatalf("%s = %q stamped for an unconfirmed delivery", session.MetadataLastNudgeDeliveredAt, raw)
+	}
+}
+
+// probelessSlingProvider hides the fake's DeliveryConfirmer while forwarding
+// the optional capabilities the nudge path asserts, modeling a transport with
+// no delivery probe.
+type probelessSlingProvider struct{ runtime.Provider }
+
+func (p probelessSlingProvider) NudgeNow(name string, content []runtime.ContentBlock) error {
+	return p.Provider.(runtime.ImmediateNudgeProvider).NudgeNow(name, content)
+}
+
+func (p probelessSlingProvider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
+	return p.Provider.(runtime.IdleWaitProvider).WaitForIdle(ctx, name, timeout)
+}
+
+// A transport with no probe can report acceptance but never delivery, so sling
+// must say so instead of printing "Nudged" (gas-l6ov). The machinery signals
+// (delivered-at stamp) keep their pre-contract behavior: acceptance is the
+// best evidence such a transport will ever produce.
+func TestDeliverSlingNudgeReportsUnconfirmedWhenTransportHasNoProbe(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	clearInheritedCityRoutingEnv(t)
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "claude", WorkDir: dir, Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	fake.WaitForIdleErrors[info.SessionName] = nil
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		resolved:    &config.ResolvedProvider{Name: "claude"},
+		sessionID:   info.ID,
+		sessionName: info.SessionName,
+	}
+
+	var stdout, stderr bytes.Buffer
+	deliverSlingNudge(target, probelessSlingProvider{fake}, store, dir, &stdout, &stderr)
+
+	if strings.Contains(stdout.String(), "Nudged") {
+		t.Fatalf("stdout asserts delivery on a transport with no probe: %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "NOT CONFIRMED") {
+		t.Fatalf("stdout = %q, want honest not-confirmed report", stdout.String())
+	}
+	pending, inFlight, dead, err := listQueuedNudges(dir, target.agent.QualifiedName(), time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending)+len(inFlight)+len(dead) != 0 {
+		t.Fatalf("pending=%d inFlight=%d dead=%d, want none (unprobed acceptance is not a queueing failure)", len(pending), len(inFlight), len(dead))
+	}
+	assertSessionLastNudgeDeliveredAtStamped(t, store, info.ID)
+}
+
 func assertSessionLastNudgeDeliveredAtStamped(t *testing.T, store beads.Store, sessionID string) {
 	t.Helper()
 	refetched, err := store.Get(sessionID)

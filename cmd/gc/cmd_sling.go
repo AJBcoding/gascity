@@ -1663,14 +1663,33 @@ func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Stor
 				Wake:     worker.NudgeWakeLiveOnly,
 			})
 			if nudgeErr == nil && result.Delivered {
-				telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
-				var sessFront *session.Store
-				if store != nil {
-					sessFront = cliSessionFrontDoor(store, target.cfg, target.cityPath)
+				// Transport acceptance is not delivery: the payload can still be
+				// sitting unsubmitted in the target's composer (gas-jfy6,
+				// gas-q4jk). Orders dispatch through this caller, so a false
+				// "Nudged" is an order that reports propelled and is never read.
+				confirmation := confirmNudgeDelivery(sp, target, msg)
+				if confirmation.Confirmed || !confirmation.Probed {
+					telemetry.RecordNudge(context.Background(), target.agent.QualifiedName(), nil)
+					var sessFront *session.Store
+					if store != nil {
+						sessFront = cliSessionFrontDoor(store, target.cfg, target.cityPath)
+					}
+					stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
+					if confirmation.Confirmed {
+						fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
+					} else {
+						// No probe on this transport: acceptance is the best
+						// evidence it will ever produce, so keep the machinery
+						// signals but never claim delivery.
+						fmt.Fprintf(stdout, "Sent to %s — delivery NOT CONFIRMED (this transport has no delivery probe)\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
+					}
+					return
 				}
-				stampLastNudgeDeliveredAt(sessFront, target.sessionID, time.Now())
-				fmt.Fprintf(stdout, "Nudged %s\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
-				return
+				// The probe positively observed the payload still in the input
+				// box. Sling's reminder is fixed and idempotent, so fall through
+				// to the queued path and let the dispatcher redeliver instead of
+				// failing the dispatch.
+				fmt.Fprintf(stderr, "warning: live nudge to %s not confirmed — payload still in the input box (%s); queueing for redelivery\n", target.agent.QualifiedName(), confirmation.Observed) //nolint:errcheck // best-effort
 			}
 		}
 	}
