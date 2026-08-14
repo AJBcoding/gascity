@@ -123,6 +123,16 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 			return result, nil
 		}
 	}
+
+	// In-flight dispatch gate: refuse to double-route work another actor
+	// already holds (gas-cnx6). Runs after the idempotency check so settled
+	// same-target re-slings stay no-ops; --force and --reassign bypass it as
+	// the documented takeover escape hatches.
+	if shouldCheckInFlightDispatch(opts) {
+		if err := CheckInFlightDispatch(querier, opts.BeadOrFormula, a, deps); err != nil {
+			return result, err
+		}
+	}
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
 		if err := validateBuiltInRouteStoreReachable(deps, opts.BeadOrFormula, a); err != nil {
 			return result, fmt.Errorf("%w", err)
@@ -1674,6 +1684,22 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
+		}
+
+		// In-flight dispatch gate per child (gas-cnx6). The open-status filter
+		// above already excludes claimed children; this catches pour evidence —
+		// a live root referencing the child through a live tracking convoy —
+		// which leaves the child reading open.
+		if shouldCheckInFlightDispatch(opts) {
+			if err := CheckInFlightDispatch(querier, child.ID, a, deps); err != nil {
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
 		}
 
 		if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
