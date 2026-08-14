@@ -647,6 +647,8 @@ func init() {
 	events.RegisterPayload(events.SupervisorRequest, SupervisorRequestPayload{})
 	events.RegisterPayload(events.CitySuspended, events.NoPayload{})
 	events.RegisterPayload(events.CityResumed, events.NoPayload{})
+	events.RegisterPayload(events.RigSuspended, events.NoPayload{})
+	events.RegisterPayload(events.RigResumed, events.NoPayload{})
 	// Typed async request result events.
 	events.RegisterPayload(events.RequestResultCityCreate, CityCreateSucceededPayload{})
 	events.RegisterPayload(events.RequestResultCityUnregister, CityUnregisterSucceededPayload{})

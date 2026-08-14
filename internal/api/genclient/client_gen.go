@@ -6246,6 +6246,38 @@ type TypedEventStreamEnvelopeRigProvisionProgress struct {
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeRigResumed defines model for TypedEventStreamEnvelopeRigResumed.
+type TypedEventStreamEnvelopeRigResumed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeRigSuspended defines model for TypedEventStreamEnvelopeRigSuspended.
+type TypedEventStreamEnvelopeRigSuspended struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedEventStreamEnvelopeSessionColdStartTimeout.
 type TypedEventStreamEnvelopeSessionColdStartTimeout struct {
 	Actor            string                   `json:"actor"`
@@ -7751,6 +7783,40 @@ type TypedTaggedEventStreamEnvelopeRigProvisionProgress struct {
 	Ts               time.Time                   `json:"ts"`
 	Type             string                      `json:"type"`
 	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRigResumed defines model for TypedTaggedEventStreamEnvelopeRigResumed.
+type TypedTaggedEventStreamEnvelopeRigResumed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRigSuspended defines model for TypedTaggedEventStreamEnvelopeRigSuspended.
+type TypedTaggedEventStreamEnvelopeRigSuspended struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeSessionColdStartTimeout defines model for TypedTaggedEventStreamEnvelopeSessionColdStartTimeout.
@@ -14490,6 +14556,62 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigProvisionProg
 	return err
 }
 
+// AsTypedEventStreamEnvelopeRigResumed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRigResumed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRigResumed() (TypedEventStreamEnvelopeRigResumed, error) {
+	var body TypedEventStreamEnvelopeRigResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRigResumed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRigResumed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRigResumed(v TypedEventStreamEnvelopeRigResumed) error {
+	v.Type = "rig.resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRigResumed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRigResumed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigResumed(v TypedEventStreamEnvelopeRigResumed) error {
+	v.Type = "rig.resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeRigSuspended returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRigSuspended
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRigSuspended() (TypedEventStreamEnvelopeRigSuspended, error) {
+	var body TypedEventStreamEnvelopeRigSuspended
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRigSuspended overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRigSuspended
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRigSuspended(v TypedEventStreamEnvelopeRigSuspended) error {
+	v.Type = "rig.suspended"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRigSuspended performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRigSuspended
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRigSuspended(v TypedEventStreamEnvelopeRigSuspended) error {
+	v.Type = "rig.suspended"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeSessionColdStartTimeout() (TypedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedEventStreamEnvelopeSessionColdStartTimeout
@@ -15440,6 +15562,10 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedEventStreamEnvelopeRigProvisionProgress()
+	case "rig.resumed":
+		return t.AsTypedEventStreamEnvelopeRigResumed()
+	case "rig.suspended":
+		return t.AsTypedEventStreamEnvelopeRigSuspended()
 	case "session.cold_start_timeout":
 		return t.AsTypedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":
@@ -17219,6 +17345,62 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigP
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeRigResumed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRigResumed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRigResumed() (TypedTaggedEventStreamEnvelopeRigResumed, error) {
+	var body TypedTaggedEventStreamEnvelopeRigResumed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRigResumed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRigResumed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRigResumed(v TypedTaggedEventStreamEnvelopeRigResumed) error {
+	v.Type = "rig.resumed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRigResumed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRigResumed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigResumed(v TypedTaggedEventStreamEnvelopeRigResumed) error {
+	v.Type = "rig.resumed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeRigSuspended returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRigSuspended
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRigSuspended() (TypedTaggedEventStreamEnvelopeRigSuspended, error) {
+	var body TypedTaggedEventStreamEnvelopeRigSuspended
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRigSuspended overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRigSuspended
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRigSuspended(v TypedTaggedEventStreamEnvelopeRigSuspended) error {
+	v.Type = "rig.suspended"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRigSuspended performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRigSuspended
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRigSuspended(v TypedTaggedEventStreamEnvelopeRigSuspended) error {
+	v.Type = "rig.suspended"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout() (TypedTaggedEventStreamEnvelopeSessionColdStartTimeout, error) {
 	var body TypedTaggedEventStreamEnvelopeSessionColdStartTimeout
@@ -18169,6 +18351,10 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeRequestResultSessionSubmit()
 	case "rig.provision.progress":
 		return t.AsTypedTaggedEventStreamEnvelopeRigProvisionProgress()
+	case "rig.resumed":
+		return t.AsTypedTaggedEventStreamEnvelopeRigResumed()
+	case "rig.suspended":
+		return t.AsTypedTaggedEventStreamEnvelopeRigSuspended()
 	case "session.cold_start_timeout":
 		return t.AsTypedTaggedEventStreamEnvelopeSessionColdStartTimeout()
 	case "session.crashed":

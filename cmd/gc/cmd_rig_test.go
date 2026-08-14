@@ -17,7 +17,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
@@ -1317,6 +1319,173 @@ func TestDoRigResumeNotSuspended(t *testing.T) {
 	code := doRigResume(fsys.OSFS{}, cityPath, "frontend", &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("doRigResume should be idempotent, got code %d, stderr: %s", code, stderr.String())
+	}
+}
+
+// readCityEvents decodes every event recorded in <cityPath>/.gc/events.jsonl.
+// A missing file is an empty history, matching a city that never emitted.
+func readCityEvents(t *testing.T, cityPath string) []events.Event {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(cityPath, ".gc", "events.jsonl"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		t.Fatalf("read events.jsonl: %v", err)
+	}
+	var out []events.Event
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var ev events.Event
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			t.Fatalf("decode event line %q: %v", line, err)
+		}
+		out = append(out, ev)
+	}
+	return out
+}
+
+func TestDoRigSuspendEmitsRigSuspendedEvent(t *testing.T) {
+	cityPath := t.TempDir()
+	siteToml := "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"frontend\"\npath = \"/some/path\"\n"
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n\n[[rigs]]\nname = \"frontend\"\n", siteToml)
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigSuspend(fsys.OSFS{}, cityPath, "frontend", &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigSuspend returned %d, stderr: %s", code, stderr.String())
+	}
+
+	var got []events.Event
+	for _, ev := range readCityEvents(t, cityPath) {
+		if ev.Type == events.RigSuspended {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("rig.suspended events = %+v, want exactly one", got)
+	}
+	if got[0].Subject != "frontend" {
+		t.Errorf("event subject = %q, want %q", got[0].Subject, "frontend")
+	}
+	if got[0].Actor == "" {
+		t.Error("event actor must not be empty; the whole point is attributing the suspension")
+	}
+}
+
+func TestDoRigSuspendAlreadySuspendedEmitsNoEvent(t *testing.T) {
+	cityPath := t.TempDir()
+	siteToml := "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"frontend\"\npath = \"/some/path\"\n"
+	writeSchema2RigCity(t, cityPath, "test-city", "[workspace]\n\n[[rigs]]\nname = \"frontend\"\n", siteToml)
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigSuspend(fsys.OSFS{}, cityPath, "frontend", &stdout, &stderr); code != 0 {
+		t.Fatalf("first doRigSuspend returned %d, stderr: %s", code, stderr.String())
+	}
+	if code := doRigSuspend(fsys.OSFS{}, cityPath, "frontend", &stdout, &stderr); code != 0 {
+		t.Fatalf("second doRigSuspend returned %d, stderr: %s", code, stderr.String())
+	}
+
+	count := 0
+	for _, ev := range readCityEvents(t, cityPath) {
+		if ev.Type == events.RigSuspended {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("rig.suspended events after no-op re-suspend = %d, want 1 (no-op must not emit)", count)
+	}
+}
+
+func TestDoRigResumeEmitsRigResumedEvent(t *testing.T) {
+	cityPath := t.TempDir()
+	cityToml := "[workspace]\n\n[[rigs]]\nname = \"frontend\"\nsuspended_on_start = true\n"
+	siteToml := "workspace_name = \"test-city\"\n\n[[rig]]\nname = \"frontend\"\npath = \"/some/path\"\n"
+	writeSchema2RigCity(t, cityPath, "test-city", cityToml, siteToml)
+
+	var stdout, stderr bytes.Buffer
+	if code := doRigResume(fsys.OSFS{}, cityPath, "frontend", &stdout, &stderr); code != 0 {
+		t.Fatalf("doRigResume returned %d, stderr: %s", code, stderr.String())
+	}
+
+	var got []events.Event
+	for _, ev := range readCityEvents(t, cityPath) {
+		if ev.Type == events.RigResumed {
+			got = append(got, ev)
+		}
+	}
+	if len(got) != 1 {
+		t.Fatalf("rig.resumed events = %+v, want exactly one", got)
+	}
+	if got[0].Subject != "frontend" {
+		t.Errorf("event subject = %q, want %q", got[0].Subject, "frontend")
+	}
+}
+
+func TestRigScheduledOrderNames(t *testing.T) {
+	disabled := false
+	aa := []orders.Order{
+		{Name: "patrol", Trigger: "cooldown", Rig: "frontend"},
+		{Name: "refresh", Trigger: "cron", Rig: "frontend"},
+		{Name: "manual-only", Trigger: "manual", Rig: "frontend"},
+		{Name: "hook", Trigger: "webhook", Rig: "frontend"},
+		{Name: "off", Trigger: "cron", Rig: "frontend", Enabled: &disabled},
+		{Name: "other-rig", Trigger: "cron", Rig: "backend"},
+		{Name: "city-wide", Trigger: "cron"},
+	}
+	got := rigScheduledOrderNames(aa, "frontend")
+	want := []string{"patrol:rig:frontend", "refresh:rig:frontend"}
+	if len(got) != len(want) {
+		t.Fatalf("rigScheduledOrderNames = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("rigScheduledOrderNames = %v, want %v", got, want)
+		}
+	}
+	if names := rigScheduledOrderNames(aa, "empty-rig"); len(names) != 0 {
+		t.Errorf("rigScheduledOrderNames for orderless rig = %v, want empty", names)
+	}
+}
+
+func TestWarnRigScheduledOrdersPrintsAffectedOrders(t *testing.T) {
+	cityPath := t.TempDir()
+	rigLayerDir := filepath.Join(t.TempDir(), "rig-pack")
+	ordersDir := filepath.Join(rigLayerDir, "orders")
+	if err := os.MkdirAll(ordersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orderToml := "[order]\nexec = \"scripts/refresh.sh\"\ntrigger = \"cron\"\nschedule = \"0 5 * * *\"\n"
+	if err := os.WriteFile(filepath.Join(ordersDir, "data-refresh.toml"), []byte(orderToml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Rig layers must extend the city layers: RigExclusiveLayers treats only
+	// the suffix beyond the city layers as rig-exclusive.
+	cityLayer := filepath.Join(cityPath, "formulas")
+	cfg := &config.City{
+		FormulaLayers: config.FormulaLayers{
+			City: []string{cityLayer},
+			Rigs: map[string][]string{
+				"frontend": {cityLayer, filepath.Join(rigLayerDir, "formulas")},
+			},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	warnRigScheduledOrders(fsys.OSFS{}, cityPath, cfg, "frontend", &stdout, &stderr)
+	if !strings.Contains(stdout.String(), "will NOT fire while it is suspended") {
+		t.Fatalf("stdout = %q, want suspension warning", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "data-refresh:rig:frontend") {
+		t.Errorf("stdout = %q, want affected order name data-refresh:rig:frontend", stdout.String())
+	}
+
+	// A rig with no scheduled orders warns about nothing.
+	stdout.Reset()
+	warnRigScheduledOrders(fsys.OSFS{}, cityPath, cfg, "orderless", &stdout, &stderr)
+	if stdout.Len() != 0 {
+		t.Errorf("stdout for orderless rig = %q, want empty", stdout.String())
 	}
 }
 

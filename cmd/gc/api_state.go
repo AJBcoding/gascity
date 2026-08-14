@@ -1684,18 +1684,30 @@ func (cs *controllerState) ResumeAgent(name string) error {
 	})
 }
 
-// SuspendRig writes suspended=true on the rig in city.toml.
+// SuspendRig records an explicit rig suspension in runtime state.
 func (cs *controllerState) SuspendRig(name string) error {
-	return cs.mutateAndPoke(func() error {
+	if err := cs.mutateAndPoke(func() error {
 		return cs.editor.SuspendRig(name)
-	})
+	}); err != nil {
+		return err
+	}
+	if cs.eventProv != nil {
+		cs.eventProv.Record(events.Event{Type: events.RigSuspended, Actor: "gc", Subject: name})
+	}
+	return nil
 }
 
-// ResumeRig clears suspended on the rig in city.toml.
+// ResumeRig records an explicit rig resume in runtime state.
 func (cs *controllerState) ResumeRig(name string) error {
-	return cs.mutateAndPoke(func() error {
+	if err := cs.mutateAndPoke(func() error {
 		return cs.editor.ResumeRig(name)
-	})
+	}); err != nil {
+		return err
+	}
+	if cs.eventProv != nil {
+		cs.eventProv.Record(events.Event{Type: events.RigResumed, Actor: "gc", Subject: name})
+	}
+	return nil
 }
 
 // SuspendCity sets workspace.suspended = true.
