@@ -8631,6 +8631,83 @@ func TestPreserveConfiguredNamedSessionBead_EffectiveSuspensionReleases(t *testi
 	}
 }
 
+// TestSyncSessionBeads_SuspendedRigAsleepNamedBeadCloses covers the healing
+// half of gas-eere: an asleep named-session bead on a suspended rig (the
+// live-city witness shape — runtime stopped, sleep_reason set, bead open) was
+// held open forever by the preserve check in the sync classification loop,
+// leaving it re-wakeable by any mail/nudge/event. With the effective-
+// suspension gate it must be closed as "suspended". The unsuspended control
+// keeps the preserve behavior.
+func TestSyncSessionBeads_SuspendedRigAsleepNamedBeadCloses(t *testing.T) {
+	cityName := "test-city"
+	workspace := config.Workspace{Name: cityName}
+	identity := "kit/witness"
+	sessionName := config.NamedSessionRuntimeName(cityName, workspace, identity)
+
+	for _, tc := range []struct {
+		name       string
+		suspended  bool
+		wantStatus string
+	}{
+		{name: "suspended rig closes", suspended: true, wantStatus: "closed"},
+		{name: "unsuspended rig preserves", suspended: false, wantStatus: "open"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{
+				Workspace:     workspace,
+				Rigs:          []config.Rig{{Name: "kit", Path: t.TempDir(), SuspendedOnStart: tc.suspended}},
+				Agents:        []config.Agent{{Name: "witness", Dir: "kit", StartCommand: "true"}},
+				NamedSessions: []config.NamedSession{{Template: "witness", Dir: "kit", Mode: "always"}},
+			}
+			store := beads.NewMemStore()
+			sp := runtime.NewFake()
+			clk := &clock.Fake{Time: time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)}
+			b, err := store.Create(beads.Bead{
+				Title:  "witness",
+				Type:   sessionBeadType,
+				Status: "open",
+				Labels: []string{sessionBeadLabel},
+				Metadata: map[string]string{
+					"session_name":               sessionName,
+					"template":                   identity,
+					"agent_name":                 identity,
+					"state":                      "asleep",
+					"sleep_reason":               "idle-timeout",
+					namedSessionMetadataKey:      "true",
+					namedSessionIdentityMetadata: identity,
+					namedSessionModeMetadata:     "always",
+				},
+			})
+			if err != nil {
+				t.Fatalf("create session bead: %v", err)
+			}
+
+			var stderr bytes.Buffer
+			syncSessionBeadsWithSnapshotAndRigStores(
+				"", beads.SessionStore{Store: store}, nil, nil, sp,
+				map[string]bool{sessionName: true}, cfg, clk, &stderr, false, nil,
+			)
+
+			got, err := store.Get(b.ID)
+			if err != nil {
+				t.Fatalf("get session bead: %v", err)
+			}
+			if got.Status != tc.wantStatus {
+				t.Fatalf("session bead status = %q, want %q (stderr: %s)", got.Status, tc.wantStatus, stderr.String())
+			}
+			if tc.wantStatus == "closed" {
+				// ClosePatch stamps the raw token on state and the expanded
+				// CanonicalCloseReason on close_reason; "suspended" is not in
+				// closedNamedSessionReopenEligible's excluded set, so the bead
+				// stays reopen-eligible for resume continuity.
+				if state := got.Metadata["state"]; state != "suspended" {
+					t.Fatalf("closed state = %q, want %q", state, "suspended")
+				}
+			}
+		})
+	}
+}
+
 // validPoolSessionNamePattern mirrors the tmux session-name validator in
 // internal/runtime/tmux/tmux.go (^[a-zA-Z0-9_-]+$). Replicated here as a
 // regression-test guard so future drift in the validator surfaces locally.
