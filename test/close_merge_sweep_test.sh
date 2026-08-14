@@ -43,6 +43,13 @@ make_repo() {
 # Fake gc: `bd list --status=closed` returns $BEADS_JSON, `rig list` returns a
 # rig whose default_branch is $RIG_TARGET, `bd create` logs, `bd list --status=open`
 # returns whatever has been filed so far (for the dedupe path).
+#
+# `rig list` MUST emit the real wire shape — an OBJECT with a .rigs[] field,
+# mirroring RigListJSON in cmd/gc/cmd_rig.go — never a bare array. This fake
+# emitting a bare array is what let the resolver's `.[]` parse pass every test
+# here while aborting against the real CLI in production (gas-c8es).
+# $GC_RIG_LIST_RAW, when set, replaces the response verbatim so tests can
+# exercise the resolution-failure path.
 make_fake_gc() {
     local bin="$1"
     mkdir -p "$bin"
@@ -59,7 +66,11 @@ case "$1 $2" in
     printf '%s\n' "$*" >>"$GC_CREATE_LOG"
     ;;
   "rig list")
-    printf '[{"name":"r","path":"%s","default_branch":"%s"}]\n' "$GC_RIG_PATH" "$GC_RIG_TARGET"
+    if [ -n "${GC_RIG_LIST_RAW:-}" ]; then
+      printf '%s\n' "$GC_RIG_LIST_RAW"
+    else
+      printf '{"schema_version":"1","city_path":"/city","city_name":"t","rigs":[{"name":"r","path":"%s","prefix":"r","default_branch":"%s","hq":false,"suspended":false,"running":false,"beads":"initialized"}],"summary":{"total":1,"suspended":0,"running":0}}\n' "$GC_RIG_PATH" "$GC_RIG_TARGET"
+    fi
     ;;
 esac
 exit 0
@@ -350,6 +361,49 @@ test_rewritten_target_does_not_manufacture_retractions() {
     pass "a rewritten target does not manufacture merge-retracted findings"
 }
 
+# --- the target must resolve from the REAL rig-list wire shape -------------
+# The production defect (gas-c8es): the resolver iterated `gc rig list --json`
+# as a bare array while the CLI returns an object with a .rigs[] field. jq
+# aborted, its stderr was discarded, DEFAULT_BRANCH came out empty, and every
+# close without its own gc.work_target fell to UNKNOWN — observed live as
+# 'unknown=19 target=<unresolved>'. The sweeper built to catch invisible
+# closes was itself inert. The fake above emits the real object shape so the
+# parse cannot silently drift again; this test pins the visible symptom.
+test_target_resolves_from_the_real_rig_list_shape() {
+    setup
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    local out; out=$(run_sweep "$(bead b-13 "$sha")" main)
+    grep -q 'target=main' <<<"$out" ||
+        { fail "the rig-list object shape did not resolve the target: $out"; return; }
+    grep -q 'unknown=0' <<<"$out" ||
+        { fail "records fell to unknown despite a resolvable target: $out"; return; }
+    pass "the intended target resolves from the real rig-list object shape"
+}
+
+# --- a FAILED resolution must be loud, and distinct from an empty config ----
+# Discarding the resolver's failure is what hid gas-c8es: an aborted parse
+# read exactly like "no target configured" and the sweep quietly judged
+# nothing. A failure to resolve must say so, and the summary must label it
+# distinctly from a config that genuinely names no target — while still
+# honoring the exit-0 contract.
+test_failed_target_resolution_is_loud_not_silent() {
+    setup
+    local sha out rc; sha=$(git -C "$REPO" rev-parse HEAD)
+    export GC_RIG_LIST_RAW='not json at all'
+    out=$(run_sweep "$(bead b-14 "$sha")" main)
+    rc=$?
+    unset GC_RIG_LIST_RAW
+    [ "$rc" -eq 0 ] ||
+        { fail "resolution failure broke the exit-0 contract (rc=$rc)"; return; }
+    grep -q 'WARNING: intended-target resolution failed' <<<"$out" ||
+        { fail "a failed resolution said nothing: $out"; return; }
+    grep -q 'target=<resolution-failed>' <<<"$out" ||
+        { fail "summary does not distinguish failed resolution from empty config: $out"; return; }
+    [ ! -s "$TMP/create.log" ] ||
+        { fail "filed findings while the target was unresolvable: $(cat "$TMP/create.log")"; return; }
+    pass "a failed target resolution warns, labels the summary distinctly, and exits 0"
+}
+
 test_landed_work_files_nothing
 test_unmerged_work_files_a_merge_gap
 test_retracted_merge_is_reported_distinctly
@@ -362,6 +416,8 @@ test_absent_work_files_quoting_the_content_evidence
 test_preexisting_identifier_is_not_evidence_of_landing
 test_unresolvable_commit_is_unprobeable_not_unmerged
 test_rewritten_target_does_not_manufacture_retractions
+test_target_resolves_from_the_real_rig_list_shape
+test_failed_target_resolution_is_loud_not_silent
 
 printf '\n%d passed, %d failed\n' "$PASSED" "$FAILED"
 [ "$FAILED" -eq 0 ]

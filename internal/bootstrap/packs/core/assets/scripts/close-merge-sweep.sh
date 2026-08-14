@@ -421,13 +421,32 @@ git -C "$REPO" rev-parse --git-dir >/dev/null 2>&1 || exit 0
 # pushes to, and the refinery then correctly finds nothing to do, forever
 # (measured: gascity sat pointed at feat/mysql-first-class-backend, 459 commits
 # behind the lane, which is most of why only 7 of 252 closes carried a merge).
+#
+# `gc rig list --json` returns an OBJECT with a .rigs[] field, never a bare
+# array. A FAILED resolution is reported loudly and labeled <resolution-failed>
+# in the summary, distinct from <unresolved> (a config that names no target):
+# conflating the two is how an aborted parse read as "nothing configured" and
+# left this ledger judging nothing in production for weeks (gas-c8es).
 DEFAULT_BRANCH="${GC_MERGE_LEDGER_TARGET:-}"
+TARGET_LABEL=""
 if [ -z "$DEFAULT_BRANCH" ]; then
-    DEFAULT_BRANCH=$( cd "$REPO" 2>/dev/null && gc rig list --json 2>/dev/null |
-        jq -r --arg root "$REPO" '
-            [ .[] | select((.path // "") as $p | $root | startswith($p)) ]
+    RIGS_JSON=$( cd "$REPO" 2>/dev/null && gc rig list --json 2>/dev/null )
+    if [ -z "$RIGS_JSON" ]; then
+        TARGET_LABEL="<resolution-failed>"
+        printf 'close-merge-sweep: WARNING: intended-target resolution failed: `gc rig list --json` produced no output; closes with no gc.work_target of their own will be counted unknown, not judged\n'
+    else
+        DEFAULT_BRANCH=$( printf '%s' "$RIGS_JSON" | jq -r --arg root "$REPO" '
+            [ .rigs[] | select((.path // "") as $p | $root | startswith($p)) ]
             | sort_by((.path // "") | length) | last | .default_branch // empty
-        ' 2>/dev/null )
+        ' 2>&1 )
+        JQ_RC=$?
+        if [ "$JQ_RC" -ne 0 ]; then
+            TARGET_LABEL="<resolution-failed>"
+            printf 'close-merge-sweep: WARNING: intended-target resolution failed (jq exit %s: %s); closes with no gc.work_target of their own will be counted unknown, not judged\n' \
+                "$JQ_RC" "$DEFAULT_BRANCH"
+            DEFAULT_BRANCH=""
+        fi
+    fi
 fi
 
 RECORDS=$( cd "$REPO" 2>/dev/null && gc bd list --status=closed --limit="$LIMIT" --json 2>/dev/null |
@@ -458,5 +477,5 @@ $RECORDS
 EOF
 
 printf 'close-merge-sweep: landed=%d equiv=%d unproven=%d filed=%d deduped=%d toosoon=%d unknown=%d target=%s\n' \
-    "$LANDED" "$EQUIV" "$UNPROVEN" "$FILED" "$DEDUPED" "$TOOSOON" "$UNKNOWN" "${DEFAULT_BRANCH:-<unresolved>}"
+    "$LANDED" "$EQUIV" "$UNPROVEN" "$FILED" "$DEDUPED" "$TOOSOON" "$UNKNOWN" "${DEFAULT_BRANCH:-${TARGET_LABEL:-<unresolved>}}"
 exit 0
