@@ -136,7 +136,23 @@ func TestCmdline_FailsClosedWhenUnreadable(t *testing.T) {
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
-	if AliveWithCmdline(os.Getpid(), func([]string) bool { return true }) {
+	// On Darwin argv comes from kern.procargs2, which the ps stub cannot make
+	// unreadable for our own pid — sysctl returns the test binary's argv
+	// regardless of PATH (measured on the gas-0lex host: the stub left this
+	// test red on macOS while linux CI skips it above). Probe launchd instead:
+	// reading another user's procargs2 is EPERM for an unprivileged caller,
+	// which is the genuinely-unreadable case this test exists to pin. Alive(1)
+	// stays true (kill-0 EPERM means exists; the stubbed ps cannot claim
+	// zombie), so the assertion still exercises the Cmdline-error fail-closed
+	// branch and not a vacuous not-alive early return.
+	pid := os.Getpid()
+	if runtime.GOOS == "darwin" {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: kern.procargs2 of pid 1 is readable, argv cannot be made unreadable")
+		}
+		pid = 1
+	}
+	if AliveWithCmdline(pid, func([]string) bool { return true }) {
 		t.Fatal("AliveWithCmdline = true with no readable argv; must fail closed so the caller starts its poller")
 	}
 }
