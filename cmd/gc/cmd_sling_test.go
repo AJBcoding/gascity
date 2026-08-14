@@ -769,6 +769,102 @@ func TestCliBeadRouterAllowsCityTargetFromCityStore(t *testing.T) {
 	}
 }
 
+// TestCliBeadRouterSetsAssigneeWhenRequested is the regression test for
+// gas-7e2h: gc sling always wrote gc.routed_to but never touched assignee,
+// so a bead routed to a named session (the refinery, witness, etc.) was
+// invisible to that session's own find-work query, which filters
+// --assignee=$GC_AGENT per the documented pool-consumption pattern. finalize
+// resolves the Assignee to stamp for a named-session target (see
+// resolveRouteAssignee in internal/sling); this test verifies the router
+// applies it alongside gc.routed_to in the same route.
+func TestCliBeadRouterSetsAssigneeWhenRequested(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "alpha")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "alpha",
+			MaxActiveSessions: intPtr(1),
+		}},
+	}
+	store := newSlingTestStore()
+	if _, err := store.Create(beads.Bead{ID: "RIG-2", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("seed RIG-2: %v", err)
+	}
+	deps := &slingDeps{
+		CityName: "test-city",
+		CityPath: cityPath,
+		Cfg:      cfg,
+		Store:    store,
+		StoreRef: "rig:alpha",
+	}
+	router := cliBeadRouter{deps: deps}
+
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID:   "RIG-2",
+		Target:   "alpha/refinery",
+		Assignee: "alpha/refinery",
+	}); err != nil {
+		t.Fatalf("named-session route should succeed, got: %v", err)
+	}
+	bead, err := store.Get("RIG-2")
+	if err != nil {
+		t.Fatalf("store.Get(RIG-2): %v", err)
+	}
+	if bead.Metadata["gc.routed_to"] != "alpha/refinery" {
+		t.Errorf("gc.routed_to = %q, want alpha/refinery", bead.Metadata["gc.routed_to"])
+	}
+	if bead.Assignee != "alpha/refinery" {
+		t.Errorf("Assignee = %q, want alpha/refinery", bead.Assignee)
+	}
+}
+
+// TestCliBeadRouterLeavesAssigneeEmptyByDefault guards the fix from
+// over-reaching: when the RouteRequest carries no Assignee (as finalize
+// leaves it for a pool target), the router must not invent one -- the
+// pool's claiming member stamps its own assignee on pickup.
+func TestCliBeadRouterLeavesAssigneeEmptyByDefault(t *testing.T) {
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "alpha")
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: rigPath}},
+		Agents: []config.Agent{{
+			Name:              "polecat",
+			Dir:               "alpha",
+			MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3),
+		}},
+	}
+	store := newSlingTestStore()
+	if _, err := store.Create(beads.Bead{ID: "RIG-3", Type: "task", Status: "open"}); err != nil {
+		t.Fatalf("seed RIG-3: %v", err)
+	}
+	deps := &slingDeps{
+		CityName: "test-city",
+		CityPath: cityPath,
+		Cfg:      cfg,
+		Store:    store,
+		StoreRef: "rig:alpha",
+	}
+	router := cliBeadRouter{deps: deps}
+
+	if err := router.Route(context.Background(), sling.RouteRequest{
+		BeadID: "RIG-3",
+		Target: "alpha/polecat",
+	}); err != nil {
+		t.Fatalf("pool route should succeed, got: %v", err)
+	}
+	bead, err := store.Get("RIG-3")
+	if err != nil {
+		t.Fatalf("store.Get(RIG-3): %v", err)
+	}
+	if bead.Assignee != "" {
+		t.Errorf("Assignee = %q, want empty for a pool target", bead.Assignee)
+	}
+}
+
 func TestDoSlingFormulaToAgent(t *testing.T) {
 	runner := newFakeRunner()
 	sp := runtime.NewFake()

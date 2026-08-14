@@ -98,6 +98,13 @@ func TestSlingWithBead(t *testing.T) {
 	if got := updated.Metadata["gc.routed_to"]; got != "myrig/worker" {
 		t.Fatalf("gc.routed_to = %q, want myrig/worker", got)
 	}
+	// Regression guard for gas-7e2h: "myrig/worker" is a configured named
+	// session (see newFakeState), which has one stable identity and no
+	// separate claim step. Routing must stamp assignee itself, or a
+	// find-work query filtering --assignee=$GC_AGENT never sees the bead.
+	if updated.Assignee != "myrig/worker" {
+		t.Fatalf("Assignee = %q, want myrig/worker (gas-7e2h)", updated.Assignee)
+	}
 }
 
 func TestSlingRefusesCityStoreBeadToRigTarget(t *testing.T) {
@@ -601,6 +608,16 @@ func TestSlingPoolTarget(t *testing.T) {
 	}
 	if resp["status"] != "slung" {
 		t.Fatalf("status = %q, want slung", resp["status"])
+	}
+	// Regression guard for gas-7e2h: "myrig/polecat" is a genuine pool (no
+	// [[named_session]] entry), so routing must leave assignee untouched --
+	// the claiming pool member stamps its own assignee on pickup.
+	updated, err := store.Get(b.ID)
+	if err != nil {
+		t.Fatalf("Get(%q): %v", b.ID, err)
+	}
+	if updated.Assignee != "" {
+		t.Fatalf("Assignee = %q, want empty for a pool target (gas-7e2h)", updated.Assignee)
 	}
 }
 

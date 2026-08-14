@@ -22,11 +22,16 @@ expanded to their open children before routing.
   `cmd/gc/cmd_sling.go`.
 
 - **Sling Query**: A shell command template on each agent config
-  (`sling_query`) that routes a bead to that agent. Defaults to
-  `bd update {} --assignee=<qualified-name>` for fixed agents and
-  `bd update {} --label=pool:<qualified-name>` for pool agents. The `{}`
-  placeholder is replaced with the actual bead ID at dispatch time.
-  Defined in `internal/config/config.go:EffectiveSlingQuery`.
+  (`sling_query`) that routes a bead to that agent, used only as a fallback
+  when no typed `BeadRouter` is wired (custom per-agent overrides always
+  execute as a shell command regardless). Defaults to
+  `bd update {} --set-metadata gc.routed_to=<qualified-name>` for every
+  agent, fixed or pool alike -- metadata-based routing, no assignee. The
+  `{}` placeholder is replaced with the actual bead ID at dispatch time.
+  Defined in `internal/config/workquery.go:EffectiveSlingQuery` /
+  `DefaultSlingQuery`. Production CLI/API dispatch instead routes through
+  the typed `BeadRouter` (see "Supported handoff forms" below), which also
+  stamps `assignee` for named-session targets.
 
 - **Container Expansion**: When a convoy is slung, dispatch expands it
   to its open children and routes each child individually. Non-open
@@ -173,9 +178,21 @@ land on the same routed queue.
 Supported handoff forms are intentionally distinct. Generic pool demand is
 ready work with `assignee=""` and `gc.routed_to=<target>`; assigning the
 pool template itself is not pool demand. Direct named-session delivery is
-ready work with `assignee=<named-session-identity>` and no generic route
-metadata, so the reconciler does not also treat the handoff as generic pool
-demand.
+ready work with `assignee=<named-session-identity>`, so the reconciler does
+not also treat the handoff as generic pool demand. `gc sling`'s built-in
+router (`cmd/gc/cmd_sling.go:cliBeadRouter`, `internal/api:apiBeadRouter`)
+always stamps `gc.routed_to` alongside `assignee` rather than omitting it for
+this form -- the two writes share one code path and splitting them added no
+value -- but this stays safe because `EffectivePoolDemandQuery` and Tier 3 of
+`EffectiveWorkQuery` both filter `--unassigned`: a bead carrying a
+named-session `assignee` is excluded from generic pool-demand counting and
+claiming regardless of `gc.routed_to`, and `gc hook`'s Tier 1
+(`assignedReadyTierCommand`) already matches it first via
+`$GC_SESSION_ID`/`$GC_SESSION_NAME`/`$GC_ALIAS`. Before gas-7e2h, the
+built-in router stamped only `gc.routed_to` for every target, so a bead
+routed to a named session was invisible to any consumer's find-work query
+filtering on assignee (the documented pool-consumption pattern) even though
+it was the session's own direct work.
 
 The shared predicate is the agreement substrate. Failure envelopes
 intentionally differ: the worker path suppresses `bd ready` stderr and

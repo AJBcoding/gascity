@@ -513,5 +513,13 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 		}
 		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
 	}
+	if assignee := strings.TrimSpace(req.Assignee); assignee != "" {
+		if err := r.store.Update(req.BeadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
+			if req.Force && errors.Is(err, beads.ErrNotFound) {
+				return nil
+			}
+			return fmt.Errorf("setting assignee on %s: %w", req.BeadID, err)
+		}
+	}
 	return nil
 }

@@ -109,6 +109,14 @@ type RouteRequest struct {
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
+	// Assignee, when non-empty, is stamped onto the bead's assignee field
+	// alongside gc.routed_to. Populated only when Target resolves to a
+	// configured named session: such a target has a single stable identity
+	// and no separate claim step, so routing must write assignee itself or
+	// any find-work query filtering --assignee=$GC_AGENT never sees the
+	// work (gas-7e2h). Empty for pool targets, which keep the existing
+	// claim-on-pickup contract: the claiming member stamps its own assignee.
+	Assignee string
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.
