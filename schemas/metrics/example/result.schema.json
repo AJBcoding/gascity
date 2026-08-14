@@ -211,10 +211,10 @@
               "storage-migrate",
               "storage-status",
               "ready",
-              "storage-recover-stranded",
-              "beads-metadata-cas",
               "beads-city-use-mysql",
-              "session-key"
+              "session-key",
+              "storage-recover-stranded",
+              "beads-metadata-cas"
             ]
           },
           "event_id": {

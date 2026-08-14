@@ -282,7 +282,7 @@
       "notice_policy": "eligible",
       "classification": "beads-city-use-mysql",
       "owner": "immediate",
-      "id": 203
+      "id": 201
     },
     {
       "path": "gc beads health",
@@ -331,7 +331,7 @@
       "notice_policy": "eligible",
       "classification": "beads-metadata-cas",
       "owner": "immediate",
-      "id": 202
+      "id": 204
     },
     {
       "path": "gc beads show",
@@ -3598,7 +3598,7 @@
       "notice_policy": "eligible",
       "classification": "session-key",
       "owner": "immediate",
-      "id": 204
+      "id": 202
     },
     {
       "path": "gc session kill",
@@ -4023,7 +4023,7 @@
       "notice_policy": "eligible",
       "classification": "storage-recover-stranded",
       "owner": "immediate",
-      "id": 201
+      "id": 203
     },
     {
       "path": "gc storage status",

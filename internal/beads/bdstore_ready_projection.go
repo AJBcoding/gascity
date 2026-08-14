@@ -250,8 +250,22 @@ func (s *BdStore) bdReadyProjectionEnabled() (bool, error) {
 // that then refuses anyway is caught by the runtime latch in
 // fetchReadyProjection.
 func (s *BdStore) readyProjectionBackendRefusal() error {
-	_, _, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(s.dir, ".beads", "metadata.json"))
-	if err == nil || !errors.Is(err, contract.ErrUnknownBackend) {
+	state, _, err := contract.LoadMetadataState(fsys.OSFS{}, filepath.Join(s.dir, ".beads", "metadata.json"))
+	if err == nil {
+		// A registered backend gc implements is not automatically one `bd sql`
+		// can serve. The mysql backend runs bd in embedded mode, where the SQL
+		// escape hatch refuses outright ("'bd sql' is not yet supported in
+		// embedded mode") — measured as a guaranteed-failing subprocess on
+		// every cache prime of every MySQL-backed rig before this gate
+		// (gas-7rfh). Refusing here is the deterministic form of the runtime
+		// latch in fetchReadyProjection: same one-per-scope verdict, zero
+		// failed probes spent reaching it.
+		if state.Backend == "mysql" {
+			return fmt.Errorf("backend %q does not serve bd sql (embedded mode)", state.Backend)
+		}
+		return nil
+	}
+	if !errors.Is(err, contract.ErrUnknownBackend) {
 		return nil
 	}
 	return err
