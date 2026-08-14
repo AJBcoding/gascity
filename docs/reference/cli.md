@@ -4471,6 +4471,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--branch` | string |  | stamp metadata.branch on the routed bead (the branch carrying its work — required by merge-queue find-work contracts) |
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
 | `--force` | bool |  | suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
 | `-f`, `--formula` | bool |  | treat argument as formula name |
@@ -4485,6 +4486,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--scope-kind` | string |  | logical workflow scope kind for formulas v2 launches |
 | `--scope-ref` | string |  | logical workflow scope ref for formulas v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
+| `--target` | string |  | stamp metadata.target on the routed bead (the branch its work merges into) |
 | `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
 

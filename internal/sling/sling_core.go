@@ -117,6 +117,30 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	// Route-metadata stamping (--branch/--target): write the branch-handoff
+	// contract keys BEFORE routing, so the assignee write inside Route — the
+	// point at which `--assignee=$GC_AGENT` consumers start seeing the bead —
+	// reveals a contract-complete bead rather than a half-stamped one their
+	// queue filter silently drops (gas-jyi5). This runs BEFORE the idempotency
+	// short-circuit on purpose: the flags' primary repair scenario is a bead an
+	// earlier sling already routed WITHOUT the stamp, and short-circuiting past
+	// the stamp would silently drop the one thing the re-sling was for (the
+	// same routed-raw hazard the --on attachment probe handles below). A
+	// formula launch has no subject bead (BeadOrFormula is a formula NAME, and
+	// stamping it could hit an ID-colliding bead — the same hazard
+	// shouldReopenForReassign guards), so the combination is rejected
+	// outright, dry-run included.
+	if opts.Branch != "" || opts.TargetBranch != "" {
+		if opts.IsFormula {
+			return result, fmt.Errorf("--branch/--target stamp the routed bead; a --formula launch has no bead to stamp")
+		}
+		if shouldStampRouteMetadata(opts) {
+			if err := stampRouteMetadata(opts, deps); err != nil {
+				return result, fmt.Errorf("stamping route metadata on %s: %w", opts.BeadOrFormula, err)
+			}
+		}
+	}
+
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
 		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
@@ -355,6 +379,36 @@ func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bo
 // !IsFormula guard, mirroring the auto-convoy block. Dry-run never mutates.
 func shouldReopenForReassign(opts SlingOpts) bool {
 	return opts.Reassign && !opts.IsFormula && !opts.DryRun
+}
+
+// shouldStampRouteMetadata mirrors shouldReopenForReassign: route-metadata
+// stamping is a pre-route bead mutation, so it never applies to a formula
+// launch (no subject bead) or a dry-run (previews must not mutate).
+func shouldStampRouteMetadata(opts SlingOpts) bool {
+	return (strings.TrimSpace(opts.Branch) != "" || strings.TrimSpace(opts.TargetBranch) != "") &&
+		!opts.IsFormula && !opts.DryRun
+}
+
+// stampRouteMetadata writes the branch-handoff contract keys
+// (metadata.branch / metadata.target) onto the bead about to be routed.
+// Failure is fail-closed at the call site: routing a bead whose contract
+// stamp did not land would hand a consumer work its find-work query can
+// never see — the precise defect the stamping exists to close (gas-jyi5).
+func stampRouteMetadata(opts SlingOpts, deps SlingDeps) error {
+	if deps.Store == nil {
+		return fmt.Errorf("route-metadata stamping requires a bead store")
+	}
+	if branch := strings.TrimSpace(opts.Branch); branch != "" {
+		if err := deps.Store.SetMetadata(opts.BeadOrFormula, beadBranchMetadataKey, branch); err != nil {
+			return fmt.Errorf("setting %s: %w", beadBranchMetadataKey, err)
+		}
+	}
+	if target := strings.TrimSpace(opts.TargetBranch); target != "" {
+		if err := deps.Store.SetMetadata(opts.BeadOrFormula, beadTargetMetadataKey, target); err != nil {
+			return fmt.Errorf("setting %s: %w", beadTargetMetadataKey, err)
+		}
+	}
+	return nil
 }
 
 func validateExistingBead(beadID string, deps SlingDeps) error {
@@ -1570,6 +1624,16 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		singleDeps := deps
 		singleDeps.ValidationQuerier = containerQuerier
 		return DoSling(singleOpts, singleDeps, querier)
+	}
+
+	// Container expansion routes each child individually and never passes the
+	// container through DoSling, so --branch/--target would be silently
+	// dropped here — and honoring them is not meaningful either: branch is a
+	// per-work-bead value with no single recipient in a container, and
+	// fanning one value across every child would mis-stamp all but one of
+	// them. Reject loudly; a convoy-wide merge target has its own tool.
+	if opts.Branch != "" || opts.TargetBranch != "" {
+		return SlingResult{}, fmt.Errorf("%s %s is a container: --branch/--target stamp a single routed bead; set a convoy-wide target with 'gc convoy target' instead", b.Type, b.ID)
 	}
 
 	if useFormula != "" {

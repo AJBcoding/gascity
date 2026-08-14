@@ -73,6 +73,8 @@ func newSlingCmd(stdout, stderr io.Writer) *cobra.Command {
 	var fromStdin bool
 	var scopeKind string
 	var scopeRef string
+	var branch string
+	var targetBranch string
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "sling [target] <bead-or-formula-or-text>",
@@ -132,12 +134,10 @@ Examples:
 			if scopeKind != "" && scopeKind != "city" && scopeKind != "rig" {
 				return argError("gc sling: --scope-kind must be city or rig")
 			}
-			code := 0
-			if jsonOutput {
-				code = cmdSlingWithJSON(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, true, stdout, stderr)
-			} else {
-				code = cmdSling(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, stdout, stderr)
+			if (strings.TrimSpace(branch) != "" || strings.TrimSpace(targetBranch) != "") && formula {
+				return argError("gc sling: --branch/--target stamp the routed bead and cannot be used with --formula (a formula launch has no bead to stamp)")
 			}
+			code := cmdSlingWithJSON(args, formula, nudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, branch, targetBranch, jsonOutput, stdout, stderr)
 			return exitForCode(code)
 		},
 	}
@@ -156,6 +156,8 @@ Examples:
 	cmd.Flags().BoolVar(&fromStdin, "stdin", false, "read bead text from stdin (first line = title, rest = description)")
 	cmd.Flags().StringVar(&scopeKind, "scope-kind", "", "logical workflow scope kind for formulas v2 launches")
 	cmd.Flags().StringVar(&scopeRef, "scope-ref", "", "logical workflow scope ref for formulas v2 launches")
+	cmd.Flags().StringVar(&branch, "branch", "", "stamp metadata.branch on the routed bead (the branch carrying its work — required by merge-queue find-work contracts)")
+	cmd.Flags().StringVar(&targetBranch, "target", "", "stamp metadata.target on the routed bead (the branch its work merges into)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output dispatch result in JSON format")
 	cmd.MarkFlagsMutuallyExclusive("formula", "on")
 	cmd.MarkFlagsMutuallyExclusive("no-formula", "formula")
@@ -367,11 +369,11 @@ func resolveSlingTargetAndBead(cfg *config.City, cityPath string, args []string,
 }
 
 // cmdSling is the CLI entry point for gc sling.
-func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int {
-	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, false, stdout, stderr)
+func cmdSling(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, stdout, stderr io.Writer) int { //nolint:unparam // compatibility wrapper preserves the production-shaped isFormula seam for direct cmdSling tests
+	return cmdSlingWithJSON(args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, "", "", false, stdout, stderr)
 }
 
-func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef string, jsonOutput bool, stdout, stderr io.Writer) int {
+func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title string, vars []string, merge string, noConvoy, owned, reassign bool, onFormula string, noFormula, fromStdin, dryRun bool, scopeKind, scopeRef, branch, targetBranch string, jsonOutput bool, stdout, stderr io.Writer) int {
 	humanStdout := stdout
 	if jsonOutput {
 		humanStdout = io.Discard
@@ -397,6 +399,14 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		return fail("city_resolve_failed", fmt.Sprintf("gc sling: %v", rerr))
 	}
 	if isRemote {
+		// --branch/--target stay refused for a remote city until the sling
+		// wire (SlingInput/SlingRequest) carries them — matching the
+		// incremental refusals inside cmdSlingRemote (--nudge, --on). A
+		// silent drop would route a bead its consumer's queue filter never
+		// sees, the exact defect the flags exist to close.
+		if strings.TrimSpace(branch) != "" || strings.TrimSpace(targetBranch) != "" {
+			return fail("unsupported_remote", "gc sling: --branch/--target for a remote city land separately; stamp the metadata on the remote bead first (gc bd update --set-metadata branch=... target=...), then sling")
+		}
 		return cmdSlingRemote(remoteC, remoteTgt, args, isFormula, doNudge, force, title, vars, merge, noConvoy, owned, reassign, onFormula, noFormula, fromStdin, dryRun, scopeKind, scopeRef, jsonOutput, stdout, stderr)
 	}
 	// --stdin: read bead text from stdin early (before city resolution)
@@ -480,6 +490,8 @@ func cmdSlingWithJSON(args []string, isFormula, doNudge, force bool, title strin
 		InlineText:    inlineText,
 		ScopeKind:     scopeKind,
 		ScopeRef:      scopeRef,
+		Branch:        branch,
+		TargetBranch:  targetBranch,
 	}
 	runner := SlingRunner(shellSlingRunner)
 	if len(storeEnv) > 0 {
@@ -993,16 +1005,18 @@ func doSlingBatchWithJSON(opts slingOpts, deps slingDeps, querier BeadChildQueri
 		result, err = sling.DoSlingBatch(opts, deps, querier)
 	} else {
 		result, err = sl.ExpandConvoy(context.Background(), opts.BeadOrFormula, opts.Target, sling.RouteOpts{
-			Merge:      opts.Merge,
-			NoConvoy:   opts.NoConvoy,
-			Owned:      opts.Owned,
-			Reassign:   opts.Reassign,
-			Nudge:      opts.Nudge,
-			Force:      opts.Force,
-			SkipPoke:   opts.SkipPoke,
-			DryRun:     opts.DryRun,
-			InlineText: opts.InlineText,
-			NoFormula:  opts.NoFormula,
+			Merge:        opts.Merge,
+			NoConvoy:     opts.NoConvoy,
+			Owned:        opts.Owned,
+			Reassign:     opts.Reassign,
+			Nudge:        opts.Nudge,
+			Force:        opts.Force,
+			SkipPoke:     opts.SkipPoke,
+			DryRun:       opts.DryRun,
+			InlineText:   opts.InlineText,
+			NoFormula:    opts.NoFormula,
+			Branch:       opts.Branch,
+			TargetBranch: opts.TargetBranch,
 		}, querier)
 	}
 	// Print warnings before error check so they're visible on failure.
