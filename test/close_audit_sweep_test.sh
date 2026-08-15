@@ -13,6 +13,8 @@
 #   2. Commit on no publication remote     → files exactly one bead
 #   3. Commit reachable only via a SELF-REFERENTIAL remote → still files
 #      (a remote pointing back at this same repo confers no durability, gas-6tc)
+#      Relative self-remotes, loopback scp remotes, and stale refs from missing
+#      local-path remotes are the same false-green shape.
 #   4. A bead already filed for that record → files nothing (idempotent)
 #   5. Malformed spool lines and bd failures never make the sweeper exit non-zero
 #   6. shipped with no commit at all → files one bead (the py-1tlv shape)
@@ -48,6 +50,20 @@ make_work_repo() {
     git -C "$dir" commit -qm "work" >/dev/null 2>&1
     git init -q --bare "$dir.origin.git" >/dev/null 2>&1
     git -C "$dir" remote add origin "$dir.origin.git"
+    git -C "$dir" rev-parse HEAD
+}
+
+# make_local_repo <dir> — a repo with one local commit and no remotes. Echoes
+# the commit SHA. Used for self-only publication tests where any remote-tracking
+# ref that resolves the commit is poison by definition.
+make_local_repo() {
+    local dir="$1"
+    git init -q -b main "$dir" >/dev/null 2>&1
+    git -C "$dir" config user.email t@t.invalid
+    git -C "$dir" config user.name  t
+    echo payload > "$dir/file.txt"
+    git -C "$dir" add file.txt
+    git -C "$dir" commit -qm "work" >/dev/null 2>&1
     git -C "$dir" rev-parse HEAD
 }
 
@@ -144,6 +160,45 @@ else
     fail "self-ref remote should still file 1 bead, filed $n (rc=$RUN_RC)"
 fi
 
+# ── Case 3b: relative self-only remote is still not publication ───────────
+t3b=$(mktemp -d)
+sha=$(make_local_repo "$t3b/work")
+git -C "$t3b/work" remote add dot-self .
+git -C "$t3b/work" fetch -q dot-self >/dev/null 2>&1
+spool "$t3b" "$t3b/work" "gas-c3b" "$sha" "not-on-publication-remote"
+run_sweep "$t3b"; n="$RUN_N"
+if [ "$n" = "1" ] && [ "$RUN_RC" = "0" ]; then
+    pass "relative self-only remote confers no durability — still files"
+else
+    fail "relative self-only remote should still file 1 bead, filed $n (rc=$RUN_RC)"
+fi
+
+# ── Case 3c: loopback scp self-only remote is still not publication ───────
+t3c=$(mktemp -d)
+sha=$(make_local_repo "$t3c/work")
+git -C "$t3c/work" remote add loopback "git@localhost:$t3c/work"
+git -C "$t3c/work" update-ref refs/remotes/loopback/main "$sha"
+spool "$t3c" "$t3c/work" "gas-c3c" "$sha" "not-on-publication-remote"
+run_sweep "$t3c"; n="$RUN_N"
+if [ "$n" = "1" ] && [ "$RUN_RC" = "0" ]; then
+    pass "loopback scp self-only remote confers no durability — still files"
+else
+    fail "loopback scp self-only remote should still file 1 bead, filed $n (rc=$RUN_RC)"
+fi
+
+# ── Case 3d: stale refs from missing local-path remotes do not publish ─────
+t3d=$(mktemp -d)
+sha=$(make_local_repo "$t3d/work")
+git -C "$t3d/work" remote add missing "$t3d/missing.git"
+git -C "$t3d/work" update-ref refs/remotes/missing/main "$sha"
+spool "$t3d" "$t3d/work" "gas-c3d" "$sha" "not-on-publication-remote"
+run_sweep "$t3d"; n="$RUN_N"
+if [ "$n" = "1" ] && [ "$RUN_RC" = "0" ]; then
+    pass "stale refs from missing local remotes confer no durability — still files"
+else
+    fail "missing-local stale remote ref should still file 1 bead, filed $n (rc=$RUN_RC)"
+fi
+
 # ── Case 4: idempotence — a bead already exists for this record ────────────
 t4=$(mktemp -d)
 sha=$(make_work_repo "$t4/work")
@@ -193,7 +248,7 @@ else
     fail "fresh record should file 0, filed $n (rc=$RUN_RC)"
 fi
 
-rm -rf "$t1" "$t2" "$t3" "$t4" "$t5" "$t6" "$t7" \
+rm -rf "$t1" "$t2" "$t3" "$t3b" "$t3c" "$t3d" "$t4" "$t5" "$t6" "$t7" \
        "$t1/work.origin.git" "$t2/work.origin.git" "$t3/work.origin.git" \
        "$t4/work.origin.git" "$t6/work.origin.git" "$t7/work.origin.git" 2>/dev/null
 

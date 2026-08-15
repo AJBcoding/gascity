@@ -77,6 +77,29 @@ func TestHasUnpushedCommitsSelfRemoteOnlyRepoFailsClosed(t *testing.T) {
 	}
 }
 
+// TestHasUnpushedCommitsRelativeSelfRemoteIsNotPublication covers the relative
+// spelling of the same self-remote trap. `git remote add herdr-src .` stores "."
+// verbatim and git resolves it against the repository worktree. The publication
+// classifier must use that repo-relative base, not the process working
+// directory, or a fetch from "." snapshots local-only work under refs/remotes
+// and makes it look pushed.
+func TestHasUnpushedCommitsRelativeSelfRemoteIsNotPublication(t *testing.T) {
+	repo := initTestRepo(t)
+
+	runGit(t, repo, "checkout", "-b", "feature")
+	runGit(t, repo, "commit", "--allow-empty", "-m", "local-only work")
+	runGit(t, repo, "remote", "add", selfRemoteName, ".")
+	runGit(t, repo, "fetch", selfRemoteName)
+
+	if _, err := New(repo).run("rev-parse", "--verify", "--quiet", "refs/remotes/herdr-src/feature"); err != nil {
+		t.Fatalf("precondition: refs/remotes/herdr-src/feature must exist after fetching the relative self remote: %v", err)
+	}
+
+	if !New(repo).HasUnpushedCommits() {
+		t.Error("HasUnpushedCommits() = false, want true: a relative self-remote's snapshot is not publication")
+	}
+}
+
 // TestHasUnpushedCommitsRealRemoteStillPublishes guards the fix's blast radius:
 // excluding self-referential remotes must not stop a genuine remote from
 // clearing work. A repo carrying both reports pushed work as pushed.
@@ -120,6 +143,27 @@ func TestPublicationRemotesNoRemotes(t *testing.T) {
 	}
 	if len(publication) != 0 || len(configured) != 0 {
 		t.Errorf("PublicationRemotes() = (%v, %v), want two empty lists for a repo with no remotes", publication, configured)
+	}
+}
+
+// TestPublicationRemotesExcludesLoopbackSCPAndMissingLocalPath pins two
+// fail-closed publication edges. Loopback scp syntax can name this repository
+// just like ssh://localhost can, and a missing local path cannot have received
+// work at all. Neither may clear an at-risk or worktree-prune check.
+func TestPublicationRemotesExcludesLoopbackSCPAndMissingLocalPath(t *testing.T) {
+	repo := initTestRepo(t)
+	runGit(t, repo, "remote", "add", "loopback", "git@localhost:"+repo)
+	runGit(t, repo, "remote", "add", "missing", filepath.Join(repo, "missing.git"))
+
+	publication, configured, err := New(repo).PublicationRemotes()
+	if err != nil {
+		t.Fatalf("PublicationRemotes() error = %v", err)
+	}
+	if len(configured) != 2 {
+		t.Fatalf("configured = %v, want two configured remotes", configured)
+	}
+	if len(publication) != 0 {
+		t.Errorf("publication = %v, want none: loopback self-remotes and missing local paths confer no durability", publication)
 	}
 }
 

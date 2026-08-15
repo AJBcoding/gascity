@@ -904,12 +904,32 @@ func censusModuleRoot(t *testing.T) string {
 func censusSources(t *testing.T) []censusSource {
 	t.Helper()
 	root := censusModuleRoot(t)
+	sources, err := censusSourcesFromRoot(root)
+	if err != nil {
+		t.Fatalf("walking %s: %v", root, err)
+	}
+	if len(sources) < censusMinimumFiles {
+		t.Fatalf("census scanned %d non-test Go files, want at least %d; the module walk is broken", len(sources), censusMinimumFiles)
+	}
+	return sources
+}
+
+func censusSourcesFromRoot(root string) ([]censusSource, error) {
 	var sources []censusSource
 	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if entry.IsDir() {
+			if path != root {
+				_, statErr := os.Stat(filepath.Join(path, ".git"))
+				if statErr == nil {
+					return fs.SkipDir
+				}
+				if !os.IsNotExist(statErr) {
+					return statErr
+				}
+			}
 			switch entry.Name() {
 			case ".git", ".claude", "node_modules", "vendor", "testdata":
 				return fs.SkipDir
@@ -932,12 +952,38 @@ func censusSources(t *testing.T) []censusSource {
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("walking %s: %v", root, err)
+		return nil, err
 	}
-	if len(sources) < censusMinimumFiles {
-		t.Fatalf("census scanned %d non-test Go files, want at least %d; the module walk is broken", len(sources), censusMinimumFiles)
+	return sources, nil
+}
+
+func TestCensusSourcesSkipNestedGitWorktrees(t *testing.T) {
+	root := t.TempDir()
+	writeCensusFixtureFile(t, root, "go.mod", "module example.test\n")
+	writeCensusFixtureFile(t, root, "internal/storebinding/builder_publication.go", "package storebinding\n")
+	writeCensusFixtureFile(t, root, "worktrees/gas-zjqk/.git", "gitdir: ../.git/worktrees/gas-zjqk\n")
+	writeCensusFixtureFile(t, root, "worktrees/gas-zjqk/internal/storebinding/builder_publication.go", "package storebinding\n")
+
+	sources, err := censusSourcesFromRoot(root)
+	if err != nil {
+		t.Fatalf("censusSourcesFromRoot: %v", err)
 	}
-	return sources
+	for _, source := range sources {
+		if strings.HasPrefix(source.rel, "worktrees/") {
+			t.Fatalf("census scanned nested worktree source %q", source.rel)
+		}
+	}
+}
+
+func writeCensusFixtureFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating fixture dir for %s: %v", rel, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fixture file %s: %v", rel, err)
+	}
 }
 
 func censusParse(t *testing.T, source censusSource) *ast.File {

@@ -375,15 +375,14 @@ func gitRemoteBranchTipMatches(repoDir, remote, commit, branch string) bool {
 }
 
 // gitPublicationRemotes returns the names of repoDir's remotes that can confer
-// durability — every configured remote except those whose URL resolves back
-// into this same repository (gas-6tc) — alongside the full configured list it
-// was filtered from.
+// durability — configured remotes whose URL can publish away from this
+// repository — alongside the full configured list it was filtered from.
 //
 // Callers need both because an empty publication list is ambiguous on its own:
-// no remotes at all is a local-only rig, while remotes that all filter out is a
-// misconfiguration, and the durability rule answers those two differently
-// (gas-avv). Both results are nil when the remote list could not be read, which
-// callers treat as fail-closed.
+// no remotes at all is a local-only rig, while configured remotes that all
+// filter out are a misconfiguration, and the durability rule answers those two
+// differently (gas-avv). Both results are nil when the remote list could not be
+// read, which callers treat as fail-closed.
 //
 // The classification itself lives in internal/git (git.PublicationRemotes),
 // where the durability probes that gate worktree reclamation can also reach it.
