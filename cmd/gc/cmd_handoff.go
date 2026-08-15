@@ -228,22 +228,17 @@ func cmdHandoffRemoteWithSender(args []string, target string, from string, stdou
 	// session coordination-class store; identity today, so byte-identical.
 	sessStore := cliSessionStore(store, cfg, cityPath)
 	sender := from
-	switch {
-	case sender == "":
+	switch sender {
+	case "":
 		var ok bool
 		sender, ok = resolveDefaultMailSenderForCommand(cityPath, cfg, sessStore, stderr, "gc handoff")
 		if !ok {
 			return 1
 		}
-	case isOperatorMailSenderClaim(sender):
-		if rejectAgentClaimingOperatorIdentity(stderr, "gc handoff") {
-			return 1
-		}
-		sender = "human"
 	default:
-		sender, err = resolveMailIdentityWithConfig(cityPath, cfg, sessStore, sender)
-		if err != nil {
-			fmt.Fprintf(stderr, "gc handoff: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+		var ok bool
+		sender, ok = resolveExplicitMailSenderForCommandCached(cityPath, cfg, sessStore, sender, stderr, "gc handoff", nil)
+		if !ok {
 			return 1
 		}
 	}

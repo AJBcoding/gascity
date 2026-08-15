@@ -960,33 +960,78 @@ func resolveMailSenderCandidates(stderr io.Writer, cmdName string) ([]string, bo
 	return candidates, true
 }
 
-// isOperatorMailSenderClaim reports whether an explicit --from value claims the
-// reserved operator identity.
-//
-// It normalizes exactly as reservedMailSenderIdentity does, because that is what
-// finally resolves the sender: plain equality against "human" would let
-// "human/" and " human " through the guard below and still arrive as human.
-// The empty value also normalizes to human, so callers must handle "unset"
-// before consulting this.
-func isOperatorMailSenderClaim(from string) bool {
-	sender, ok := reservedMailSenderIdentity(from)
-	return ok && sender == "human"
-}
-
-// rejectAgentClaimingOperatorIdentity reports whether an explicit --from human
-// must be refused because this process is demonstrably an agent.
-//
-// Without it the fail-closed default above is bypassed by adding one flag, and
-// From:human stays unfalsifiable. The operator's own shell carries no ambient
-// agent identity, so their path is unaffected.
-func rejectAgentClaimingOperatorIdentity(stderr io.Writer, cmdName string) bool {
+func resolveExplicitMailSenderForCommandCached(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	from string,
+	stderr io.Writer,
+	cmdName string,
+	cache *mailIdentitySessionCache,
+) (string, bool) {
+	from = strings.TrimSpace(from)
+	if sender, ok := reservedMailSenderIdentity(from); ok {
+		return authorizeResolvedExplicitMailSender(cityPath, cfg, store, from, sender, stderr, cmdName, cache)
+	}
 	ambient := ambientMailIdentityCandidates()
 	if len(ambient) == 0 {
-		return false
+		_, _ = resolveMailSenderCandidates(stderr, cmdName)
+		fmt.Fprintf(stderr, "%s: refusing --from %s: no ambient identity proves ownership\n", cmdName, from) //nolint:errcheck // best-effort stderr
+		return "", false
 	}
-	fmt.Fprintf(stderr, "%s: refusing --from human: this session is %s\n", cmdName, strings.Join(ambient, ", ")) //nolint:errcheck // best-effort stderr
-	fmt.Fprintf(stderr, "%s: \"human\" is the operator's identity and cannot be claimed by an agent\n", cmdName) //nolint:errcheck // best-effort stderr
-	return true
+	sender, err := resolveMailIdentityWithConfigCached(cityPath, cfg, store, from, cache)
+	if err != nil {
+		fmt.Fprintf(stderr, "%s: invalid sender %q: %v\n", cmdName, from, err) //nolint:errcheck // best-effort stderr
+		return "", false
+	}
+	return authorizeResolvedExplicitMailSender(cityPath, cfg, store, from, sender, stderr, cmdName, cache)
+}
+
+func authorizeResolvedExplicitMailSender(
+	cityPath string,
+	cfg *config.City,
+	store beads.Store,
+	from string,
+	resolved string,
+	stderr io.Writer,
+	cmdName string,
+	cache *mailIdentitySessionCache,
+) (string, bool) {
+	ambient := ambientMailIdentityCandidates()
+	if len(ambient) == 0 {
+		if _, ok := reservedMailSenderIdentity(from); ok {
+			return resolved, true
+		}
+		_, _ = resolveMailSenderCandidates(stderr, cmdName)
+		fmt.Fprintf(stderr, "%s: refusing --from %s: no ambient identity proves ownership\n", cmdName, from) //nolint:errcheck // best-effort stderr
+		return "", false
+	}
+
+	var sourceErr error
+	for _, candidate := range ambient {
+		ambientSender, err := resolveMailIdentityWithConfigCached(cityPath, cfg, store, candidate, cache)
+		switch {
+		case err == nil && ambientSender == resolved:
+			return resolved, true
+		case err == nil:
+			continue
+		case errors.Is(err, session.ErrSessionNotFound):
+			continue
+		default:
+			sourceErr = errors.Join(sourceErr, fmt.Errorf("%q: %w", candidate, err))
+		}
+	}
+	if sourceErr != nil {
+		fmt.Fprintf(stderr, "%s: sender authority unavailable: %v\n", cmdName, sourceErr) //nolint:errcheck // best-effort stderr
+		return "", false
+	}
+	fmt.Fprintf(stderr, "%s: refusing --from %s: this session is %s\n", cmdName, from, strings.Join(ambient, ", ")) //nolint:errcheck // best-effort stderr
+	if sender, ok := reservedMailSenderIdentity(from); ok {
+		fmt.Fprintf(stderr, "%s: %q is a reserved identity and cannot be claimed by this agent\n", cmdName, sender) //nolint:errcheck // best-effort stderr
+	} else {
+		fmt.Fprintf(stderr, "%s: explicit sender resolves to %s, which does not match this session\n", cmdName, resolved) //nolint:errcheck // best-effort stderr
+	}
+	return "", false
 }
 
 // isStorelessMailProvider reports whether the configured mail provider
@@ -1879,8 +1924,8 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 	}
 
 	sender := from
-	switch {
-	case sender == "":
+	switch sender {
+	case "":
 		if store != nil {
 			var ok bool
 			sender, ok = resolveDefaultMailSenderForCommandCached(cityPath, cfg, store, stderr, "gc mail send", idCache)
@@ -1894,18 +1939,11 @@ func cmdMailSendJSON(args []string, notify bool, all bool, from string, to strin
 			}
 			sender = candidates[0]
 		}
-	case isOperatorMailSenderClaim(sender):
-		if rejectAgentClaimingOperatorIdentity(stderr, "gc mail send") {
-			return 1
-		}
-		sender = "human"
 	default:
-		if store != nil {
-			sender, err = resolveMailIdentityWithConfigCached(cityPath, cfg, store, sender, idCache)
-			if err != nil {
-				fmt.Fprintf(stderr, "gc mail send: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
-				return 1
-			}
+		var ok bool
+		sender, ok = resolveExplicitMailSenderForCommandCached(cityPath, cfg, store, sender, stderr, "gc mail send", idCache)
+		if !ok {
+			return 1
 		}
 	}
 
@@ -2332,25 +2370,19 @@ func cmdMailReplyFromJSON(args []string, from, subject, message string, notify b
 	// Replying stamps a From just as sending does, so it fails closed on a
 	// missing ambient identity too (gas-j2t7).
 	sender := from
-	switch {
-	case sender == "":
+	if sender == "" {
 		senderCandidates, ok := resolveMailSenderCandidates(stderr, "gc mail reply")
 		if !ok {
 			return 1
 		}
 		sender = senderCandidates[0]
-	case isOperatorMailSenderClaim(sender):
-		if rejectAgentClaimingOperatorIdentity(stderr, "gc mail reply") {
-			return 1
-		}
-		sender = "human"
 	}
 	providerName := mailProviderName()
 	var store beads.Store
 	var cityPath string
 	var cfg *config.City
 	var notifySetupErr error
-	if sender != "human" || notify {
+	if from != "" || sender != "human" || notify {
 		switch {
 		case strings.HasPrefix(providerName, "exec:"):
 			var err error
@@ -2377,24 +2409,18 @@ func cmdMailReplyFromJSON(args []string, from, subject, message string, notify b
 			}
 			cfg, _ = loadCityConfig(cityPath, stderr)
 		}
-		if sender != "human" && store != nil {
-			// An explicit --from names the identity to resolve; without one the
-			// ambient chain does. Resolving the ambient chain either way would
-			// silently discard --from.
-			if from != "" {
-				resolved, err := resolveMailIdentityWithConfig(cityPath, cfg, store, from)
-				if err != nil {
-					fmt.Fprintf(stderr, "gc mail reply: invalid sender %q: %v\n", from, err) //nolint:errcheck // best-effort stderr
-					return 1
-				}
-				sender = resolved
-			} else {
-				resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
-				if !ok {
-					return 1
-				}
-				sender = resolved
+		if from != "" {
+			var ok bool
+			sender, ok = resolveExplicitMailSenderForCommandCached(cityPath, cfg, store, from, stderr, "gc mail reply", nil)
+			if !ok {
+				return 1
 			}
+		} else if sender != "human" && store != nil {
+			resolved, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, store, stderr, "gc mail reply")
+			if !ok {
+				return 1
+			}
+			sender = resolved
 		}
 	}
 
