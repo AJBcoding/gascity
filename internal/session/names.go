@@ -414,6 +414,13 @@ func failedCreateIdentityReleased(b beads.Bead) bool {
 	return strings.TrimSpace(b.Metadata["state"]) == string(StateFailedCreate)
 }
 
+func deadIdentityReleased(b beads.Bead) bool {
+	if strings.TrimSpace(b.Metadata["state"]) == string(StateDrained) {
+		return true
+	}
+	return strings.TrimSpace(b.Metadata["sleep_reason"]) == LifecycleReasonRuntimeMissing
+}
+
 func continuityIneligibleConfiguredOwner(b beads.Bead, selfOwner string) bool {
 	if failedCreateIdentityReleased(b) {
 		return false
@@ -615,6 +622,9 @@ func ensureSessionAliasAvailable(store beads.Store, cfg *config.City, alias, sel
 			continue
 		}
 		if failedCreateIdentityReleased(b) {
+			continue
+		}
+		if deadIdentityReleased(b) {
 			continue
 		}
 		if b.Status == "closed" {
