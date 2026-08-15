@@ -120,9 +120,11 @@ func TestScanWithRootParsesEpoch(t *testing.T) {
 func TestScanWithRootPopulatesCityFromGCPath(t *testing.T) {
 	root := t.TempDir()
 	buildFakeProc(t, root, 310, map[string]string{
-		"GC_SESSION_ID": "ga-city",
-		"GC_CITY_PATH":  "/tmp/primary-city",
-		"GC_CITY":       "/tmp/fallback-city",
+		"GC_SESSION_ID":     "ga-city",
+		"GC_CITY_PATH":      "/tmp/primary-city",
+		"GC_CITY":           "/tmp/fallback-city",
+		"GC_HOME":           "/tmp/gc-home",
+		"GC_INSTANCE_TOKEN": "tok-runtime",
 	})
 
 	got, err := scanWithRoot(root, "ga-city")
@@ -134,6 +136,12 @@ func TestScanWithRootPopulatesCityFromGCPath(t *testing.T) {
 	}
 	if got[0].City != "/tmp/primary-city" {
 		t.Fatalf("City = %q, want GC_CITY_PATH value", got[0].City)
+	}
+	if got[0].GCHome != "/tmp/gc-home" {
+		t.Fatalf("GCHome = %q, want /tmp/gc-home", got[0].GCHome)
+	}
+	if got[0].InstanceToken != "tok-runtime" {
+		t.Fatalf("InstanceToken = %q, want tok-runtime", got[0].InstanceToken)
 	}
 }
 

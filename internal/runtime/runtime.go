@@ -359,6 +359,14 @@ type LiveRuntime struct {
 	// or it will mistake another city's live session for an orphan and kill
 	// it.
 	City string
+	// GCHome is the GC_HOME value from the process environment, when readable.
+	// It is a structural ownership anchor for process-table sweeps that may see
+	// runtimes from other city registries on the same host.
+	GCHome string
+	// InstanceToken is the GC_INSTANCE_TOKEN value from the process environment,
+	// when readable. Consumers can use it to fence destructive cleanup to the
+	// exact live incarnation recorded on a session bead.
+	InstanceToken string
 	// Epoch is the GC_RUNTIME_EPOCH from the process environment, if readable.
 	// Zero if the variable is absent or unparseable.
 	Epoch int

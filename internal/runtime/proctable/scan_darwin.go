@@ -44,10 +44,12 @@ func ScanBySessionID(id string) ([]runtime.LiveRuntime, error) {
 			city = record.env["GC_CITY"]
 		}
 		out = append(out, runtime.LiveRuntime{
-			SessionID: sessionID,
-			City:      city,
-			Epoch:     epoch,
-			PID:       record.pid,
+			SessionID:     sessionID,
+			City:          city,
+			GCHome:        record.env["GC_HOME"],
+			InstanceToken: record.env["GC_INSTANCE_TOKEN"],
+			Epoch:         epoch,
+			PID:           record.pid,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

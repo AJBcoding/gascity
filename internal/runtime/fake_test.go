@@ -629,9 +629,11 @@ func TestFakeFindRuntimesBySessionID_TrackedUsesProviderNameAndSessionID(t *test
 func TestFakeFindRuntimesBySessionID_TrackedUsesCityFromEnv(t *testing.T) {
 	f := NewFake()
 	_ = f.Start(context.Background(), "path-city", Config{Env: map[string]string{
-		"GC_SESSION_ID": "sess-path",
-		"GC_CITY_PATH":  "/tmp/path-city",
-		"GC_CITY":       "/tmp/fallback-city",
+		"GC_SESSION_ID":     "sess-path",
+		"GC_CITY_PATH":      "/tmp/path-city",
+		"GC_CITY":           "/tmp/fallback-city",
+		"GC_HOME":           "/tmp/gc-home",
+		"GC_INSTANCE_TOKEN": "tok-runtime",
 	}})
 	_ = f.Start(context.Background(), "fallback-city", Config{Env: map[string]string{
 		"GC_SESSION_ID": "sess-fallback",
@@ -651,6 +653,14 @@ func TestFakeFindRuntimesBySessionID_TrackedUsesCityFromEnv(t *testing.T) {
 	}
 	if cities["sess-fallback"] != "/tmp/fallback-city" {
 		t.Errorf("City for sess-fallback = %q, want GC_CITY fallback value", cities["sess-fallback"])
+	}
+	for _, r := range runtimes {
+		if r.SessionID == "sess-path" && r.GCHome != "/tmp/gc-home" {
+			t.Errorf("GCHome for sess-path = %q, want /tmp/gc-home", r.GCHome)
+		}
+		if r.SessionID == "sess-path" && r.InstanceToken != "tok-runtime" {
+			t.Errorf("InstanceToken for sess-path = %q, want tok-runtime", r.InstanceToken)
+		}
 	}
 }
 
