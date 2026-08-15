@@ -900,8 +900,8 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 		// Fails closed: no word here may assert delivery, and the exit code has
 		// to carry it too, because callers branch on the status rather than
 		// reading the prose.
-		fmt.Fprintf(stderr, "gc session nudge: NOT DELIVERED to %s — the message is still sitting unsubmitted in its input box (%s). It is armed: the next submit in that session will fire it into whatever context is current. Use 'gc session submit %s' to flush it, or clear the box first.\n",
-			target.agentKey(), confirmation.Observed, target.agentKey()) //nolint:errcheck
+		_, _ = fmt.Fprintf(stderr, "gc session nudge: NOT DELIVERED to %s — the message is still sitting unsubmitted in its input box (%s). It is armed: the next submit in that session will fire it into whatever context is current. Use 'gc session submit %s' to flush it, or clear the box first.\n",
+			target.agentKey(), confirmation.Observed, target.agentKey())
 		return 1
 	default:
 		fmt.Fprintf(stdout, "Sent to %s — delivery NOT CONFIRMED (this transport has no delivery probe)\n", target.agentKey()) //nolint:errcheck
