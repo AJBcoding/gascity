@@ -288,6 +288,8 @@ suspended = true
 		}
 	}
 	doltDataDir := filepath.Join(cityDir, "runtime-dolt")
+	t.Setenv("GC_CITY", cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
 	t.Setenv("GC_DOLT_DATA_DIR", doltDataDir)
 
 	oldBackupCheck := newDoctorDoltBackupCheck

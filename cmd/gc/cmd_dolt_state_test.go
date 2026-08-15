@@ -104,6 +104,94 @@ func TestDoltStateRuntimeLayoutCmdUsesCanonicalPaths(t *testing.T) {
 	}
 }
 
+func TestDoltStateRuntimeLayoutCmdIgnoresAmbientPathsForDifferentExplicitCity(t *testing.T) {
+	liveCityPath := normalizePathForCompare(filepath.Join(t.TempDir(), "live-city"))
+	canaryCityPath := normalizePathForCompare(filepath.Join(t.TempDir(), "canary-city"))
+	if err := os.MkdirAll(liveCityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(canaryCityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	liveRuntimeDir := filepath.Join(liveCityPath, ".gc", "runtime")
+	livePackStateDir := filepath.Join(liveRuntimeDir, "packs", "dolt")
+	t.Setenv("GC_CITY", liveCityPath)
+	t.Setenv("GC_CITY_PATH", liveCityPath)
+	t.Setenv("GC_CITY_RUNTIME_DIR", liveRuntimeDir)
+	t.Setenv("GC_PACK_STATE_DIR", livePackStateDir)
+	t.Setenv("GC_DOLT_DATA_DIR", filepath.Join(liveCityPath, ".beads", "dolt"))
+	t.Setenv("GC_DOLT_LOG_FILE", filepath.Join(livePackStateDir, "dolt.log"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(livePackStateDir, "dolt-provider-state.json"))
+	t.Setenv("GC_DOLT_PID_FILE", filepath.Join(livePackStateDir, "dolt.pid"))
+	t.Setenv("GC_DOLT_LOCK_FILE", filepath.Join(livePackStateDir, "dolt.lock"))
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(livePackStateDir, "dolt-config.yaml"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "runtime-layout", "--city", canaryCityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	got := parseDoltRuntimeLayoutOutput(t, stdout.String())
+	wantPack := citylayout.PackStateDir(canaryCityPath, "dolt")
+	want := map[string]string{
+		"GC_PACK_STATE_DIR":   wantPack,
+		"GC_DOLT_DATA_DIR":    filepath.Join(canaryCityPath, ".beads", "dolt"),
+		"GC_DOLT_LOG_FILE":    filepath.Join(wantPack, "dolt.log"),
+		"GC_DOLT_STATE_FILE":  filepath.Join(wantPack, "dolt-provider-state.json"),
+		"GC_DOLT_PID_FILE":    filepath.Join(wantPack, "dolt.pid"),
+		"GC_DOLT_LOCK_FILE":   filepath.Join(wantPack, "dolt.lock"),
+		"GC_DOLT_CONFIG_FILE": filepath.Join(wantPack, "dolt-config.yaml"),
+	}
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Fatalf("%s = %q, want %q; output=%q", key, got[key], wantValue, stdout.String())
+		}
+		if strings.Contains(got[key], liveCityPath) {
+			t.Fatalf("%s leaked live city path %q into explicit canary layout; output=%q", key, liveCityPath, stdout.String())
+		}
+	}
+}
+
+func TestDoltStateRuntimeLayoutCmdIgnoresAmbientPathsWhenCityAnchorsConflict(t *testing.T) {
+	liveCityPath := normalizePathForCompare(filepath.Join(t.TempDir(), "live-city"))
+	canaryCityPath := normalizePathForCompare(filepath.Join(t.TempDir(), "canary-city"))
+	if err := os.MkdirAll(liveCityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(canaryCityPath, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	liveRuntimeDir := filepath.Join(liveCityPath, ".gc", "runtime")
+	livePackStateDir := filepath.Join(liveRuntimeDir, "packs", "dolt")
+	t.Setenv("GC_CITY_PATH", canaryCityPath)
+	t.Setenv("GC_CITY", liveCityPath)
+	t.Setenv("GC_CITY_RUNTIME_DIR", liveRuntimeDir)
+	t.Setenv("GC_PACK_STATE_DIR", livePackStateDir)
+	t.Setenv("GC_DOLT_CONFIG_FILE", filepath.Join(livePackStateDir, "dolt-config.yaml"))
+	t.Setenv("GC_DOLT_STATE_FILE", filepath.Join(livePackStateDir, "dolt-provider-state.json"))
+
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"dolt-state", "runtime-layout", "--city", canaryCityPath}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+	}
+	got := parseDoltRuntimeLayoutOutput(t, stdout.String())
+	wantPack := citylayout.PackStateDir(canaryCityPath, "dolt")
+	want := map[string]string{
+		"GC_PACK_STATE_DIR":   wantPack,
+		"GC_DOLT_CONFIG_FILE": filepath.Join(wantPack, "dolt-config.yaml"),
+		"GC_DOLT_STATE_FILE":  filepath.Join(wantPack, "dolt-provider-state.json"),
+	}
+	for key, wantValue := range want {
+		if got[key] != wantValue {
+			t.Fatalf("%s = %q, want %q; output=%q", key, got[key], wantValue, stdout.String())
+		}
+		if strings.Contains(got[key], liveCityPath) {
+			t.Fatalf("%s leaked live city path %q into explicit canary layout; output=%q", key, liveCityPath, stdout.String())
+		}
+	}
+}
+
 func TestResolveManagedDoltRuntimeLayoutCanonicalizesSymlinkedCityPath(t *testing.T) {
 	aliasCity, realCity := symlinkedCityPaths(t)
 	wantCityPath := normalizePathForCompare(realCity)
@@ -233,6 +321,8 @@ func TestRepairedManagedDoltRuntimeStateAcceptsSymlinkEquivalentDataDir(t *testi
 
 func TestDoltStateRuntimeLayoutCmdHonorsProjectedOverrides(t *testing.T) {
 	cityPath := t.TempDir()
+	t.Setenv("GC_CITY", cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
 	t.Setenv("GC_CITY_RUNTIME_DIR", "/runtime-root")
 	t.Setenv("GC_DOLT_DATA_DIR", "/data-root")
 	t.Setenv("GC_DOLT_LOG_FILE", "/logs/dolt.log")

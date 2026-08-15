@@ -26,20 +26,24 @@ func resolveManagedDoltRuntimeLayout(cityPath string) (managedDoltRuntimeLayout,
 	}
 	cityPath = normalizePathForCompare(cityPath)
 
-	packStateDir := strings.TrimSpace(os.Getenv("GC_PACK_STATE_DIR"))
+	useEnvPaths := managedDoltRuntimePathEnvAppliesToCity(cityPath)
+	packStateDir := ""
+	if useEnvPaths {
+		packStateDir = strings.TrimSpace(os.Getenv("GC_PACK_STATE_DIR"))
+	}
 	if packStateDir == "" {
-		if runtimeDir := strings.TrimSpace(os.Getenv("GC_CITY_RUNTIME_DIR")); runtimeDir != "" {
+		if runtimeDir := trustedManagedDoltRuntimeDir(useEnvPaths); runtimeDir != "" {
 			packStateDir = filepath.Join(runtimeDir, "packs", "dolt")
 		} else {
 			packStateDir = citylayout.PackStateDir(cityPath, "dolt")
 		}
 	}
-	dataDir := defaultEnvPath("GC_DOLT_DATA_DIR", filepath.Join(cityPath, ".beads", "dolt"))
-	logFile := defaultEnvPath("GC_DOLT_LOG_FILE", filepath.Join(packStateDir, "dolt.log"))
-	stateFile := defaultEnvPath("GC_DOLT_STATE_FILE", filepath.Join(packStateDir, "dolt-provider-state.json"))
-	pidFile := defaultEnvPath("GC_DOLT_PID_FILE", filepath.Join(packStateDir, "dolt.pid"))
-	lockFile := defaultEnvPath("GC_DOLT_LOCK_FILE", filepath.Join(packStateDir, "dolt.lock"))
-	configFile := defaultEnvPath("GC_DOLT_CONFIG_FILE", filepath.Join(packStateDir, "dolt-config.yaml"))
+	dataDir := defaultEnvPath(useEnvPaths, "GC_DOLT_DATA_DIR", filepath.Join(cityPath, ".beads", "dolt"))
+	logFile := defaultEnvPath(useEnvPaths, "GC_DOLT_LOG_FILE", filepath.Join(packStateDir, "dolt.log"))
+	stateFile := defaultEnvPath(useEnvPaths, "GC_DOLT_STATE_FILE", filepath.Join(packStateDir, "dolt-provider-state.json"))
+	pidFile := defaultEnvPath(useEnvPaths, "GC_DOLT_PID_FILE", filepath.Join(packStateDir, "dolt.pid"))
+	lockFile := defaultEnvPath(useEnvPaths, "GC_DOLT_LOCK_FILE", filepath.Join(packStateDir, "dolt.lock"))
+	configFile := defaultEnvPath(useEnvPaths, "GC_DOLT_CONFIG_FILE", filepath.Join(packStateDir, "dolt-config.yaml"))
 
 	return managedDoltRuntimeLayout{
 		PackStateDir: packStateDir,
@@ -52,9 +56,33 @@ func resolveManagedDoltRuntimeLayout(cityPath string) (managedDoltRuntimeLayout,
 	}, nil
 }
 
-func defaultEnvPath(key, fallback string) string {
-	if value := strings.TrimSpace(os.Getenv(key)); value != "" {
-		return normalizePathForCompare(value)
+func managedDoltRuntimePathEnvAppliesToCity(cityPath string) bool {
+	sawCityAnchor := false
+	for _, key := range []string{"GC_CITY_PATH", "GC_CITY", "GC_CITY_ROOT"} {
+		value := strings.TrimSpace(os.Getenv(key))
+		if value == "" {
+			continue
+		}
+		sawCityAnchor = true
+		if !samePath(value, cityPath) {
+			return false
+		}
+	}
+	return sawCityAnchor
+}
+
+func trustedManagedDoltRuntimeDir(useEnvPaths bool) string {
+	if !useEnvPaths {
+		return ""
+	}
+	return strings.TrimSpace(os.Getenv("GC_CITY_RUNTIME_DIR"))
+}
+
+func defaultEnvPath(useEnvPaths bool, key, fallback string) string {
+	if useEnvPaths {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			return normalizePathForCompare(value)
+		}
 	}
 	return normalizePathForCompare(fallback)
 }
