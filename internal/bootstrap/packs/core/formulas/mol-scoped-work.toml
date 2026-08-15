@@ -111,12 +111,14 @@ if [ -z "$WORKTREE" ]; then
     '
   )
   if [ -n "$CURRENT_WORKTREE" ]; then
-    WORKTREE_PARENT=$(dirname "$CURRENT_WORKTREE")
+    CURRENT_WORKTREE_PARENT=$(dirname "$CURRENT_WORKTREE")
+    if [ "$(basename "$CURRENT_WORKTREE_PARENT")" = "worktrees" ]; then
+      WORKTREE_PARENT="$CURRENT_WORKTREE_PARENT"
+    else
+      WORKTREE_PARENT="$CURRENT_WORKTREE/worktrees"
+    fi
   else
-    WORKTREE_PARENT="$CURRENT_DIR"
-  fi
-  if [ "$(basename "$WORKTREE_PARENT")" != "worktrees" ]; then
-    WORKTREE_PARENT="$WORKTREE_PARENT/worktrees"
+    WORKTREE_PARENT="$CURRENT_DIR/worktrees"
   fi
   mkdir -p "$WORKTREE_PARENT"
   WORKTREE_PATH="$WORKTREE_PARENT/$WORK_BEAD_ID"
@@ -246,7 +248,10 @@ if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
     echo "Refusing cleanup: registered descendant worktree at $DESCENDANT_WORKTREE" >&2
     exit 1
   fi
-  git -C "$GIT_CONTEXT" worktree remove "$WORKTREE"
+  if ! git -C "$GIT_CONTEXT" worktree remove "$WORKTREE"; then
+    echo "Refusing cleanup: git worktree remove failed for $WORKTREE" >&2
+    exit 1
+  fi
 fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
