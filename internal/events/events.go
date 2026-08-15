@@ -54,6 +54,12 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
+	// BeadClaimCompensationFailed fires when gc hook --claim assigned
+	// continuation siblings for a claim but could not release every sibling
+	// during failure compensation. The payload names the primary claim, the
+	// assignee whose compare-and-swap release was attempted, the unwind reason,
+	// and the residual sibling bead IDs that remain assigned.
+	BeadClaimCompensationFailed = "bead.claim_compensation_failed"
 	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
 	// mutation after its invocation window has elapsed — the signature of a
 	// claim command that outlived the agent turn that invoked it (an abandoned
@@ -339,7 +345,7 @@ var KnownEventTypes = []string{
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
-	BeadClaimRejected, BeadClaimReleased,
+	BeadClaimRejected, BeadClaimReleased, BeadClaimCompensationFailed,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,

@@ -39,7 +39,6 @@ const (
 	hookClaimReleaseReasonUndelivered                 = "result_undelivered"
 	hookClaimReleaseReasonStraddled                   = "claim_window_straddled"
 	hookClaimReleaseReasonContinuationPreassignFailed = "continuation_preassign_failed"
-	hookClaimCompensationFailedEventType              = "bead.claim_compensation_failed"
 )
 
 var hookClaimMutationTimeout = 10 * time.Second
@@ -829,9 +828,9 @@ func releaseHookContinuationAssignments(reason string, assigned []string, bead b
 	if len(assigned) == 0 {
 		return
 	}
-	assignee := strings.TrimSpace(bead.Assignee)
+	assignee := strings.TrimSpace(opts.Assignee)
 	if assignee == "" {
-		assignee = opts.Assignee
+		assignee = strings.TrimSpace(bead.Assignee)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
@@ -1796,12 +1795,7 @@ func hookEmitClaimCompensationFailed(failure hookClaimCompensationFailureRecord)
 	if len(failure.ResidualBeadIDs) == 0 {
 		return
 	}
-	payload, err := json.Marshal(struct {
-		PrimaryBeadID   string   `json:"primary_bead_id"`
-		Assignee        string   `json:"assignee"`
-		Reason          string   `json:"reason"`
-		ResidualBeadIDs []string `json:"residual_bead_ids"`
-	}{
+	payload, err := json.Marshal(events.BeadClaimCompensationFailedPayload{
 		PrimaryBeadID:   failure.PrimaryBeadID,
 		Assignee:        failure.Assignee,
 		Reason:          failure.Reason,
@@ -1812,7 +1806,7 @@ func hookEmitClaimCompensationFailed(failure hookClaimCompensationFailureRecord)
 	}
 	rec := openCityRecorder(io.Discard)
 	rec.Record(events.Event{
-		Type:    hookClaimCompensationFailedEventType,
+		Type:    events.BeadClaimCompensationFailed,
 		Actor:   failure.Assignee,
 		Subject: failure.PrimaryBeadID,
 		Message: "residual continuation assignments: " + strings.Join(failure.ResidualBeadIDs, ","),
