@@ -14,6 +14,7 @@ package integration
 // started here listen on a per-test reserved loopback port.
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha1"
 	"encoding/hex"
@@ -27,6 +28,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"testing"
@@ -491,6 +493,9 @@ func setupDriftSystemdScenario(t *testing.T) *driftScenario {
 		env = filterEnv(env, "XDG_RUNTIME_DIR")
 		env = append(env, "XDG_RUNTIME_DIR="+realXDG)
 	}
+	if realHome, err := os.UserHomeDir(); err == nil && strings.TrimSpace(realHome) != "" {
+		env = replaceEnv(env, "HOME", realHome)
+	}
 	port := readSupervisorPortFromConfig(t, gcHome)
 
 	binaryDir := filepath.Join(filepath.Dir(gcHome), "bin")
@@ -597,12 +602,163 @@ func setupDriftDirectScenarioWithoutLaunch(t *testing.T) *driftScenario {
 	}
 }
 
+func TestNewDriftIsolatedEnvRootResolvesLaunchctlInsideTempRoot(t *testing.T) {
+	gcHome, _, env := newDriftIsolatedEnvRoot(t)
+	envMap := parseEnvList(env)
+	pathEnv := envMap["PATH"]
+	if pathEnv == "" {
+		t.Fatal("PATH is empty")
+	}
+
+	tempRoot := filepath.Dir(gcHome)
+	homeEnv := envMap["HOME"]
+	if homeEnv == "" {
+		t.Fatal("HOME is empty")
+	}
+	if runtime.GOOS == "darwin" && !pathAtOrWithin(tempRoot, homeEnv) {
+		t.Fatalf("HOME resolves outside temp root: got %q, temp root %q", homeEnv, tempRoot)
+	}
+	got, ok := lookPathInEnvPath(pathEnv, "launchctl")
+	if !ok {
+		t.Fatalf("launchctl not found on isolated PATH %q", pathEnv)
+	}
+	if !pathAtOrWithin(tempRoot, got) {
+		t.Fatalf("launchctl resolves outside temp root: got %q, temp root %q", got, tempRoot)
+	}
+}
+
+func TestDriftLaunchdInstallUsesShimAndCleansTestPlist(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchd plist isolation only applies on macOS")
+	}
+	before := snapshotRealLaunchAgents(t)
+	gcHome, _, env := newDriftIsolatedEnvRoot(t)
+	envMap := parseEnvList(env)
+	if !pathAtOrWithin(filepath.Dir(gcHome), envMap["HOME"]) {
+		t.Fatalf("HOME resolves outside temp root: got %q, temp root %q", envMap["HOME"], filepath.Dir(gcHome))
+	}
+
+	out, err := runGCWithEnv(env, gcHome, "supervisor", "install")
+	if err == nil {
+		t.Fatalf("gc supervisor install unexpectedly succeeded with launchctl shim; output:\n%s", out)
+	}
+	after := snapshotRealLaunchAgents(t)
+	if diff := diffLaunchAgentsSnapshots(before, after); diff != "" {
+		t.Fatalf("real LaunchAgents changed after drift supervisor install attempt: %s", diff)
+	}
+}
+
+func pathAtOrWithin(root, path string) bool {
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator)) && !filepath.IsAbs(rel)
+}
+
+func lookPathInEnvPath(pathEnv, name string) (string, bool) {
+	for _, dir := range filepath.SplitList(pathEnv) {
+		if dir == "" {
+			continue
+		}
+		candidate := filepath.Join(dir, name)
+		info, err := os.Stat(candidate)
+		if err != nil || info.IsDir() || info.Mode()&0o111 == 0 {
+			continue
+		}
+		return candidate, true
+	}
+	return "", false
+}
+
+func snapshotRealLaunchAgents(t *testing.T) map[string][]byte {
+	t.Helper()
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		t.Fatalf("resolving user home for LaunchAgents snapshot: %v", err)
+	}
+	dir := filepath.Join(home, "Library", "LaunchAgents")
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return map[string][]byte{}
+	}
+	if err != nil {
+		t.Fatalf("reading LaunchAgents dir %s: %v", dir, err)
+	}
+	snap := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		path := filepath.Join(dir, entry.Name())
+		switch {
+		case entry.Type()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				t.Fatalf("reading LaunchAgents symlink %s: %v", path, err)
+			}
+			snap[entry.Name()] = []byte("symlink\x00" + target)
+		case entry.IsDir():
+			snap[entry.Name()] = []byte("dir")
+		default:
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading LaunchAgents file %s: %v", path, err)
+			}
+			snap[entry.Name()] = data
+		}
+	}
+	return snap
+}
+
+func diffLaunchAgentsSnapshots(before, after map[string][]byte) string {
+	names := make(map[string]struct{}, len(before)+len(after))
+	for name := range before {
+		names[name] = struct{}{}
+	}
+	for name := range after {
+		names[name] = struct{}{}
+	}
+	ordered := make([]string, 0, len(names))
+	for name := range names {
+		ordered = append(ordered, name)
+	}
+	sort.Strings(ordered)
+	for _, name := range ordered {
+		beforeBytes, beforeOK := before[name]
+		afterBytes, afterOK := after[name]
+		switch {
+		case !beforeOK:
+			return fmt.Sprintf("added %s", name)
+		case !afterOK:
+			return fmt.Sprintf("removed %s", name)
+		case !bytes.Equal(beforeBytes, afterBytes):
+			return fmt.Sprintf("changed %s", name)
+		}
+	}
+	return ""
+}
+
 func newDriftIsolatedEnvRoot(t *testing.T) (string, string, []string) {
 	t.Helper()
 	gcHome, runtimeDir, env := newIsolatedEnvRoot(t, false)
+	shimDir := installDriftLaunchctlShim(t, gcHome)
+	envMap := parseEnvList(env)
+	if runtime.GOOS == "darwin" {
+		env = replaceEnv(env, "HOME", filepath.Dir(gcHome))
+	}
+	env = replaceEnv(env, "PATH", prependPath(shimDir, envMap["PATH"]))
 	env = replaceEnv(env, "GC_BEADS", "file")
 	env = replaceEnv(env, "GC_SESSION", "fake")
 	return gcHome, runtimeDir, env
+}
+
+func installDriftLaunchctlShim(t *testing.T, gcHome string) string {
+	t.Helper()
+	shimDir := filepath.Join(filepath.Dir(gcHome), "bin")
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("creating drift launchctl shim dir: %v", err)
+	}
+	path := filepath.Join(shimDir, "launchctl")
+	const body = "#!/bin/sh\n# drift integration shim: refuse host launchd registration.\nexit 1\n"
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatalf("writing drift launchctl shim: %v", err)
+	}
+	return shimDir
 }
 
 // buildGCBinaryWithCommit compiles the gc binary at outPath with
@@ -673,12 +829,17 @@ func bootstrapDriftCity(t *testing.T, binary string, env []string, gcHome string
 	t.Helper()
 	cityName := "drift-" + filepath.Base(t.TempDir())
 	cityDir := filepath.Join(filepath.Dir(gcHome), cityName)
-	cmd := exec.Command(binary, "init",
+	args := []string{
+		"init",
 		"--skip-provider-readiness",
 		"--providers", "codex",
 		"--default-provider", "codex",
-		cityDir,
-	)
+	}
+	if runtime.GOOS == "darwin" {
+		args = append(args, "--no-start")
+	}
+	args = append(args, cityDir)
+	cmd := exec.Command(binary, args...)
 	cmd.Env = env
 	out, err := cmd.CombinedOutput()
 	if err != nil {
