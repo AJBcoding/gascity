@@ -34,9 +34,10 @@ const (
 	BeadClaimRejected = "bead.claim_rejected"
 	// BeadClaimReleased fires when a claim this process WON is given back
 	// because it could not be delivered to a live consumer: the worker's result
-	// write failed (the provider closed the tool pipe), or the CAS landed after
-	// the invoking turn's claim window was already spent. Both shapes produce an
-	// in_progress bead nobody will ever execute, so the claim is released
+	// write failed (the provider closed the tool pipe), the CAS landed after the
+	// invoking turn's claim window was already spent, or continuation sibling
+	// preassignment failed before the result could be written. Each shape
+	// produces a held bead nobody will execute, so the assignment is released
 	// compare-and-swap and this event records that it happened. It is the
 	// release dual of BeadClaimRejected: that one reports a claim we did not
 	// get, this one a claim we could not keep.

@@ -108,6 +108,37 @@ func (s *BdStore) releaseIfCurrentViaBdVerb(id, expectedAssignee string) (releas
 	return false, true, runErr
 }
 
+// releaseOpenAssignmentIfCurrentViaBdVerb clears an open continuation sibling's
+// assignee through bd's native conditional verb. It is the same owner/status CAS
+// as releaseIfCurrentViaBdVerb, but without moving status: continuation
+// preassignment keeps siblings open and only reserves them for the current
+// holder.
+func (s *BdStore) releaseOpenAssignmentIfCurrentViaBdVerb(id, expectedAssignee string) (released, handled bool, err error) {
+	if collision := s.releaseIDCollision(id); collision != nil {
+		return false, true, collision
+	}
+	out, runErr := s.runBDTransientWriteOutput(
+		"update", id,
+		"--if-assignee", expectedAssignee,
+		"--if-status", "open",
+		"--assignee", "",
+	)
+	if runErr == nil {
+		return true, true, nil
+	}
+	if bdExitCode(runErr) == bdCASPreconditionExitCode {
+		return false, true, nil
+	}
+	detail := strings.TrimSpace(string(out)) + " " + runErr.Error()
+	if isBdUnknownFlagError(detail, "--if-assignee") || isBdUnknownFlagError(detail, "--if-status") {
+		return false, false, nil
+	}
+	if isBdIssueNotFound(runErr) {
+		return false, true, nil
+	}
+	return false, true, runErr
+}
+
 // releaseIDCollision reports bd having resolved id to a DIFFERENT bead.
 //
 // The statement this verb replaced was `WHERE id = <literal>` — exact by

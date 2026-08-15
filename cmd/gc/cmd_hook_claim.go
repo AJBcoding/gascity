@@ -33,11 +33,13 @@ const (
 )
 
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
-// back. Both describe a claim this process WON and could not hand to a live
-// consumer.
+// back. They describe claims or preassignments this process won and could not
+// hand to a live consumer.
 const (
-	hookClaimReleaseReasonUndelivered = "result_undelivered"
-	hookClaimReleaseReasonStraddled   = "claim_window_straddled"
+	hookClaimReleaseReasonUndelivered                 = "result_undelivered"
+	hookClaimReleaseReasonStraddled                   = "claim_window_straddled"
+	hookClaimReleaseReasonContinuationPreassignFailed = "continuation_preassign_failed"
+	hookClaimCompensationFailedEventType              = "bead.claim_compensation_failed"
 )
 
 var hookClaimMutationTimeout = 10 * time.Second
@@ -117,6 +119,15 @@ type hookClaimReleaseRecord struct {
 	Reason   string
 }
 
+// hookClaimCompensationFailureRecord is the durable diagnostic for continuation
+// siblings this hook invocation assigned but could not release.
+type hookClaimCompensationFailureRecord struct {
+	PrimaryBeadID   string
+	Assignee        string
+	Reason          string
+	ResidualBeadIDs []string
+}
+
 type hookClaimOptions struct {
 	Assignee           string
 	IdentityCandidates []string
@@ -131,7 +142,12 @@ type hookClaimOps struct {
 	Claim              hookClaimFunc
 	ListContinuation   hookListContinuationFunc
 	AssignContinuation hookAssignContinuationFunc
-	DrainAck           hookDrainAckFunc
+	// ReleaseContinuationAssignment clears an open continuation sibling's
+	// preassignment if it is still held by this session. It is separate from
+	// Release because primary claims are in_progress while continuation siblings
+	// remain open.
+	ReleaseContinuationAssignment hookClaimReleaseFunc
+	DrainAck                      hookDrainAckFunc
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
@@ -162,9 +178,10 @@ type hookClaimOps struct {
 	Release hookClaimReleaseFunc
 	// EmitClaimWindowExpired and EmitClaimReleased publish the two turn-binding
 	// facts. Best-effort, like EmitClaimRejected.
-	EmitClaimWindowExpired func(hookClaimWindowExpiry)
-	EmitClaimReleased      func(hookClaimReleaseRecord)
-	Now                    func() time.Time
+	EmitClaimWindowExpired      func(hookClaimWindowExpiry)
+	EmitClaimReleased           func(hookClaimReleaseRecord)
+	EmitClaimCompensationFailed func(hookClaimCompensationFailureRecord)
+	Now                         func() time.Time
 	// InvokedAt is when this `gc hook --claim` invocation began, and ClaimWindow
 	// is how long after it a claim mutation may still run. Together they are the
 	// turn-binding fence: a claim reaching a CAS past InvokedAt+ClaimWindow has
@@ -328,6 +345,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.AssignContinuation == nil {
 		ops.AssignContinuation = hookAssignContinuationWithBdStore
 	}
+	if ops.ReleaseContinuationAssignment == nil {
+		ops.ReleaseContinuationAssignment = hookReleaseContinuationAssignmentWithBdStore
+	}
 	if ops.DrainAck == nil {
 		ops.DrainAck = hookRuntimeDrainAck
 	}
@@ -357,6 +377,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.EmitClaimReleased == nil {
 		ops.EmitClaimReleased = hookEmitClaimReleased
+	}
+	if ops.EmitClaimCompensationFailed == nil {
+		ops.EmitClaimCompensationFailed = hookEmitClaimCompensationFailed
 	}
 	if ops.Now == nil {
 		ops.Now = time.Now
@@ -761,8 +784,8 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	publishHookClaimRunMap(bead, opts, ops, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: preassigning continuation group for %s: %v\n", bead.ID, err) //nolint:errcheck
-		return 1
+		cause := fmt.Sprintf("preassigning continuation group for %s: %v", bead.ID, err)
+		return unwindHookClaimAfterContinuationFailure(hookClaimReleaseReasonContinuationPreassignFailed, cause, assigned, bead, opts, ops, dir, minted, stderr)
 	}
 	result.ContinuationAssigned = assigned
 	if writeErr := writeHookClaimResultLine(result, opts.JSON, stdout); writeErr != nil {
@@ -771,6 +794,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		// provider already closed. A closed pipe cannot deliver, so nobody will
 		// execute this claim; give it back instead of parking it.
 		cause := fmt.Sprintf("writing result for %s: %v", bead.ID, writeErr)
+		releaseHookContinuationAssignments(hookClaimReleaseReasonUndelivered, assigned, bead, opts, ops, dir, stderr)
 		if !minted {
 			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 			return 1
@@ -792,6 +816,53 @@ func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout i
 	return err
 }
 
+func unwindHookClaimAfterContinuationFailure(reason, cause string, assigned []string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stderr io.Writer) int {
+	releaseHookContinuationAssignments(reason, assigned, bead, opts, ops, dir, stderr)
+	if !minted {
+		fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
+		return 1
+	}
+	return unwindUndeliveredHookClaim(reason, cause, bead, opts, ops, dir, stderr)
+}
+
+func releaseHookContinuationAssignments(reason string, assigned []string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) {
+	if len(assigned) == 0 {
+		return
+	}
+	assignee := strings.TrimSpace(bead.Assignee)
+	if assignee == "" {
+		assignee = opts.Assignee
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	residual := make([]string, 0)
+	for _, beadID := range assigned {
+		beadID = strings.TrimSpace(beadID)
+		if beadID == "" {
+			continue
+		}
+		released, err := ops.ReleaseContinuationAssignment(ctx, dir, opts.Env, beadID, assignee)
+		switch {
+		case err != nil:
+			residual = append(residual, beadID)
+			fmt.Fprintf(stderr, "gc hook --claim: releasing continuation assignment %s: %v\n", beadID, err) //nolint:errcheck
+		case !released:
+			residual = append(residual, beadID)
+			fmt.Fprintf(stderr, "gc hook --claim: continuation assignment %s was no longer ours to release\n", beadID) //nolint:errcheck
+		}
+	}
+	if len(residual) == 0 {
+		return
+	}
+	ops.EmitClaimCompensationFailed(hookClaimCompensationFailureRecord{
+		PrimaryBeadID:   bead.ID,
+		Assignee:        assignee,
+		Reason:          reason,
+		ResidualBeadIDs: residual,
+	})
+	fmt.Fprintf(stderr, "gc hook --claim: residual continuation assignments after compensation failure for %s: %s\n", bead.ID, strings.Join(residual, ",")) //nolint:errcheck
+}
+
 // unwindUndeliveredHookClaim gives back a claim this invocation won but could
 // not hand to a live consumer, and returns the terminal exit code (always 1 —
 // the caller asked for work and is getting none).
@@ -802,12 +873,6 @@ func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout i
 // meantime is left alone. A release that fails or finds the bead already moved is
 // surfaced, never swallowed: the claim is then still parked and the operator must
 // be able to see the one residue this fence could not clear.
-//
-// Known residue: a claim carrying a continuation group has already preassigned
-// its open siblings by the time the result write fails (the assigned ids are part
-// of the result payload, so they cannot be computed after it). Those siblings
-// stay open and assigned, which is the dead-assignee release lane's shape, and
-// the next turn of the same session re-claims them.
 func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) int {
 	assignee := strings.TrimSpace(bead.Assignee)
 	if assignee == "" {
@@ -1672,6 +1737,13 @@ func hookClaimReleaseWithBdStore(ctx context.Context, dir string, env []string, 
 	return hookClaimBdStoreContext(ctx, dir, env, assignee).ReleaseIfCurrent(beadID, assignee)
 }
 
+// hookReleaseContinuationAssignmentWithBdStore is the unrouted compensation for
+// a continuation sibling that was preassigned but never delivered in the claim
+// result. The sibling is still open, so the CAS only clears the assignee.
+func hookReleaseContinuationAssignmentWithBdStore(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+	return hookClaimBdStoreContext(ctx, dir, env, assignee).ReleaseOpenAssignmentIfCurrent(beadID, assignee)
+}
+
 // hookEmitClaimWindowExpired publishes a best-effort
 // execution.claim_window_expired event so the fleet reports its own orphaned
 // claimers rather than leaving the class invisible.
@@ -1713,6 +1785,37 @@ func hookEmitClaimReleased(release hookClaimReleaseRecord) {
 		Type:    events.BeadClaimReleased,
 		Actor:   release.Assignee,
 		Subject: release.BeadID,
+		Payload: payload,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		_ = closer.Close()
+	}
+}
+
+func hookEmitClaimCompensationFailed(failure hookClaimCompensationFailureRecord) {
+	if len(failure.ResidualBeadIDs) == 0 {
+		return
+	}
+	payload, err := json.Marshal(struct {
+		PrimaryBeadID   string   `json:"primary_bead_id"`
+		Assignee        string   `json:"assignee"`
+		Reason          string   `json:"reason"`
+		ResidualBeadIDs []string `json:"residual_bead_ids"`
+	}{
+		PrimaryBeadID:   failure.PrimaryBeadID,
+		Assignee:        failure.Assignee,
+		Reason:          failure.Reason,
+		ResidualBeadIDs: failure.ResidualBeadIDs,
+	})
+	if err != nil {
+		return
+	}
+	rec := openCityRecorder(io.Discard)
+	rec.Record(events.Event{
+		Type:    hookClaimCompensationFailedEventType,
+		Actor:   failure.Assignee,
+		Subject: failure.PrimaryBeadID,
+		Message: "residual continuation assignments: " + strings.Join(failure.ResidualBeadIDs, ","),
 		Payload: payload,
 	})
 	if closer, ok := rec.(io.Closer); ok {
