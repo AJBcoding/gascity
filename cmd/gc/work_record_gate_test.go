@@ -17,11 +17,11 @@ func alwaysReachable(string, string) bool { return true }
 func neverReachable(string, string) bool  { return false }
 
 // alwaysOnRemote / neverOnRemote are injected durability oracles: they report
-// whether a commit is contained in any remote-tracking ref. Reachability on a
+// whether a commit is contained in any publication remote. Reachability on a
 // branch and presence on a remote are independent — a commit on a local-only
 // branch is reachable but not durable — so they are separate oracles.
-func alwaysOnRemote(string) bool { return true }
-func neverOnRemote(string) bool  { return false }
+func alwaysOnRemote(string, string) bool { return true }
+func neverOnRemote(string, string) bool  { return false }
 
 // noRemoteContains / remoteContains are injected containment resolvers: they
 // report which remote-tracking branches contain a commit. The stale claim-stamp
@@ -38,7 +38,7 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 		name       string
 		meta       map[string]string
 		reachable  func(string, string) bool
-		onRemote   func(string) bool
+		onRemote   func(string, string) bool
 		containing func(string) []string
 		wantViol   string // substring expected in the (single) violation; "" ⇒ no violations
 		wantAdv    string // substring expected in the (single) advisory; "" ⇒ no advisories
@@ -765,6 +765,72 @@ func TestEvaluateWorkRecordCloseGateUnpushedBranch(t *testing.T) {
 	}
 }
 
+// newSingleBranchGateClone creates the --single-branch topology from gas-kg39:
+// origin is real, but remote.origin.fetch tracks only main, so pushed work
+// branches do not appear under refs/remotes/origin/* even after an explicit
+// fetch of that branch.
+func newSingleBranchGateClone(t *testing.T) string {
+	t.Helper()
+	bareDir := t.TempDir()
+	runGit(t, bareDir, "init", "--bare", "--initial-branch=main")
+
+	seedDir := t.TempDir()
+	runGit(t, seedDir, "init", "--initial-branch=main")
+	runGit(t, seedDir, "config", "user.name", "Gas City Test")
+	runGit(t, seedDir, "config", "user.email", "gc-test@test.local")
+	if err := os.WriteFile(filepath.Join(seedDir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatalf("write base: %v", err)
+	}
+	runGit(t, seedDir, "add", "base.txt")
+	runGit(t, seedDir, "commit", "-m", "test: base")
+	runGit(t, seedDir, "remote", "add", "origin", bareDir)
+	runGit(t, seedDir, "push", "origin", "main")
+
+	cloneDir := filepath.Join(t.TempDir(), "clone")
+	runGit(t, "", "clone", "--single-branch", "--branch", "main", bareDir, cloneDir)
+	runGit(t, cloneDir, "config", "user.name", "Gas City Test")
+	runGit(t, cloneDir, "config", "user.email", "gc-test@test.local")
+	return cloneDir
+}
+
+// TestEvaluateWorkRecordCloseGateSingleBranchClonePublishedBranch is the
+// gas-kg39 regression test. In a --single-branch clone, Git narrows
+// remote.origin.fetch to one branch. A polecat can push its work branch to a
+// real origin, but refs/remotes/origin/<branch> still never exists locally, so
+// a close gate that consults only refs/remotes/* falsely reports honest
+// delivered work as unpublished under GC_WORK_RECORD_ENFORCE=1.
+func TestEvaluateWorkRecordCloseGateSingleBranchClonePublishedBranch(t *testing.T) {
+	repoDir := newSingleBranchGateClone(t)
+	if got := strings.TrimSpace(runGit(t, repoDir, "config", "--get-all", "remote.origin.fetch")); got != "+refs/heads/main:refs/remotes/origin/main" {
+		t.Fatalf("precondition: fetch refspec = %q, want the single-branch refspec", got)
+	}
+
+	const workBranch = "work/single-branch-delivery"
+	runGit(t, repoDir, "checkout", "-b", workBranch)
+	commit := gateCommit(t, repoDir, "feature.txt", "published through a restricted clone\n", "feat: delivered from single-branch clone")
+	runGit(t, repoDir, "push", "origin", workBranch)
+	runGit(t, repoDir, "fetch", "origin", workBranch)
+
+	if refs := runGit(t, repoDir, "show-ref"); strings.Contains(refs, "refs/remotes/origin/"+workBranch) {
+		t.Fatalf("precondition: refs/remotes/origin/%s unexpectedly exists; test no longer exercises the restricted refspec", workBranch)
+	}
+	if out := runGit(t, repoDir, "rev-list", "--max-count=1", commit, "--not", "--glob=refs/remotes/origin/*"); strings.TrimSpace(out) == "" {
+		t.Fatalf("precondition: local refs/remotes/* already contain %s; test would not reproduce gas-kg39", commit)
+	}
+	remoteOut := runGit(t, repoDir, "ls-remote", "--heads", "origin", "refs/heads/"+workBranch)
+	if !strings.Contains(remoteOut, commit+"\trefs/heads/"+workBranch) {
+		t.Fatalf("precondition: origin does not advertise %s at %s; ls-remote output: %q", commit, workBranch, remoteOut)
+	}
+
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(gateShippedCloseArgs("wr-single-branch", commit, workBranch), gateStoreWith("wr-single-branch", repoDir), nil, repoDir, nil, true, &stderr); block {
+		t.Fatalf("single-branch clone delivered close blocked; stderr=%s", stderr.String())
+	}
+	if got := stderr.String(); got != "" {
+		t.Fatalf("single-branch delivered close warned: %q", got)
+	}
+}
+
 // panicOnGetStore embeds a nil beads.Store and overrides Get to panic. It
 // proves a code path never falls back to the store for a given ID — used to
 // assert the close gate actually consumes preFetched beads instead of
@@ -1101,7 +1167,7 @@ func TestGitCommitOnRemoteNoRemotesSkipsDurability(t *testing.T) {
 	repoDir := newLocalOnlyGateRepo(t)
 	commit := gateCommit(t, repoDir, "feature.txt", "local-only rig\n", "feat: local work")
 
-	if !gitCommitOnRemote(repoDir, commit) {
+	if !gitCommitOnRemote(repoDir, commit, "main") {
 		t.Fatalf("gitCommitOnRemote = false in a repo with no remotes; the durability rule must stay skipped where there is nowhere to publish")
 	}
 }
@@ -1114,9 +1180,9 @@ func TestGitCommitOnRemoteNoRemotesSkipsDurability(t *testing.T) {
 // as delivered and the durability rule was silently skipped — az-6n75 reopened
 // by configuration.
 func TestGitCommitOnRemoteSelfRemoteOnlyFailsClosed(t *testing.T) {
-	repoDir, _, commit := newSelfRemoteOnlyGateRepo(t)
+	repoDir, workBranch, commit := newSelfRemoteOnlyGateRepo(t)
 
-	if gitCommitOnRemote(repoDir, commit) {
+	if gitCommitOnRemote(repoDir, commit, workBranch) {
 		t.Fatalf("gitCommitOnRemote = true for commit %s whose only remote is the repo itself; the work exists nowhere off this machine", commit)
 	}
 }

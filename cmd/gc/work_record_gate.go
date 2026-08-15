@@ -17,7 +17,7 @@ import (
 // Work-record close gate (ADR-0009). Closing a work bead through the SDK close
 // seam (`gc bd close`) is validated against the typed work-record contract: the
 // bead must carry a typed gc.work_outcome, and a "shipped" outcome must point at
-// a commit that has been DELIVERED — present on a remote-tracking ref — and
+// a commit that has been DELIVERED — present on a publication remote — and
 // reachable on the recorded gc.work_branch, with branch names resolved
 // remote-first (refs/remotes/origin/<branch> when it exists, because local refs
 // go stale in push-based topologies; gastownhall/gascity#5037). This turns the
@@ -125,7 +125,7 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 // enforcement) and each advisory (never blocking). Empty violations ⇒ the bead
 // satisfies the contract. commitReachable reports whether a commit SHA is an
 // ancestor of a branch; commitOnRemote reports whether it is contained in any
-// remote-tracking ref; remoteBranchesContaining reports which remote-tracking
+// publication remote; remoteBranchesContaining reports which remote-tracking
 // branches contain it. All three are injected so the rule is unit-testable
 // without a real repo. The caller is responsible for scoping
 // (isWorkRecordGatedBead).
@@ -148,7 +148,7 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 // work actually landed on (so the record can be corrected), not a violation —
 // while a commit on no remote ref remains a blocking violation regardless of the
 // stamp.
-func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool, commitOnRemote func(commit string) bool, remoteBranchesContaining func(commit string) []string) (violations, advisories []string) {
+func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool, commitOnRemote func(commit, branch string) bool, remoteBranchesContaining func(commit string) []string) (violations, advisories []string) {
 	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
 	if outcome == "" {
 		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}, nil
@@ -195,7 +195,7 @@ func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, bra
 			violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
 		}
 	}
-	if commit != "" && !commitOnRemote(commit) {
+	if commit != "" && !commitOnRemote(commit, branch) {
 		violations = append(violations, fmt.Sprintf("%s %s is not present on any remote — the work exists only locally and any worktree prune or branch GC destroys it (push before closing)", beadmeta.WorkCommitMetadataKey, commit))
 	}
 	return violations, advisories
@@ -255,14 +255,14 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 	return false
 }
 
-// gitCommitOnRemote reports whether commit is contained in a remote-tracking
-// ref of a PUBLICATION remote in the repository at repoDir — i.e. whether the
-// work has been published and would survive the worktree being pruned.
+// gitCommitOnRemote reports whether commit is contained in a PUBLICATION remote
+// in the repository at repoDir — i.e. whether the work has been published and
+// would survive the worktree being pruned.
 //
-// It lists commits reachable from commit but from no publication remote: empty
-// output means the commit is already on one. Any git error reads as "not on a
-// remote" so the gate fails closed — a false "at risk" costs one push, a false
-// "durable" costs the work.
+// It first lists commits reachable from commit but from no publication remote's
+// local tracking refs: empty output means the commit is already on one. Any git
+// error reads as "not on a remote" so the gate fails closed — a false "at risk"
+// costs one push, a false "durable" costs the work.
 //
 // Self-referential path remotes are excluded (gas-6tc; witness-side twin
 // gas-6wq): a remote whose URL resolves back into this same repository — the
@@ -271,10 +271,14 @@ func gitCommitReachableOnBranch(repoDir, commit, branch string) bool {
 // commit as "published" while it exists nowhere off this repo. That is the
 // az-6n75 hole reopened by configuration.
 //
-// This deliberately consults remote-tracking refs rather than running ls-remote:
-// the close path must not depend on network reachability. The tradeoff is that a
-// commit pushed by another clone since the last fetch reads as not-durable.
-func gitCommitOnRemote(repoDir, commit string) bool {
+// The primary proof deliberately consults local remote-tracking refs rather than
+// the network. That remains the safe default. A --single-branch or depth clone,
+// however, narrows remote.<name>.fetch to a single branch, so refs/remotes/* is
+// structurally incomplete: even a branch pushed by this clone is absent locally.
+// When the local proof says "not published" and a publication remote has a
+// restricted fetch refspec, fall back to a bounded ls-remote check for the
+// stamped branch tip. Probe errors still fail closed.
+func gitCommitOnRemote(repoDir, commit, branch string) bool {
 	if strings.TrimSpace(repoDir) == "" || commit == "" {
 		return false
 	}
@@ -316,7 +320,58 @@ func gitCommitOnRemote(repoDir, commit string) bool {
 	if err != nil {
 		return false
 	}
-	return len(strings.TrimSpace(string(out))) == 0
+	if len(strings.TrimSpace(string(out))) == 0 {
+		return true
+	}
+	if strings.TrimSpace(branch) == "" || strings.HasPrefix(branch, "-") {
+		return false
+	}
+	for _, name := range publication {
+		if !gitRemoteUsesRestrictedFetchRefspec(repoDir, name) {
+			continue
+		}
+		if gitRemoteBranchTipMatches(repoDir, name, commit, branch) {
+			return true
+		}
+	}
+	return false
+}
+
+func gitRemoteUsesRestrictedFetchRefspec(repoDir, remote string) bool {
+	if strings.TrimSpace(repoDir) == "" || strings.TrimSpace(remote) == "" || strings.HasPrefix(remote, "-") {
+		return false
+	}
+	out, err := exec.Command("git", "-C", repoDir, "config", "--get-all", "remote."+remote+".fetch").Output()
+	if err != nil {
+		return false
+	}
+	wildcard := "refs/heads/*:refs/remotes/" + remote + "/*"
+	for _, line := range strings.Split(string(out), "\n") {
+		spec := strings.TrimSpace(line)
+		if spec == "" || strings.HasPrefix(spec, "^") {
+			continue
+		}
+		spec = strings.TrimPrefix(spec, "+")
+		if spec == wildcard {
+			return false
+		}
+	}
+	return true
+}
+
+func gitRemoteBranchTipMatches(repoDir, remote, commit, branch string) bool {
+	ref := "refs/heads/" + branch
+	out, err := exec.Command("git", "-C", repoDir, "ls-remote", "--heads", remote, ref).Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == commit && fields[1] == ref {
+			return true
+		}
+	}
+	return false
 }
 
 // gitPublicationRemotes returns the names of repoDir's remotes that can confer
@@ -666,8 +721,8 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		} else {
 			violations, advisories = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
 				return gitCommitReachableOnBranch(repoDir, commit, branch)
-			}, func(commit string) bool {
-				return gitCommitOnRemote(repoDir, commit)
+			}, func(commit, branch string) bool {
+				return gitCommitOnRemote(repoDir, commit, branch)
 			}, func(commit string) []string {
 				return gitRemoteBranchesContaining(repoDir, commit)
 			})
