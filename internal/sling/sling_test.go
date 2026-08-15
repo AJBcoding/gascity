@@ -2334,6 +2334,38 @@ func TestDoSlingRefusesCrossStoreForceBeforeRouting(t *testing.T) {
 	}
 }
 
+func TestDoSlingRefusesCrossStoreBranchTargetBeforeMutation(t *testing.T) {
+	opts, deps, router, bead := crossStoreSlingFixture(t, "")
+	opts.NoFormula = true
+	opts.Branch = "polecat/RW-1"
+	opts.TargetBranch = "staging/gascity-lane"
+	if err := deps.Store.Update(bead.ID, beads.UpdateOpts{Metadata: map[string]string{
+		beadBranchMetadataKey: "polecat/RW-old",
+		beadTargetMetadataKey: "staging/old",
+	}}); err != nil {
+		t.Fatalf("seed route metadata: %v", err)
+	}
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	requireCrossStoreRouteError(t, err)
+	got, getErr := deps.Store.Get(bead.ID)
+	if getErr != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, getErr)
+	}
+	if got.Metadata[beadBranchMetadataKey] != "polecat/RW-old" {
+		t.Fatalf("metadata.branch = %q, want unchanged polecat/RW-old", got.Metadata[beadBranchMetadataKey])
+	}
+	if got.Metadata[beadTargetMetadataKey] != "staging/old" {
+		t.Fatalf("metadata.target = %q, want unchanged staging/old", got.Metadata[beadTargetMetadataKey])
+	}
+	requireNoCrossStoreRouteMutation(t, deps.Store, bead.ID, "")
+	requireOnlySeedBeads(t, deps.Store, 1)
+	if len(router.routed) != 0 {
+		t.Fatalf("router calls = %d, want 0", len(router.routed))
+	}
+}
+
 func TestDoSlingRefusesCrossStoreReassignBeforeClearingAssignee(t *testing.T) {
 	opts, deps, router, bead := crossStoreSlingFixture(t, "human@example.com")
 	opts.NoFormula = true
