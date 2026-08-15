@@ -507,19 +507,20 @@ func (r apiBeadRouter) Route(_ context.Context, req sling.RouteRequest) error {
 	if cfg != nil {
 		routedTo = agentutil.NormalizePoolRouteTarget(cfg, req.Target)
 	}
-	if err := r.store.SetMetadata(req.BeadID, beadmeta.RoutedToMetadataKey, routedTo); err != nil {
-		if req.Force && errors.Is(err, beads.ErrNotFound) {
+	metadata := make(map[string]string, len(req.Metadata)+1)
+	for k, v := range req.Metadata {
+		metadata[k] = v
+	}
+	metadata[beadmeta.RoutedToMetadataKey] = routedTo
+	update := beads.UpdateOpts{Metadata: metadata}
+	if assignee := strings.TrimSpace(req.Assignee); assignee != "" {
+		update.Assignee = &assignee
+	}
+	if err := r.store.Update(req.BeadID, update); err != nil {
+		if req.Force && len(req.Metadata) == 0 && errors.Is(err, beads.ErrNotFound) {
 			return nil
 		}
-		return fmt.Errorf("setting gc.routed_to on %s: %w", req.BeadID, err)
-	}
-	if assignee := strings.TrimSpace(req.Assignee); assignee != "" {
-		if err := r.store.Update(req.BeadID, beads.UpdateOpts{Assignee: &assignee}); err != nil {
-			if req.Force && errors.Is(err, beads.ErrNotFound) {
-				return nil
-			}
-			return fmt.Errorf("setting assignee on %s: %w", req.BeadID, err)
-		}
+		return fmt.Errorf("routing %s to %s: %w", req.BeadID, routedTo, err)
 	}
 	return nil
 }
