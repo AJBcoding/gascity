@@ -2,6 +2,7 @@ package events
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -88,6 +89,36 @@ func TestDecodePayloadEmptyBytesZeroValue(t *testing.T) {
 	}
 	if _, ok := got.(NoPayload); !ok {
 		t.Fatalf("expected NoPayload, got %T", got)
+	}
+}
+
+func TestBeadClaimCompensationFailedPayloadIsRegistered(t *testing.T) {
+	if !slices.Contains(KnownEventTypes, BeadClaimCompensationFailed) {
+		t.Fatalf("%s missing from KnownEventTypes", BeadClaimCompensationFailed)
+	}
+	sample, ok := LookupPayload(BeadClaimCompensationFailed)
+	if !ok {
+		t.Fatalf("%s payload is not registered", BeadClaimCompensationFailed)
+	}
+	if _, ok := sample.(BeadClaimCompensationFailedPayload); !ok {
+		t.Fatalf("%s payload type = %T, want BeadClaimCompensationFailedPayload", BeadClaimCompensationFailed, sample)
+	}
+
+	raw := json.RawMessage(`{"primary_bead_id":"work-1","assignee":"worker-1","reason":"continuation_preassign_failed","residual_bead_ids":["sib-2"]}`)
+	got, registered, err := DecodePayload(BeadClaimCompensationFailed, raw)
+	if err != nil {
+		t.Fatalf("decode err: %v", err)
+	}
+	if !registered {
+		t.Fatalf("expected registered=true")
+	}
+	payload, ok := got.(BeadClaimCompensationFailedPayload)
+	if !ok {
+		t.Fatalf("decoded payload = %T, want BeadClaimCompensationFailedPayload", got)
+	}
+	if payload.PrimaryBeadID != "work-1" || payload.Assignee != "worker-1" || payload.Reason != "continuation_preassign_failed" ||
+		!slices.Equal(payload.ResidualBeadIDs, []string{"sib-2"}) {
+		t.Fatalf("decoded payload = %+v", payload)
 	}
 }
 

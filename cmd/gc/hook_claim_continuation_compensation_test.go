@@ -16,17 +16,19 @@ const continuationCompensationCandidate = `[{"id":"work-1","status":"open","meta
 type continuationCompensationRecorder struct {
 	output string
 
-	claimed              []string
-	primaryReleased      []string
-	continuationAssigned []string
-	continuationReleased []string
-	claimReleasedEvents  []hookClaimReleaseRecord
-	compensationFailures []hookClaimCompensationFailureRecord
-	assignFailures       map[string]error
-	releaseOutcomes      map[string]bool
-	releaseFailures      map[string]error
-	failIfPrimaryClaimed bool
-	continuationSiblings []beads.Bead
+	claimed                      []string
+	primaryReleased              []string
+	continuationAssigned         []string
+	continuationReleased         []string
+	continuationReleaseAssignees []string
+	claimReleasedEvents          []hookClaimReleaseRecord
+	compensationFailures         []hookClaimCompensationFailureRecord
+	assignFailures               map[string]error
+	releaseOutcomes              map[string]bool
+	releaseFailures              map[string]error
+	requireReleaseAssignee       string
+	failIfPrimaryClaimed         bool
+	continuationSiblings         []beads.Bead
 }
 
 func newContinuationCompensationRecorder() *continuationCompensationRecorder {
@@ -89,10 +91,14 @@ func (r *continuationCompensationRecorder) ops(t *testing.T) hookClaimOps {
 			r.primaryReleased = append(r.primaryReleased, beadID)
 			return true, nil
 		},
-		ReleaseContinuationAssignment: func(_ context.Context, _ string, _ []string, beadID, _ string) (bool, error) {
+		ReleaseContinuationAssignment: func(_ context.Context, _ string, _ []string, beadID, assignee string) (bool, error) {
 			r.continuationReleased = append(r.continuationReleased, beadID)
+			r.continuationReleaseAssignees = append(r.continuationReleaseAssignees, assignee)
 			if err := r.releaseFailures[beadID]; err != nil {
 				return false, err
+			}
+			if r.requireReleaseAssignee != "" && assignee != r.requireReleaseAssignee {
+				return false, nil
 			}
 			if released, ok := r.releaseOutcomes[beadID]; ok {
 				return released, nil
@@ -180,6 +186,38 @@ func TestHookClaimPreassignFailureOnAdoptedPrimaryCompensatesSiblingButKeepsPrim
 	}
 	if got := strings.Join(rec.continuationReleased, ","); got != "sib-1" {
 		t.Fatalf("continuation releases = %v, want [sib-1]", rec.continuationReleased)
+	}
+	if len(rec.primaryReleased) != 0 {
+		t.Fatalf("primary releases = %v, want none for adopted primary", rec.primaryReleased)
+	}
+}
+
+func TestHookClaimResultDeliveryFailureOnAdoptedPrimaryCompensatesSiblingsWithAssignmentAssignee(t *testing.T) {
+	rec := newContinuationCompensationRecorder()
+	rec.output = `[{"id":"work-1","status":"in_progress","assignee":"worker-alias","metadata":{"gc.routed_to":"worker","gc.root_bead_id":"root-1","gc.continuation_group":"body"}}]`
+	rec.failIfPrimaryClaimed = true
+	rec.requireReleaseAssignee = "worker-canonical"
+	opts := continuationCompensationOptions()
+	opts.Assignee = "worker-canonical"
+	opts.IdentityCandidates = []string{"worker-canonical", "worker-alias"}
+
+	var stderr bytes.Buffer
+	code := doHookClaim("query", "/rig", opts, rec.ops(t), brokenPipeWriter{}, &stderr)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if got := strings.Join(rec.continuationAssigned, ","); got != "sib-1,sib-2" {
+		t.Fatalf("assigned siblings = %v, want [sib-1 sib-2]", rec.continuationAssigned)
+	}
+	if got := strings.Join(rec.continuationReleased, ","); got != "sib-1,sib-2" {
+		t.Fatalf("continuation releases = %v, want [sib-1 sib-2]", rec.continuationReleased)
+	}
+	if got := strings.Join(rec.continuationReleaseAssignees, ","); got != "worker-canonical,worker-canonical" {
+		t.Fatalf("continuation release assignees = %v, want worker-canonical for every sibling", rec.continuationReleaseAssignees)
+	}
+	if len(rec.compensationFailures) != 0 {
+		t.Fatalf("compensation failures = %+v, want none after releasing with assignment assignee", rec.compensationFailures)
 	}
 	if len(rec.primaryReleased) != 0 {
 		t.Fatalf("primary releases = %v, want none for adopted primary", rec.primaryReleased)

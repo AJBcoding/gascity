@@ -92,11 +92,25 @@ type BeadClaimReleasedPayload struct {
 // IsEventPayload marks BeadClaimReleasedPayload as an events.Payload variant.
 func (BeadClaimReleasedPayload) IsEventPayload() {}
 
+// BeadClaimCompensationFailedPayload is the typed payload for
+// bead.claim_compensation_failed events. Emitted when a hook claim assigned
+// continuation siblings but compensation could not release every assignment.
+type BeadClaimCompensationFailedPayload struct {
+	PrimaryBeadID   string   `json:"primary_bead_id"`
+	Assignee        string   `json:"assignee"`
+	Reason          string   `json:"reason"`
+	ResidualBeadIDs []string `json:"residual_bead_ids"`
+}
+
+// IsEventPayload marks BeadClaimCompensationFailedPayload as an events.Payload variant.
+func (BeadClaimCompensationFailedPayload) IsEventPayload() {}
+
 func init() {
 	RegisterPayload(BeadWorktreeReaped, BeadWorktreeReapedPayload{})
 	RegisterPayload(BeadWorktreeReapSkipped, BeadWorktreeReapSkippedPayload{})
 	RegisterPayload(BeadClaimRejected, BeadClaimRejectedPayload{})
 	RegisterPayload(BeadClaimReleased, BeadClaimReleasedPayload{})
+	RegisterPayload(BeadClaimCompensationFailed, BeadClaimCompensationFailedPayload{})
 }
 
 // StoreDiskWarnPayload is the typed payload for gc.store.disk_warn events.
