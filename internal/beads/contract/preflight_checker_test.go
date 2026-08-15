@@ -554,8 +554,8 @@ func assertPreflightReadOnly(t *testing.T, fs *fsys.Fake) {
 
 // TestCheckVersionCompatSourceBuild verifies that a source (local-path/replace)
 // build of the linked beads library — which reports "(devel)" as its module
-// version — does not take the native store offline. The schema version is the
-// real compatibility signal; only a *confirmed* version mismatch should fail.
+// version — does not take the native store offline. Storage-schema compatibility
+// is gated separately; only a *confirmed* version mismatch should fail here.
 func TestCheckVersionCompatSourceBuild(t *testing.T) {
 	validCtx := func(bdVersion string) PreflightBDContext {
 		return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: bdVersion, SchemaVersion: 50}
@@ -684,6 +684,59 @@ func TestPreflightEligibleOnReplacedBeadsModuleWithReadableBDContext(t *testing.
 	}
 	if result.Fallback != "" {
 		t.Errorf("Fallback = %q, want empty for an eligible scope", result.Fallback)
+	}
+}
+
+// TestPreflightBlocksWhenCandidateSchemaOutrunsExternalToolchain covers the
+// release-preflight hole from az-hh5m: the linked beads library may be a source
+// or pseudo-version build, so its version string is not comparable to bd's
+// release string, but the storage schema it can write still must not advance
+// beyond the supported external bd toolchain.
+func TestPreflightBlocksWhenCandidateSchemaOutrunsExternalToolchain(t *testing.T) {
+	scope := "/city/rigs/gascity"
+	fs := fsys.NewFake()
+	fs.Dirs[filepath.Join(scope, ".beads")] = true
+	fs.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+		"backend": "dolt",
+		"dolt_mode": "server",
+		"dolt_database": "gascity",
+		"project_id": "gc-local"
+	}`)
+	checker := PreflightChecker{
+		FS:                                       fs,
+		Provider:                                 "bd",
+		BeadsLibraryVersion:                      "1.1.1-0.20260805093327-bf97b73749ac",
+		LinkedBeadsStorageSchemaVersion:          59,
+		MaxExternalToolchainStorageSchemaVersion: 53,
+		BDContext: func(string) (PreflightBDContext, error) {
+			return PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: 1}, nil
+		},
+		DatabaseProjectID: func(string) (string, bool, error) {
+			return "gc-local", true, nil
+		},
+	}
+
+	result, err := checker.Check(scope)
+	if err != nil {
+		t.Fatalf("Check() error = %v", err)
+	}
+
+	assertPreflightVerdict(t, result, PreflightVerdictBlocked, false)
+	check := findPreflightCheck(t, result, PreflightCheckVersionCompat)
+	if check.State != PreflightCheckFail {
+		t.Fatalf("version check state = %q, want %q; check=%+v", check.State, PreflightCheckFail, check)
+	}
+	if want := "candidate beads storage schema v59 exceeds supported external toolchain schema v53"; check.Summary != want {
+		t.Fatalf("version check summary = %q, want %q", check.Summary, want)
+	}
+	if check.Details.LinkedBeadsStorageSchemaVersion != 59 {
+		t.Fatalf("linked storage schema detail = %d, want 59", check.Details.LinkedBeadsStorageSchemaVersion)
+	}
+	if check.Details.MaxExternalToolchainStorageSchemaVersion != 53 {
+		t.Fatalf("max external storage schema detail = %d, want 53", check.Details.MaxExternalToolchainStorageSchemaVersion)
+	}
+	if result.Fallback != PreflightFallbackBdStore {
+		t.Errorf("Fallback = %q, want %q", result.Fallback, PreflightFallbackBdStore)
 	}
 }
 

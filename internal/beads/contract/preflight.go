@@ -124,21 +124,23 @@ func (c PreflightCheckResult) Redacted() PreflightCheckResult {
 
 // PreflightDetails is the typed details payload for preflight diagnostics.
 type PreflightDetails struct {
-	Provider              string                 `json:"provider,omitempty"`
-	MetadataBackend       string                 `json:"metadata_backend,omitempty"`
-	BDContextBackend      string                 `json:"bd_context_backend,omitempty"`
-	BDContextDoltMode     string                 `json:"bd_context_dolt_mode,omitempty"`
-	BDVersion             string                 `json:"bd_version,omitempty"`
-	BeadsLibraryVersion   string                 `json:"beads_library_version,omitempty"`
-	SchemaVersion         int                    `json:"schema_version,omitempty"`
-	MySQLDSNRedacted      string                 `json:"mysql_dsn_redacted,omitempty"`
-	MySQLDatabase         string                 `json:"mysql_database,omitempty"`
-	MetadataProjectID     string                 `json:"metadata_project_id,omitempty"`
-	DBProjectID           string                 `json:"db_project_id,omitempty"`
-	Expected              string                 `json:"expected,omitempty"`
-	AuthToken             string                 `json:"auth_token,omitempty"`
-	APIKey                string                 `json:"api_key,omitempty"`
-	AdditionalDiagnostics []PreflightDetailField `json:"additional_diagnostics,omitempty"`
+	Provider                                 string                 `json:"provider,omitempty"`
+	MetadataBackend                          string                 `json:"metadata_backend,omitempty"`
+	BDContextBackend                         string                 `json:"bd_context_backend,omitempty"`
+	BDContextDoltMode                        string                 `json:"bd_context_dolt_mode,omitempty"`
+	BDVersion                                string                 `json:"bd_version,omitempty"`
+	BeadsLibraryVersion                      string                 `json:"beads_library_version,omitempty"`
+	SchemaVersion                            int                    `json:"schema_version,omitempty"`
+	LinkedBeadsStorageSchemaVersion          int                    `json:"linked_beads_storage_schema_version,omitempty"`
+	MaxExternalToolchainStorageSchemaVersion int                    `json:"max_external_toolchain_storage_schema_version,omitempty"`
+	MySQLDSNRedacted                         string                 `json:"mysql_dsn_redacted,omitempty"`
+	MySQLDatabase                            string                 `json:"mysql_database,omitempty"`
+	MetadataProjectID                        string                 `json:"metadata_project_id,omitempty"`
+	DBProjectID                              string                 `json:"db_project_id,omitempty"`
+	Expected                                 string                 `json:"expected,omitempty"`
+	AuthToken                                string                 `json:"auth_token,omitempty"`
+	APIKey                                   string                 `json:"api_key,omitempty"`
+	AdditionalDiagnostics                    []PreflightDetailField `json:"additional_diagnostics,omitempty"`
 }
 
 // Redacted returns a copy of details with secret-bearing fields sanitized.

@@ -12,11 +12,13 @@ import (
 
 func newBeadsPreflightChecker(cityPath, provider string) contract.PreflightChecker {
 	return contract.PreflightChecker{
-		FS:                        fsys.OSFS{},
-		Provider:                  provider,
-		BDContext:                 preflightBDContextReader(cityPath),
-		DatabaseProjectID:         preflightDatabaseProjectIDReader(cityPath),
-		DeferIdentityToNativeOpen: preflightIdentityDeferredReader(cityPath),
+		FS:                                       fsys.OSFS{},
+		Provider:                                 provider,
+		BDContext:                                preflightBDContextReader(cityPath),
+		DatabaseProjectID:                        preflightDatabaseProjectIDReader(cityPath),
+		DeferIdentityToNativeOpen:                preflightIdentityDeferredReader(cityPath),
+		LinkedBeadsStorageSchemaVersion:          contract.LinkedBeadsStorageSchemaVersion,
+		MaxExternalToolchainStorageSchemaVersion: contract.MaxExternalToolchainStorageSchemaVersion,
 	}
 }
 

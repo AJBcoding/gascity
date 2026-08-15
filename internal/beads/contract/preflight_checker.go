@@ -49,6 +49,13 @@ type PreflightChecker struct {
 	// replacement rather than a beads release. Set together with
 	// BeadsLibraryVersion; leaving both zero infers them from build info.
 	BeadsLibraryReplaced bool
+	// LinkedBeadsStorageSchemaVersion is the latest storage schema the linked
+	// beads library can write. Zero disables the external-toolchain schema gate.
+	LinkedBeadsStorageSchemaVersion int
+	// MaxExternalToolchainStorageSchemaVersion is the highest storage schema the
+	// supported external bd toolchain is guaranteed to read. Zero disables the
+	// external-toolchain schema gate.
+	MaxExternalToolchainStorageSchemaVersion int
 }
 
 // Check runs the beads backend preflight for scope and returns typed diagnostics.
@@ -251,9 +258,19 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 	library := c.linkedBeadsLibrary()
 	libraryVersion := strings.TrimPrefix(library.Version, "v")
 	details := PreflightDetails{
-		BDVersion:           ctx.BDVersion,
-		BeadsLibraryVersion: libraryVersion,
-		SchemaVersion:       ctx.SchemaVersion,
+		BDVersion:                                ctx.BDVersion,
+		BeadsLibraryVersion:                      libraryVersion,
+		SchemaVersion:                            ctx.SchemaVersion,
+		LinkedBeadsStorageSchemaVersion:          c.LinkedBeadsStorageSchemaVersion,
+		MaxExternalToolchainStorageSchemaVersion: c.MaxExternalToolchainStorageSchemaVersion,
+	}
+	if c.MaxExternalToolchainStorageSchemaVersion > 0 {
+		if c.LinkedBeadsStorageSchemaVersion <= 0 {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckWarn, "candidate beads storage schema compatibility could not be confirmed", details)
+		}
+		if c.LinkedBeadsStorageSchemaVersion > c.MaxExternalToolchainStorageSchemaVersion {
+			return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckFail, fmt.Sprintf("candidate beads storage schema v%d exceeds supported external toolchain schema v%d", c.LinkedBeadsStorageSchemaVersion, c.MaxExternalToolchainStorageSchemaVersion), details)
+		}
 	}
 	if err != nil {
 		// Unreachable bd context cannot confirm bd/beads version parity; degrade
@@ -273,9 +290,9 @@ func (c PreflightChecker) checkVersionCompat(ctx PreflightBDContext, err error) 
 		// build, a replaced module, or a pseudo-version naming an untagged
 		// commit — the two strings can never be equal, and answering "mismatch"
 		// reports a verdict the check never had the evidence to reach. The
-		// schema version is validated above and is the real compatibility
-		// signal, so an unconfirmable library version must not take the native
-		// store offline; only a *confirmed* mismatch (below) should.
+		// explicit storage-schema gate has already run above, so an
+		// unconfirmable library version must not take the native store offline;
+		// only a *confirmed* mismatch (below) should.
 		return NewPreflightCheckResult(PreflightCheckVersionCompat, PreflightCheckPass, "bd/beads schema compatible; linked library version unconfirmed ("+reason+")", details)
 	}
 	if strings.TrimPrefix(ctx.BDVersion, "v") != libraryVersion {
@@ -319,6 +336,15 @@ func preflightFallbackReason(checks []PreflightCheckResult) string {
 
 // beadsModulePath is the module path of the beads library gc links.
 const beadsModulePath = "github.com/steveyegge/beads"
+
+const (
+	// LinkedBeadsStorageSchemaVersion is the latest storage schema version in
+	// the beads library linked into this gc build.
+	LinkedBeadsStorageSchemaVersion = 59
+	// MaxExternalToolchainStorageSchemaVersion is the latest storage schema
+	// version guaranteed readable by the release-pinned external bd toolchain.
+	MaxExternalToolchainStorageSchemaVersion = 53
+)
 
 // linkedBeadsLibrary resolves the beads library this binary links, preferring
 // the configured override so tests need not depend on their own build info.
