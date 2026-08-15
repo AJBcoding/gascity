@@ -405,11 +405,20 @@ func stripLineComment(line string) string {
 func anyGoWorkFile(t *testing.T, root string) bool {
 	t.Helper()
 	found := false
-	err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if entry.IsDir() {
+			if path != root {
+				_, statErr := os.Stat(filepath.Join(path, ".git"))
+				if statErr == nil {
+					return filepath.SkipDir
+				}
+				if !os.IsNotExist(statErr) {
+					return statErr
+				}
+			}
 			switch entry.Name() {
 			case ".git", "node_modules", "vendor", "testdata", ".claude":
 				return filepath.SkipDir
@@ -457,6 +466,15 @@ func moduleGoFiles(t *testing.T, root string) []string {
 			return err
 		}
 		if entry.IsDir() {
+			if path != root {
+				_, statErr := os.Stat(filepath.Join(path, ".git"))
+				if statErr == nil {
+					return filepath.SkipDir
+				}
+				if !os.IsNotExist(statErr) {
+					return statErr
+				}
+			}
 			switch entry.Name() {
 			case ".git", "node_modules", "vendor", "testdata", ".claude":
 				return filepath.SkipDir
@@ -478,6 +496,32 @@ func moduleGoFiles(t *testing.T, root string) []string {
 	}
 	sort.Strings(files)
 	return files
+}
+
+func TestModuleGoFilesSkipsNestedGitWorktrees(t *testing.T) {
+	root := t.TempDir()
+	writeModuleFixtureFile(t, root, "cmd/gc/storage_provider_bundle.go", "package main\n")
+	writeModuleFixtureFile(t, root, "worktrees/gas-zjqk/.git", "gitdir: ../.git/worktrees/gas-zjqk\n")
+	writeModuleFixtureFile(t, root, "worktrees/gas-zjqk/cmd/gc/storage_provider_bundle.go", "package main\n")
+
+	files := moduleGoFiles(t, root)
+	if !slices.Contains(files, "cmd/gc/storage_provider_bundle.go") {
+		t.Fatalf("moduleGoFiles skipped the root module source: %v", files)
+	}
+	if slices.Contains(files, "worktrees/gas-zjqk/cmd/gc/storage_provider_bundle.go") {
+		t.Fatalf("moduleGoFiles scanned nested worktree source: %v", files)
+	}
+}
+
+func writeModuleFixtureFile(t *testing.T, root, rel, content string) {
+	t.Helper()
+	path := filepath.Join(root, filepath.FromSlash(rel))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("creating fixture dir for %s: %v", rel, err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("writing fixture file %s: %v", rel, err)
+	}
 }
 
 func parseModuleFile(t *testing.T, root, rel string) *ast.File {

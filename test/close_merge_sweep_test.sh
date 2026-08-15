@@ -103,6 +103,22 @@ run_sweep() {
         bash "$SWEEP" 2>&1
 }
 
+remove_origin_publication() {
+    git -C "$REPO" remote remove origin
+    git -C "$REPO" update-ref -d refs/remotes/origin/main 2>/dev/null || true
+}
+
+expect_no_publication_ref_unknown() {
+    local label="$1" out="$2"
+    [ ! -s "$TMP/create.log" ] ||
+        { fail "$label: filed using a non-publication remote ref: $(cat "$TMP/create.log")"; return 1; }
+    grep -q 'unknown=1' <<<"$out" ||
+        { fail "$label: non-publication remote ref should be UNPROBEABLE, not landed: $out"; return 1; }
+    grep -q 'landed=0' <<<"$out" ||
+        { fail "$label: non-publication remote ref was counted as landed: $out"; return 1; }
+    return 0
+}
+
 # move_target_on — put an unrelated commit on the current branch. Without this,
 # a branch cut from main and cherry-picked straight back lands on the SAME
 # parent with the same tree, author and (within the same second) committer date,
@@ -181,6 +197,43 @@ test_stale_local_ref_is_never_judged_against() {
     grep -q 'unknown=1' <<<"$out" ||
         { fail "no remote ref should count as UNPROBEABLE, not unmerged: $out"; return; }
     pass "with no remote-tracking ref the sweep stays quiet instead of judging a stale local"
+}
+
+# --- non-publication remote refs must never prove a target ----------------
+test_relative_self_remote_ref_is_not_landing_evidence() {
+    setup
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    remove_origin_publication
+    git -C "$REPO" remote add dot-self .
+    git -C "$REPO" fetch -q dot-self
+
+    local out; out=$(run_sweep "$(bead b-self-rel "$sha")" main)
+    expect_no_publication_ref_unknown "relative self remote" "$out" || return
+    pass "a relative self remote-tracking ref is not landing evidence"
+}
+
+test_loopback_scp_remote_ref_is_not_landing_evidence() {
+    setup
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    remove_origin_publication
+    git -C "$REPO" remote add loopback "git@localhost:$REPO"
+    git -C "$REPO" update-ref refs/remotes/loopback/main "$sha"
+
+    local out; out=$(run_sweep "$(bead b-self-scp "$sha")" main)
+    expect_no_publication_ref_unknown "loopback scp remote" "$out" || return
+    pass "a loopback scp remote-tracking ref is not landing evidence"
+}
+
+test_missing_local_remote_ref_is_not_landing_evidence() {
+    setup
+    local sha; sha=$(git -C "$REPO" rev-parse HEAD)
+    remove_origin_publication
+    git -C "$REPO" remote add missing "$TMP/missing.git"
+    git -C "$REPO" update-ref refs/remotes/missing/main "$sha"
+
+    local out; out=$(run_sweep "$(bead b-missing-local "$sha")" main)
+    expect_no_publication_ref_unknown "missing local remote" "$out" || return
+    pass "a stale ref from a missing local remote is not landing evidence"
 }
 
 # --- read-only: the sweep may never mutate the repo or block --------------
@@ -408,6 +461,9 @@ test_landed_work_files_nothing
 test_unmerged_work_files_a_merge_gap
 test_retracted_merge_is_reported_distinctly
 test_stale_local_ref_is_never_judged_against
+test_relative_self_remote_ref_is_not_landing_evidence
+test_loopback_scp_remote_ref_is_not_landing_evidence
+test_missing_local_remote_ref_is_not_landing_evidence
 test_sweep_is_read_only_and_always_exits_zero
 test_recent_close_is_left_for_the_next_sweep
 test_cherry_picked_work_is_resolved_by_patch_id

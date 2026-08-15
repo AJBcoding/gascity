@@ -25,14 +25,15 @@
 # that breaks the controller is a worse bug than the one it reports.
 #
 # DURABILITY SEMANTICS ARE SHARED, AND MUST NOT DRIFT. Publication remotes are
-# all remotes MINUS those whose URL resolves back into this same repository
-# (gas-6tc: herdr-src is the gascity repo's own path, so a blanket --remotes
-# reads single-copy work as published on exactly the rig that guards gc). That
-# rule now has three implementations: the gc gate
+# configured remotes that can actually publish away from this repository. A URL
+# that resolves back into this same repository (including relative spellings and
+# loopback network spellings) or a missing local path confers no durability: a
+# blanket --remotes probe reads single-copy work as published on exactly the rig
+# that guards gc. That rule now has three implementations: the gc gate
 # (cmd/gc/work_record_gate.go gitPublicationRemotes), the rung-3 auditor
-# (.beads/hooks/on_close), and this file. They are one semantic. If one
-# changes, all three change — drift between them is the failure this ladder
-# exists to prevent.
+# (.beads/hooks/on_close), and this file. They are one semantic. If one changes,
+# all three change — drift between them is the failure this ladder exists to
+# prevent.
 #
 # KNOWN LIMIT — the spool is append-only, so every record is re-probed on every
 # sweep and the cost grows with lifetime closes, not with open exposure (~2 `gc
@@ -102,62 +103,163 @@ common_dir() {
     ( cd "$out" 2>/dev/null && pwd -P ) 2>/dev/null || printf '%s' "$out"
 }
 
+repo_url_base() {
+    local repo="$1" out
+    out=$(git -C "$repo" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)
+    if [ -n "$out" ]; then
+        ( cd "$out" 2>/dev/null && pwd -P ) 2>/dev/null || printf '%s' "$out"
+        return 0
+    fi
+    common_dir "$repo"
+}
+
+is_loopback_host() {
+    local host
+    host=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    host="${host#[}"
+    host="${host%]}"
+    case "$host" in
+        localhost|localhost.localdomain|127.*|::1|0:0:0:0:0:0:0:1) return 0 ;;
+    esac
+    return 1
+}
+
+# remote_local_path <repo> <url> — prints a local filesystem path and returns 0
+# when the URL addresses this host, returns 1 when it names another host, and
+# returns 2 when it is local-shaped but not usable as publication evidence.
+remote_local_path() {
+    local repo="$1" url="$2" rest hostpart host path base colon slash
+    [ -n "$url" ] || return 2
+    case "$url" in
+        file://*)
+            rest="${url#file://}"
+            case "$rest" in
+                /*) path="$rest" ;;
+                *)
+                    hostpart="${rest%%/*}"
+                    if [ "$hostpart" = "$rest" ]; then
+                        return 2
+                    fi
+                    if ! is_loopback_host "$hostpart"; then
+                        return 1
+                    fi
+                    path="/${rest#*/}"
+                    ;;
+            esac
+            [ -n "$path" ] || return 2
+            printf '%s' "$path"
+            return 0
+            ;;
+        *://*)
+            rest="${url#*://}"
+            hostpart="${rest%%/*}"
+            if [ "$hostpart" = "$rest" ]; then
+                return 2
+            fi
+            path="/${rest#*/}"
+            host="${hostpart#*@}"
+            case "$host" in
+                \[*\]*) host="${host#\[}"; host="${host%%\]*}" ;;
+                *) host="${host%%:*}" ;;
+            esac
+            if is_loopback_host "$host"; then
+                [ -n "$path" ] || return 2
+                printf '%s' "$path"
+                return 0
+            fi
+            return 1
+            ;;
+    esac
+
+    colon="${url%%:*}"
+    if [ "$colon" != "$url" ]; then
+        slash="${url%%/*}"
+        if [ "$slash" = "$url" ] || [ ${#colon} -lt ${#slash} ]; then
+            host="${colon#*@}"
+            if is_loopback_host "$host"; then
+                path="${url#*:}"
+                case "$path" in
+                    /*) printf '%s' "$path"; return 0 ;;
+                    *) return 2 ;;
+                esac
+            fi
+            return 1
+        fi
+    fi
+
+    case "$url" in
+        /*) path="$url" ;;
+        *)
+            base=$(repo_url_base "$repo")
+            [ -n "$base" ] || return 2
+            path="$base/$url"
+            ;;
+    esac
+    printf '%s' "$path"
+    return 0
+}
+
+is_publication_remote() {
+    local repo="$1" self="$2" url="$3" path rc c
+    path=$(remote_local_path "$repo" "$url")
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 0 ;;  # off-host
+        *) return 1 ;;
+    esac
+    [ -n "$path" ] || return 1
+    c=$(common_dir "$path")
+    if [ -n "$c" ] && [ -n "$self" ] && [ "$c" = "$self" ]; then
+        return 1
+    fi
+    [ -e "$path" ] || return 1
+    return 0
+}
+
+configured_remote_count() {
+    git -C "$1" remote 2>/dev/null | awk 'NF { n++ } END { print n + 0 }'
+}
+
 # publication_globs <repo> — one `--glob=refs/remotes/<name>/*` per remote that
 # can actually confer durability, newline separated. Empty output means the repo
 # has nowhere to publish.
 publication_globs() {
-    local repo="$1" self name url colon c
+    local repo="$1" self remotes name url
     self=$(common_dir "$repo")
+    remotes=$(git -C "$repo" remote 2>/dev/null) || return 1
     while IFS= read -r name; do
         [ -n "$name" ] || continue
         case "$name" in -*) continue ;; esac
         url=$(git -C "$repo" remote get-url "$name" 2>/dev/null)
         if [ -z "$url" ]; then
-            # Unreadable URL: keep the remote so the rule stays armed rather
-            # than silently skipped.
-            printf -- '--glob=refs/remotes/%s/*\n' "$name"
             continue
         fi
-        case "$url" in
-            *://*)
-                case "$url" in
-                    file://*) url="${url#file://}" ;;
-                    *) printf -- '--glob=refs/remotes/%s/*\n' "$name"; continue ;;
-                esac
-                ;;
-            *)
-                # scp-style (host:path) is a network remote: colon before slash.
-                colon="${url%%:*}"
-                if [ "$colon" != "$url" ]; then
-                    case "$colon" in
-                        */*) ;;   # colon appears after a slash: still a path
-                        *) printf -- '--glob=refs/remotes/%s/*\n' "$name"; continue ;;
-                    esac
-                fi
-                ;;
-        esac
-        c=$(common_dir "$url")
-        if [ -n "$c" ] && [ -n "$self" ] && [ "$c" = "$self" ]; then
-            continue   # self-referential: confers no durability (gas-6tc)
+        if is_publication_remote "$repo" "$self" "$url"; then
+            printf -- '--glob=refs/remotes/%s/*\n' "$name"
         fi
-        printf -- '--glob=refs/remotes/%s/*\n' "$name"
     done <<EOF
-$(git -C "$repo" remote 2>/dev/null)
+$remotes
 EOF
 }
 
 # is_published <repo> <sha> — 0 = published (or nowhere to publish),
 # 1 = on no publication remote, 2 = could not probe.
 is_published() {
-    local repo="$1" sha="$2" globs out
+    local repo="$1" sha="$2" configured globs out
     [ -n "$repo" ] && [ -n "$sha" ] || return 2
     case "$sha" in -*) return 2 ;; esac
     git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || return 2
     git -C "$repo" rev-parse --verify --quiet "${sha}^{commit}" >/dev/null 2>&1 || return 2
-    globs=$(publication_globs "$repo")
-    # No publication remotes ⇒ nowhere to publish ⇒ durability not applicable.
-    # This mirrors the gc gate's len(publication)==0 branch; see the drift note.
-    [ -n "$globs" ] || return 0
+    configured=$(configured_remote_count "$repo") || return 2
+    globs=$(publication_globs "$repo") || return 2
+    if [ -z "$globs" ]; then
+        # No configured remotes at all ⇒ local-only rig ⇒ durability not
+        # applicable. Configured remotes that all filter out are a durability
+        # misconfiguration: the work is not published anywhere.
+        [ "$configured" = "0" ] && return 0
+        return 1
+    fi
     set --
     while IFS= read -r g; do
         [ -n "$g" ] && set -- "$@" "$g"

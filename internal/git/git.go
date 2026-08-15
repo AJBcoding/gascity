@@ -212,10 +212,11 @@ func (g *Git) HasUnpushedCommits() bool {
 // off-host, so a blanket --remotes reads its snapshots of local branches as
 // pushed and clears genuinely unpublished work for reclamation (gas-9sg).
 //
-// A repo with no publication remotes — none configured at all, or all of them
-// self-referential — has nowhere it could have published to, so every commit is
-// unpushed. That is the fail-closed answer this probe already gave a repo with
-// no remotes, now extended to the topology that only looked like it had one.
+// A repo with no publication remotes — none configured at all, or all configured
+// remotes self-referential, missing, or otherwise unusable — has nowhere it
+// could have published to, so every commit is unpushed. That is the fail-closed
+// answer this probe already gave a repo with no remotes, now extended to the
+// topology that only looked like it had one.
 func (g *Git) HasUnpushedCommitsResult() (bool, error) {
 	publication, _, err := g.PublicationRemotes()
 	if err != nil {

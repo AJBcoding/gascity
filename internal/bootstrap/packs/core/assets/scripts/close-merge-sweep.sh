@@ -128,22 +128,150 @@ cutoff_ts() {
 }
 CUTOFF="$(cutoff_ts)"
 
-# publication_remotes — remotes that can confer durability: every configured
-# remote except those whose URL resolves back into this same repository
-# (gas-6tc). Shared semantic with the gc gate and rung 4; if one changes, all
-# change.
+# common_dir <path> — absolute, symlink-resolved git common dir, or empty. This
+# is the identity used for self-remote detection: a repo root and any of its
+# worktrees resolve to the same common dir.
+common_dir() {
+    local d="$1" out
+    [ -n "$d" ] || return 0
+    case "$d" in -*) return 0 ;; esac
+    out=$(git -C "$d" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+    if [ -z "$out" ]; then
+        out=$(cd "$d" 2>/dev/null && git rev-parse --git-common-dir 2>/dev/null) || return 0
+        [ -n "$out" ] || return 0
+        case "$out" in
+            /*) ;;
+            *) out=$(cd "$d" 2>/dev/null && cd "$out" 2>/dev/null && pwd -P) || return 0 ;;
+        esac
+    fi
+    ( cd "$out" 2>/dev/null && pwd -P ) 2>/dev/null || printf '%s' "$out"
+}
+
+repo_url_base() {
+    local repo="$1" out
+    out=$(git -C "$repo" rev-parse --path-format=absolute --show-toplevel 2>/dev/null)
+    if [ -n "$out" ]; then
+        ( cd "$out" 2>/dev/null && pwd -P ) 2>/dev/null || printf '%s' "$out"
+        return 0
+    fi
+    common_dir "$repo"
+}
+
+is_loopback_host() {
+    local host
+    host=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    host="${host#[}"
+    host="${host%]}"
+    case "$host" in
+        localhost|localhost.localdomain|127.*|::1|0:0:0:0:0:0:0:1) return 0 ;;
+    esac
+    return 1
+}
+
+remote_local_path() {
+    local repo="$1" url="$2" rest hostpart host path base colon slash
+    [ -n "$url" ] || return 2
+    case "$url" in
+        file://*)
+            rest="${url#file://}"
+            case "$rest" in
+                /*) path="$rest" ;;
+                *)
+                    hostpart="${rest%%/*}"
+                    if [ "$hostpart" = "$rest" ]; then
+                        return 2
+                    fi
+                    if ! is_loopback_host "$hostpart"; then
+                        return 1
+                    fi
+                    path="/${rest#*/}"
+                    ;;
+            esac
+            [ -n "$path" ] || return 2
+            printf '%s' "$path"
+            return 0
+            ;;
+        *://*)
+            rest="${url#*://}"
+            hostpart="${rest%%/*}"
+            if [ "$hostpart" = "$rest" ]; then
+                return 2
+            fi
+            path="/${rest#*/}"
+            host="${hostpart#*@}"
+            case "$host" in
+                \[*\]*) host="${host#\[}"; host="${host%%\]*}" ;;
+                *) host="${host%%:*}" ;;
+            esac
+            if is_loopback_host "$host"; then
+                [ -n "$path" ] || return 2
+                printf '%s' "$path"
+                return 0
+            fi
+            return 1
+            ;;
+    esac
+
+    colon="${url%%:*}"
+    if [ "$colon" != "$url" ]; then
+        slash="${url%%/*}"
+        if [ "$slash" = "$url" ] || [ ${#colon} -lt ${#slash} ]; then
+            host="${colon#*@}"
+            if is_loopback_host "$host"; then
+                path="${url#*:}"
+                case "$path" in
+                    /*) printf '%s' "$path"; return 0 ;;
+                    *) return 2 ;;
+                esac
+            fi
+            return 1
+        fi
+    fi
+
+    case "$url" in
+        /*) path="$url" ;;
+        *)
+            base=$(repo_url_base "$repo")
+            [ -n "$base" ] || return 2
+            path="$base/$url"
+            ;;
+    esac
+    printf '%s' "$path"
+    return 0
+}
+
+is_publication_remote() {
+    local repo="$1" self="$2" url="$3" path rc c
+    path=$(remote_local_path "$repo" "$url")
+    rc=$?
+    case "$rc" in
+        0) ;;
+        1) return 0 ;;
+        *) return 1 ;;
+    esac
+    [ -n "$path" ] || return 1
+    c=$(common_dir "$path")
+    if [ -n "$c" ] && [ -n "$self" ] && [ "$c" = "$self" ]; then
+        return 1
+    fi
+    [ -e "$path" ] || return 1
+    return 0
+}
+
+# publication_remotes — configured remotes that can confer durability. A remote
+# whose URL resolves back into this same repository, including relative and
+# loopback spellings, or a missing local path is not publication evidence.
+# Shared semantic with the gc gate and rung 4; if one changes, all change.
 publication_remotes() {
-    local repo="$1" name url self
-    self="$(git -C "$repo" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
+    local repo="$1" self name url
+    self="$(common_dir "$repo")"
     for name in $(git -C "$repo" remote 2>/dev/null); do
         case "$name" in -*) continue ;; esac
         url="$(git -C "$repo" remote get-url "$name" 2>/dev/null)"
-        if [ -n "$url" ] && [ -n "$self" ] && [ -d "$url" ]; then
-            case "$(cd "$url" 2>/dev/null && git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" in
-                "$self") continue ;;
-            esac
+        [ -n "$url" ] || continue
+        if is_publication_remote "$repo" "$self" "$url"; then
+            printf '%s\n' "$name"
         fi
-        printf '%s\n' "$name"
     done
 }
 

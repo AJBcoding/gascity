@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -18,10 +19,9 @@ import (
 //
 // The asymmetry that sets every fail direction here: a false "at risk" costs one
 // push, a false "durable" costs the work. So classification is by positive
-// identification only — a URL is self-referential solely when it resolves to a
-// path that is this very repository. A URL naming another host, or one whose
-// path resolves nowhere, is reported as a real remote, which keeps the
-// durability rule armed rather than silently disabling it.
+// publication evidence: a URL naming another host counts as publication, but a
+// local URL whose target is this repository, is missing, or cannot be resolved
+// does not get to clear a durability check.
 
 // Remote is one configured remote, classified for durability purposes.
 type Remote struct {
@@ -51,7 +51,10 @@ func (g *Git) Remotes() ([]Remote, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing remotes: %w", err)
 	}
-	selfCommon := CommonDir(g.workDir)
+	id, err := g.repoIdentity()
+	if err != nil {
+		return nil, err
+	}
 	remotes := []Remote{}
 	for _, name := range strings.Fields(out) {
 		if strings.HasPrefix(name, "-") {
@@ -63,22 +66,22 @@ func (g *Git) Remotes() ([]Remote, error) {
 		}
 		urlOut, urlErr := g.run("remote", "get-url", name)
 		if urlErr != nil {
-			// Unreadable URL: treat as a publication remote so the durability
-			// rule stays armed rather than silently skipped.
-			remotes = append(remotes, Remote{Name: name, Publication: true})
+			// A remote whose URL cannot be read is not provably a publication
+			// target. Keep it configured, but do not let it clear durability
+			// checks.
+			remotes = append(remotes, Remote{Name: name})
 			continue
 		}
-		url := strings.TrimSpace(urlOut)
-		self := IsSelfRemoteURL(url, selfCommon)
-		remotes = append(remotes, Remote{Name: name, URL: url, Self: self, Publication: !self})
+		rawURL := strings.TrimSpace(urlOut)
+		self, publication := classifyRemoteURL(rawURL, id)
+		remotes = append(remotes, Remote{Name: name, URL: rawURL, Self: self, Publication: publication})
 	}
 	return remotes, nil
 }
 
 // PublicationRemotes returns the names of the repository's remotes that can
-// confer durability — every configured remote except those whose URL resolves
-// back into this same repository — alongside the full configured list it was
-// filtered from.
+// confer durability — configured remotes whose URL can publish away from this
+// repository — alongside the full configured list it was filtered from.
 //
 // Callers need both because an empty publication list is ambiguous on its own:
 // no remotes at all is a local-only repo, while remotes that all filter out is
@@ -107,12 +110,9 @@ func IsSelfRemoteURL(remoteURL, selfCommon string) bool {
 	if remoteURL == "" || selfCommon == "" {
 		return false
 	}
-	path, ok := localPathForRemoteURL(remoteURL)
-	if !ok {
-		return false
-	}
-	common := CommonDir(path)
-	return common != "" && common == selfCommon
+	id := repoIdentityFromCommonDir(selfCommon)
+	self, _ := classifyRemoteURL(remoteURL, id)
+	return self
 }
 
 // CommonDir resolves dir's git common directory (shared across worktrees) to an
@@ -138,33 +138,183 @@ func CommonDir(dir string) string {
 	return p
 }
 
-// localPathForRemoteURL maps a remote URL to the filesystem path it addresses on
-// this machine, reporting false when the URL addresses another host. The path is
-// not required to exist or to be a repository — the caller decides what it
-// resolves to.
-func localPathForRemoteURL(remoteURL string) (string, bool) {
-	if strings.Contains(remoteURL, "://") {
-		u, err := url.Parse(remoteURL)
-		if err != nil || !remoteHostIsSelf(u) || u.Path == "" {
-			return "", false
-		}
-		return u.Path, true
+// repoIdentity is the filesystem identity a remote URL is compared against.
+// dirs contains paths that identify this repository, while urlBase is the
+// directory git uses when resolving relative remote URLs.
+type repoIdentity struct {
+	dirs    []string
+	urlBase string
+}
+
+func (g *Git) repoIdentity() (repoIdentity, error) {
+	common, err := g.run("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return repoIdentity{}, fmt.Errorf("resolving git common dir: %w", err)
 	}
-	// scp-style user@host:path addresses another machine. A bare filesystem
-	// path does not, even when one of its components contains '@'.
-	if looksLikeSCPRemote(remoteURL) {
+	id := repoIdentityFromCommonDir(strings.TrimSpace(common))
+	if top, err := g.run("rev-parse", "--path-format=absolute", "--show-toplevel"); err == nil {
+		id.urlBase = cleanPath(strings.TrimSpace(top))
+	}
+	if id.urlBase == "" && len(id.dirs) > 0 {
+		id.urlBase = id.dirs[0]
+	}
+	return id, nil
+}
+
+func repoIdentityFromCommonDir(common string) repoIdentity {
+	common = cleanPath(common)
+	id := repoIdentity{}
+	if common == "" {
+		return id
+	}
+	id.dirs = append(id.dirs, common)
+	if filepath.Base(common) == ".git" {
+		root := filepath.Dir(common)
+		id.dirs = append(id.dirs, root)
+		id.urlBase = root
+	} else {
+		id.urlBase = common
+	}
+	return id
+}
+
+func cleanPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
+}
+
+func classifyRemoteURL(rawURL string, id repoIdentity) (self, publication bool) {
+	path, local := localPathForRemoteURL(rawURL)
+	if !local {
+		return false, true
+	}
+	if path == "" {
+		return false, false
+	}
+	if !filepath.IsAbs(path) {
+		if id.urlBase == "" {
+			return false, false
+		}
+		path = filepath.Join(id.urlBase, path)
+	}
+	if remotePathIsSelf(path, id) {
+		return true, false
+	}
+	if _, err := os.Stat(path); err != nil {
+		return false, false
+	}
+	return false, true
+}
+
+func remotePathIsSelf(path string, id repoIdentity) bool {
+	path = cleanPath(path)
+	if path == "" {
+		return false
+	}
+	if common := CommonDir(path); common != "" && identityContains(id, common) {
+		return true
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	for _, dir := range id.dirs {
+		selfInfo, err := os.Stat(dir)
+		if err != nil {
+			continue
+		}
+		if os.SameFile(info, selfInfo) {
+			return true
+		}
+		gitInfo, err := os.Stat(filepath.Join(path, ".git"))
+		if err == nil && os.SameFile(gitInfo, selfInfo) {
+			return true
+		}
+	}
+	return false
+}
+
+func identityContains(id repoIdentity, path string) bool {
+	path = cleanPath(path)
+	for _, dir := range id.dirs {
+		if cleanPath(dir) == path {
+			return true
+		}
+	}
+	return false
+}
+
+// localPathForRemoteURL maps a remote URL to the filesystem path it addresses on
+// this machine. The second return value is false when the URL names another
+// machine or a server route whose path is not a local filesystem path.
+func localPathForRemoteURL(remoteURL string) (string, bool) {
+	if remoteURL == "" {
+		return "", false
+	}
+	if strings.Contains(remoteURL, "://") {
+		return schemeLocalPath(remoteURL)
+	}
+	if path, ok := scpLocalPath(remoteURL); ok {
+		return path, true
+	} else if looksLikeSCPRemote(remoteURL) {
 		return "", false
 	}
 	return remoteURL, true
 }
 
-// remoteHostIsSelf reports whether a remote URL's host names this machine. An
-// empty host is this machine by definition (file:///path); host names are
-// case-insensitive; and url.URL.Hostname strips the port, the IPv6 brackets,
-// and any user@ prefix before the loopback test.
-func remoteHostIsSelf(u *url.URL) bool {
-	host := u.Hostname()
-	return host == "" || isLoopbackHost(strings.ToLower(host))
+func schemeLocalPath(remoteURL string) (string, bool) {
+	u, err := url.Parse(remoteURL)
+	if err != nil {
+		return "", true
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "file":
+		if u.Host != "" && !isLoopbackHost(u.Hostname()) {
+			return "", false
+		}
+		return u.Path, true
+	case "ssh", "git", "git+ssh", "ssh+git":
+		if !isLoopbackHost(u.Hostname()) {
+			return "", false
+		}
+		return u.Path, true
+	default:
+		if isLoopbackHost(u.Hostname()) {
+			return u.Path, true
+		}
+		return "", false
+	}
+}
+
+func scpLocalPath(remoteURL string) (string, bool) {
+	colon := strings.Index(remoteURL, ":")
+	if colon <= 1 {
+		return "", false
+	}
+	slash := strings.Index(remoteURL, "/")
+	if slash >= 0 && slash < colon {
+		return "", false
+	}
+	host := remoteURL[:colon]
+	if _, after, ok := strings.Cut(host, "@"); ok {
+		host = after
+	}
+	if !isLoopbackHost(host) {
+		return "", false
+	}
+	path := remoteURL[colon+1:]
+	if !filepath.IsAbs(path) {
+		return "", true
+	}
+	return path, true
 }
 
 // looksLikeSCPRemote reports whether remoteURL is scp-style (host:path) rather
@@ -180,7 +330,8 @@ func looksLikeSCPRemote(remoteURL string) bool {
 
 // isLoopbackHost reports whether host names this machine's loopback interface.
 func isLoopbackHost(host string) bool {
-	if host == "localhost" {
+	host = strings.Trim(strings.ToLower(host), "[]")
+	if host == "localhost" || host == "localhost.localdomain" {
 		return true
 	}
 	ip := net.ParseIP(host)
