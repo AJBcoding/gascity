@@ -17,7 +17,7 @@ func TestGastown_HandoffRemote(t *testing.T) {
 	cityDir := setupGasTownCityNoGuard(t, agents)
 
 	// Remote handoff from human to mayor.
-	out, err := gc(cityDir, "handoff", "--target", "mayor", "Context refresh", "Check latest status")
+	out, err := gc(cityDir, "handoff", "--from", "human", "--target", "mayor", "Context refresh", "Check latest status")
 	if err != nil {
 		t.Fatalf("gc handoff failed: %v\noutput: %s", err, out)
 	}
@@ -60,7 +60,7 @@ func TestGastown_HandoffToNonexistent(t *testing.T) {
 	}
 	cityDir := setupGasTownCityNoGuard(t, agents)
 
-	out, err := gc(cityDir, "handoff", "--target", "nonexistent", "hello")
+	out, err := gc(cityDir, "handoff", "--from", "human", "--target", "nonexistent", "hello")
 	if err == nil {
 		t.Fatal("expected handoff to nonexistent to fail")
 	}
