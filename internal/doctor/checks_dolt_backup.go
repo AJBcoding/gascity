@@ -62,6 +62,11 @@ func (c *DoltBackupCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 
 	rigPath := c.normalizedRigPath()
+	if backend, skip := scopeSkipsDoltEndpoint(c.cityPath, rigPath); skip {
+		r.Status = StatusOK
+		r.Message = fmt.Sprintf("rig %q: dolt backup not required (bd backend=%s)", c.rig.Name, backend)
+		return r
+	}
 
 	// An external (non-managed) Dolt endpoint owns its own backups; gc does not
 	// manage them, so the local .dolt-backup directory and managed-Dolt
