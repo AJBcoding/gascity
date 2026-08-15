@@ -1052,6 +1052,68 @@ func TestCmdHandoffRemoteRejectsExplicitHumanFromAgentSession(t *testing.T) {
 	}
 }
 
+func TestCmdHandoffRemoteRejectsForgedSenderBeforeMaterializingOnDemandTarget(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_MAIL", "")
+	t.Setenv("GC_SESSION", "fake")
+	t.Setenv("GC_ALIAS", "")
+	t.Setenv("GC_SESSION_ID", "")
+	t.Setenv("GC_AGENT", "gascity/bob")
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(`[workspace]
+name = "test-city"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "recipient"
+provider = "codex"
+start_command = "echo"
+
+[[named_session]]
+template = "recipient"
+mode = "on_demand"
+`), 0o644); err != nil {
+		t.Fatalf("WriteFile(city.toml): %v", err)
+	}
+	t.Setenv("GC_CITY", cityPath)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--from", "human", "--target", "recipient", "Context refresh"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("gc handoff --from human from agent = nil error, want refusal; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing --from human") {
+		t.Fatalf("stderr = %q, want forged-human refusal", stderr.String())
+	}
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	sessions, err := store.List(beads.ListQuery{
+		Type:      session.BeadType,
+		Status:    "open",
+		TierMode:  beads.TierBoth,
+		AllowScan: true,
+	})
+	if err != nil {
+		t.Fatalf("List sessions: %v", err)
+	}
+	if len(sessions) != 0 {
+		t.Fatalf("session beads after forged handoff = %#v, want none", sessions)
+	}
+	for _, msg := range mailAuthorityMessages(t, cityPath) {
+		t.Fatalf("agent-forged operator handoff was delivered: From=%q", msg.From)
+	}
+}
+
 func TestCmdHandoffRemoteRejectsForeignExplicitSenderFromAgentSession(t *testing.T) {
 	cityPath := newMailAuthorityCity(t)
 

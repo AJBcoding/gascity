@@ -207,12 +207,6 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 }
 
 func cmdHandoffRemoteWithSender(args []string, target string, from string, stdout, stderr io.Writer) int {
-	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	store, code := openCityStore(stderr, "gc handoff")
 	if store == nil {
 		return code
@@ -241,6 +235,12 @@ func cmdHandoffRemoteWithSender(args []string, target string, from string, stdou
 		if !ok {
 			return 1
 		}
+	}
+
+	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	sp, err := newSessionProvider()
