@@ -41,6 +41,15 @@ internal/api/dashboardspa/web/frontend/.playwright/
 !/.claude/
 /.claude/*
 !/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/gascity-docs/
+!/.claude/skills/gascity-docs/**
+.mcp.json
+.gemini/settings.json
+.codex/config.toml
+.cursor/mcp.json
+opencode.json
+mimocode.json
 
 # sync-project-agents writes local migration backups here; don't commit them.
 .agents/migration/
