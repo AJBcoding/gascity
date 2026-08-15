@@ -289,6 +289,16 @@ func TestClassRoutedContinuationEscalatesOnEmpty(t *testing.T) {
 	if err != nil || strings.TrimSpace(assigned.Assignee) != "worker-1" {
 		t.Fatalf("binding holds %s assigned to %q (err=%v), want worker-1", sibling.ID, assigned.Assignee, err)
 	}
+	released, err := ops.ReleaseContinuationAssignment(context.Background(), "/work", nil, sibling.ID, "worker-1")
+	if err != nil || !released {
+		t.Fatalf("routed continuation release = (released=%v err=%v), want success", released, err)
+	}
+	cleared, err := class.Get(sibling.ID)
+	if err != nil ||
+		strings.TrimSpace(cleared.Assignee) != "" ||
+		!strings.EqualFold(strings.TrimSpace(cleared.Status), "open") {
+		t.Fatalf("binding holds %s as status=%q assignee=%q (err=%v), want open and unassigned", sibling.ID, cleared.Status, cleared.Assignee, err)
+	}
 }
 
 // TestClassRoutedContinuationKeepsANonEmptyWorkAnswer is the other half of the

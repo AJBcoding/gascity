@@ -572,6 +572,13 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		return base.Release(ctx, dir, env, beadID, assignee)
 	}
 
+	ops.ReleaseContinuationAssignment = func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error) {
+		if route.knownResident(beadID) {
+			return releaseOpenContinuationAssignmentWithGraph(route.graph, beadID, assignee)
+		}
+		return base.ReleaseContinuationAssignment(ctx, dir, env, beadID, assignee)
+	}
+
 	// The lifecycle-start emission reads the step's workflow root, so it belongs
 	// in the store the claim landed in. It routes on the MEMO alone and never
 	// probes: a step this invocation did not route is one the work store
@@ -586,4 +593,27 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 	}
 
 	return ops
+}
+
+func releaseOpenContinuationAssignmentWithGraph(graph storebinding.GraphStore, beadID, assignee string) (bool, error) {
+	bead, err := graph.Get(beadID)
+	switch {
+	case err == nil:
+	case errors.Is(err, beads.ErrNotFound):
+		return false, nil
+	default:
+		return false, err
+	}
+	if !strings.EqualFold(strings.TrimSpace(bead.Status), "open") ||
+		strings.TrimSpace(bead.Assignee) != strings.TrimSpace(assignee) {
+		return false, nil
+	}
+	empty := ""
+	if err := graph.UpdateIfMatch(beadID, bead.Revision, beads.UpdateOpts{Assignee: &empty}); err != nil {
+		if beads.IsPreconditionFailed(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }

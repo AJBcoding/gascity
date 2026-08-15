@@ -1384,6 +1384,48 @@ func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
 	return result.RowsAffected > 0, nil
 }
 
+// ReleaseOpenAssignmentIfCurrent clears an open bead's assignee only when the
+// bead is still open and still assigned to expectedAssignee.
+//
+// This is the continuation-preassignment compensation CAS. A continuation
+// sibling is not a claimed work item: it remains status=open while the hook
+// reserves it for the same session that claimed the current sibling. Releasing
+// it therefore must NOT use ReleaseIfCurrent, whose status fence targets a
+// primary in_progress claim and would silently match no rows here.
+func (s *BdStore) ReleaseOpenAssignmentIfCurrent(id, expectedAssignee string) (bool, error) {
+	if err := s.guardRelocatedClassIDs("release-open-assignment-if-current "+id, id); err != nil {
+		return false, err
+	}
+	if !s.conditionalReleaseUnsupported() {
+		released, handled, err := s.releaseOpenAssignmentIfCurrentViaBdVerb(id, expectedAssignee)
+		if handled {
+			if err != nil {
+				return false, fmt.Errorf("bd release-open-assignment-if-current: %w", err)
+			}
+			return released, nil
+		}
+		s.latchConditionalReleaseUnsupported()
+	}
+	query := "UPDATE issues SET assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'open'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
+	out, err := s.runBDTransientWriteOutput("sql", "--json", query)
+	if err != nil {
+		if isBdSQLUnsupportedInEmbeddedMode(err) {
+			return s.releaseOpenAssignmentIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee)
+		}
+		return false, fmt.Errorf("bd release-open-assignment-if-current: %w", err)
+	}
+	var result struct {
+		RowsAffected int `json:"rows_affected"`
+	}
+	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
+		return false, fmt.Errorf("bd release-open-assignment-if-current: parsing SQL result: %w", err)
+	}
+	return result.RowsAffected > 0, nil
+}
+
 func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string) (bool, error) {
 	doltDir, ok, err := s.embeddedDoltDir()
 	if err != nil {
@@ -1404,6 +1446,30 @@ func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string
 	rowsAffected, err := parseDoltRowsAffected(out)
 	if err != nil {
 		return false, fmt.Errorf("bd release-if-current embedded fallback: parsing SQL result: %w", err)
+	}
+	return rowsAffected > 0, nil
+}
+
+func (s *BdStore) releaseOpenAssignmentIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string) (bool, error) {
+	doltDir, ok, err := s.embeddedDoltDir()
+	if err != nil {
+		return false, fmt.Errorf("bd release-open-assignment-if-current embedded fallback: %w", err)
+	}
+	if !ok {
+		return false, fmt.Errorf("bd release-open-assignment-if-current embedded fallback: %w", ErrConditionalReleaseUnsupported)
+	}
+	query := "UPDATE issues SET assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = " + bdSQLStringLiteral(id) +
+		" AND status = 'open'" +
+		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
+		"; SELECT ROW_COUNT() AS rows_affected"
+	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
+	if err != nil {
+		return false, fmt.Errorf("bd release-open-assignment-if-current embedded fallback: dolt sql: %w", err)
+	}
+	rowsAffected, err := parseDoltRowsAffected(out)
+	if err != nil {
+		return false, fmt.Errorf("bd release-open-assignment-if-current embedded fallback: parsing SQL result: %w", err)
 	}
 	return rowsAffected > 0, nil
 }

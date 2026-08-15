@@ -136,6 +136,31 @@ func TestReleaseIfCurrentPrefersTheNativeVerb(t *testing.T) {
 	}
 }
 
+// TestReleaseOpenAssignmentIfCurrentPrefersTheNativeVerb pins the sibling
+// compensation CAS used by gc hook continuation preassignment. A continuation
+// sibling is open-but-assigned, not in_progress, so ReleaseIfCurrent's primary
+// claim CAS is the wrong status fence for this shape.
+func TestReleaseOpenAssignmentIfCurrentPrefersTheNativeVerb(t *testing.T) {
+	runner := &releaseVerbRunner{}
+	s := beads.NewBdStore("/city", runner.run)
+
+	released, err := s.ReleaseOpenAssignmentIfCurrent("bd-42", "worker-1")
+	if err != nil {
+		t.Fatalf("ReleaseOpenAssignmentIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseOpenAssignmentIfCurrent released = false, want true")
+	}
+	want := []string{"bd", "update", "bd-42", "--if-assignee", "worker-1", "--if-status", "open", "--assignee", ""}
+	calls := runner.releaseVerbArgv()
+	if len(calls) != 1 {
+		t.Fatalf("calls = %v, want exactly one", calls)
+	}
+	if strings.Join(calls[0], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("argv = %q\nwant  %q", calls[0], want)
+	}
+}
+
 // TestReleaseIfCurrentReadsPreconditionMissFromTheExitCode is the heart of the
 // change: the CAS verdict is a number, not a parse of bd's prose.
 func TestReleaseIfCurrentReadsPreconditionMissFromTheExitCode(t *testing.T) {
@@ -326,6 +351,35 @@ func TestReleaseIfCurrentFallsBackToSQLOnAnOldBd(t *testing.T) {
 	}
 	wantQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
 		" WHERE id = 'bd-42' AND status = 'in_progress' AND assignee = 'worker-''1'"
+	want := []string{"bd", "sql", "--json", wantQuery}
+	if strings.Join(calls[1], "\x00") != strings.Join(want, "\x00") {
+		t.Fatalf("fallback argv = %q\nwant          %q", calls[1], want)
+	}
+}
+
+func TestReleaseOpenAssignmentIfCurrentFallsBackToSQLOnAnOldBd(t *testing.T) {
+	runner := &releaseVerbRunner{}
+	runner.reply = func(args []string) ([]byte, error) {
+		if isReleaseVerb(args) {
+			return nil, errors.New("unknown flag: --if-assignee")
+		}
+		return []byte(`{"rows_affected":1,"schema_version":1}`), nil
+	}
+	s := beads.NewBdStore("/city", runner.run)
+
+	released, err := s.ReleaseOpenAssignmentIfCurrent("bd-42", "worker-'1")
+	if err != nil {
+		t.Fatalf("ReleaseOpenAssignmentIfCurrent: %v", err)
+	}
+	if !released {
+		t.Fatal("ReleaseOpenAssignmentIfCurrent released = false, want true")
+	}
+	calls := runner.releaseVerbArgv()
+	if len(calls) != 2 {
+		t.Fatalf("calls = %v, want the verb probe then the SQL fallback", calls)
+	}
+	wantQuery := "UPDATE issues SET assignee = '', updated_at = CURRENT_TIMESTAMP" +
+		" WHERE id = 'bd-42' AND status = 'open' AND assignee = 'worker-''1'"
 	want := []string{"bd", "sql", "--json", wantQuery}
 	if strings.Join(calls[1], "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("fallback argv = %q\nwant          %q", calls[1], want)
