@@ -105,12 +105,11 @@ func (h *stalledConvergenceHarness) sessionBead(t *testing.T) beads.Bead {
 
 // drainRequester is the production wiring's shape: a tracked drain with the
 // non-cancelable execution-stalled reason.
-func (h *stalledConvergenceHarness) drainRequester(t *testing.T) func(beads.Bead) error {
+func (h *stalledConvergenceHarness) drainRequester(t *testing.T) func(beads.Bead) (bool, error) {
 	t.Helper()
-	return func(sessionBead beads.Bead) error {
+	return func(sessionBead beads.Bead) (bool, error) {
 		info := sessiontest.SeedBead(t, sessionBead)
-		beginSessionDrainInfo(info, h.env.sp, h.env.dt, executionStalledDrainReason, h.env.clk, defaultDrainTimeout)
-		return nil
+		return beginSessionDrainInfo(info, h.env.sp, h.env.dt, executionStalledDrainReason, h.env.clk, defaultDrainTimeout), nil
 	}
 }
 
@@ -288,7 +287,7 @@ func TestExecutionStalledDrainDoesNotStrandAMidDrainWake(t *testing.T) {
 		stores[j] = h.env.store
 	}
 	nudgeStalledPoolExecution(h.env.sp, h.env.cfg, h.env.store, sessions, work, stores, refs, false,
-		h.env.clk.Now(), h.env.rec, func(beads.Bead) error { drains++; return nil }, &h.env.stdout)
+		h.env.clk.Now(), h.env.rec, func(beads.Bead) (bool, error) { drains++; return true, nil }, &h.env.stdout)
 
 	if got := strings.Count(h.env.stdout.String(), "execution-claim-nudge: nudged"); got != before {
 		t.Fatalf("nudges delivered to a now-active session: %d -> %d", before, got)

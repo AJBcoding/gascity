@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -29,7 +30,10 @@ type executionBackstopFixture struct {
 	session  beads.Bead
 	work     beads.Bead
 	rec      *events.Fake
+	drainErr []error
+	attempts []string
 	drained  []string
+	draining bool
 	now      time.Time
 	stdout   bytes.Buffer
 	sessName string
@@ -108,9 +112,20 @@ func (f *executionBackstopFixture) tick(t *testing.T) {
 		stores[i] = f.store
 	}
 	nudgeStalledPoolExecution(f.sp, f.cfg, f.store, sessions, work, stores, refs, false, f.now, f.rec,
-		func(sessionBead beads.Bead) error {
-			f.drained = append(f.drained, strings.TrimSpace(sessionBead.Metadata["session_name"]))
-			return nil
+		func(sessionBead beads.Bead) (bool, error) {
+			sessName := strings.TrimSpace(sessionBead.Metadata["session_name"])
+			f.attempts = append(f.attempts, sessName)
+			if len(f.drainErr) > 0 {
+				err := f.drainErr[0]
+				f.drainErr = f.drainErr[1:]
+				return false, err
+			}
+			if f.draining {
+				return false, nil
+			}
+			f.draining = true
+			f.drained = append(f.drained, sessName)
+			return true, nil
 		}, &f.stdout)
 }
 
@@ -132,6 +147,43 @@ func (f *executionBackstopFixture) sessionMeta(t *testing.T, key string) string 
 
 func (f *executionBackstopFixture) nudgeCount() int {
 	return strings.Count(f.stdout.String(), "execution-claim-nudge: nudged")
+}
+
+func (f *executionBackstopFixture) stalledEventCount() int {
+	count := 0
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			count++
+		}
+	}
+	return count
+}
+
+func (f *executionBackstopFixture) restart() *executionBackstopFixture {
+	return &executionBackstopFixture{
+		cfg:      f.cfg,
+		store:    f.store,
+		sp:       f.sp,
+		session:  f.session,
+		work:     f.work,
+		rec:      f.rec,
+		now:      f.now,
+		sessName: f.sessName,
+	}
+}
+
+func (f *executionBackstopFixture) exhaustAttempts(t *testing.T) {
+	t.Helper()
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
+		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
+		f.idleFor(t, 10*time.Minute)
+		f.tick(t)
+	}
+	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
+		t.Fatalf("delivered nudges = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
 }
 
 // TestExecutionBackstopNudgesAnIdleClaimHolderExactlyOnce is the core row: the
@@ -254,16 +306,7 @@ func TestExecutionBackstopDoesNotReplayAfterAControllerRestart(t *testing.T) {
 // Both happen exactly once, however many ticks follow.
 func TestExecutionBackstopEscalatesOnceWhenAttemptsAreExhausted(t *testing.T) {
 	f := newExecutionBackstopFixture(t)
-	f.idleFor(t, 10*time.Minute)
-	f.tick(t)
-	for i := 0; i < idleClaimNudgeMaxAttempts; i++ {
-		f.now = f.now.Add(idleClaimNudgeGrace + idleClaimNudgeBackoff)
-		f.idleFor(t, 10*time.Minute)
-		f.tick(t)
-	}
-	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
-		t.Fatalf("delivered nudges = %d, want the attempt cap %d; stdout=%s", got, idleClaimNudgeMaxAttempts, f.stdout.String())
-	}
+	f.exhaustAttempts(t)
 
 	for i := 0; i < 3; i++ {
 		f.now = f.now.Add(idleClaimNudgeBackoff)
@@ -288,6 +331,115 @@ func TestExecutionBackstopEscalatesOnceWhenAttemptsAreExhausted(t *testing.T) {
 	}
 	if got := f.nudgeCount(); got != idleClaimNudgeMaxAttempts {
 		t.Fatalf("delivered nudges after exhaustion = %d, want no further delivery", got)
+	}
+}
+
+// TestExecutionBackstopRetriesDrainAfterTransientFailure pins the convergence
+// step, not just the notification. A failed tracked-drain request must remain
+// retryable across a later tick, while the stalled event stays one-shot and a
+// successful drain is not requested again.
+func TestExecutionBackstopRetriesDrainAfterTransientFailure(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.exhaustAttempts(t)
+	f.drainErr = []error{errors.New("temporary drain failure")}
+
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.attempts) != 1 {
+		t.Fatalf("drain attempts after transient failure = %v, want one attempted drain", f.attempts)
+	}
+	if len(f.drained) != 0 {
+		t.Fatalf("successful drains after transient failure = %v, want none", f.drained)
+	}
+
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.attempts) != 2 {
+		t.Fatalf("drain attempts after retry = %v, want failed attempt plus retry", f.attempts)
+	}
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("successful drains after retry = %v, want exactly one for %s", f.drained, f.sessName)
+	}
+
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("successful drains after accepted drain = %v, want no duplicate accepted drain for %s", f.drained, f.sessName)
+	}
+
+	var stalled []events.Event
+	for _, e := range f.rec.Events {
+		if e.Type == events.ExecutionStepStalled {
+			stalled = append(stalled, e)
+		}
+	}
+	if len(stalled) != 1 {
+		t.Fatalf("execution.step_stalled events = %d, want exactly 1", len(stalled))
+	}
+}
+
+// TestExecutionBackstopRetriesDrainAfterTransientFailureAcrossRestart proves
+// the stalled-event latch does not also latch the convergence action. The first
+// controller instance sees a transient drain failure; a fresh instance reading
+// only the persisted session bead must retry the drain while keeping the event
+// one-shot.
+func TestExecutionBackstopRetriesDrainAfterTransientFailureAcrossRestart(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.exhaustAttempts(t)
+	f.drainErr = []error{errors.New("temporary drain failure")}
+
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 0 {
+		t.Fatalf("successful drains before restart = %v, want none after transient failure", f.drained)
+	}
+	if got := f.stalledEventCount(); got != 1 {
+		t.Fatalf("stalled events before restart = %d, want 1", got)
+	}
+
+	restarted := f.restart()
+	restarted.now = restarted.now.Add(idleClaimNudgeBackoff)
+	restarted.idleFor(t, 10*time.Minute)
+	restarted.tick(t)
+	if len(restarted.drained) != 1 || restarted.drained[0] != restarted.sessName {
+		t.Fatalf("successful drains after restart = %v, want exactly one retry for %s", restarted.drained, restarted.sessName)
+	}
+	if got := restarted.stalledEventCount(); got != 1 {
+		t.Fatalf("stalled events after restart = %d, want event to remain one-shot", got)
+	}
+}
+
+// TestExecutionBackstopReissuesAcceptedDrainLostAcrossRestart protects the
+// production drain tracker seam: the tracked drain is in-memory, so a controller
+// restart after requestDrain succeeds but before the drain advances must not let
+// durable metadata suppress the only convergence action.
+func TestExecutionBackstopReissuesAcceptedDrainLostAcrossRestart(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	f.exhaustAttempts(t)
+
+	f.now = f.now.Add(idleClaimNudgeBackoff)
+	f.idleFor(t, 10*time.Minute)
+	f.tick(t)
+	if len(f.drained) != 1 || f.drained[0] != f.sessName {
+		t.Fatalf("successful drains before restart = %v, want exactly one for %s", f.drained, f.sessName)
+	}
+	if got := f.stalledEventCount(); got != 1 {
+		t.Fatalf("stalled events before restart = %d, want 1", got)
+	}
+
+	restarted := f.restart()
+	restarted.now = restarted.now.Add(idleClaimNudgeBackoff)
+	restarted.idleFor(t, 10*time.Minute)
+	restarted.tick(t)
+	if len(restarted.drained) != 1 || restarted.drained[0] != restarted.sessName {
+		t.Fatalf("successful drains after restart = %v, want the lost in-memory drain reissued for %s", restarted.drained, restarted.sessName)
+	}
+	if got := restarted.stalledEventCount(); got != 1 {
+		t.Fatalf("stalled events after restart = %d, want event to remain one-shot", got)
 	}
 }
 
