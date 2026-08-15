@@ -101,10 +101,12 @@ func scanWithRoot(root, id string) ([]runtime.LiveRuntime, error) {
 			city = env["GC_CITY"]
 		}
 		out = append(out, runtime.LiveRuntime{
-			SessionID: sessionID,
-			City:      city,
-			Epoch:     epoch,
-			PID:       pid,
+			SessionID:     sessionID,
+			City:          city,
+			GCHome:        env["GC_HOME"],
+			InstanceToken: env["GC_INSTANCE_TOKEN"],
+			Epoch:         epoch,
+			PID:           pid,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {

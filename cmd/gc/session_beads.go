@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -3020,12 +3021,17 @@ func sweepProcessTableOrphans(
 	if !ok {
 		return 0
 	}
+	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
+	if cityPath == "" {
+		fmt.Fprintln(stderr, "session reconciler: skipping process-table orphan sweep: missing city path; cannot attribute runtime ownership") //nolint:errcheck
+		return 0
+	}
+	gcHome := normalizePathForCompare(strings.TrimSpace(os.Getenv("GC_HOME")))
 	found, err := scanner.FindRuntimesBySessionID("")
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %v\n", err) //nolint:errcheck
 	}
 
-	cityPath = normalizePathForCompare(strings.TrimSpace(cityPath))
 	reaped := 0
 	for _, live := range found {
 		live.SessionID = strings.TrimSpace(live.SessionID)
@@ -3038,15 +3044,20 @@ func sweepProcessTableOrphans(
 		// provider, so a sibling city's live session is invisible to both —
 		// its bead lookup misses and IsTracked is false. Reaping on that basis
 		// SIGTERMs another city's healthy session. Only consider runtimes
-		// positively attributed to this city. When cityPath is unknown we
-		// cannot attribute safely, so fall through to the existing checks.
-		if cityPath != "" && normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
+		// positively attributed to this city. If this supervisor has no city
+		// identity, fail closed before scanning.
+		if normalizePathForCompare(strings.TrimSpace(live.City)) != cityPath {
+			continue
+		}
+		if gcHome != "" && normalizePathForCompare(strings.TrimSpace(live.GCHome)) != gcHome {
 			continue
 		}
 		bead, err := store.Get(live.SessionID)
 		switch {
 		case err == nil && bead.Status != "closed":
 			continue // bead still open — leave the runtime alone
+		case err == nil && !processTableRuntimeMatchesClosedBead(live, bead):
+			continue // closed bead identity is ambiguous or belongs to another incarnation
 		case err != nil && !errors.Is(err, beads.ErrNotFound):
 			// transient/unreadable store error — do not destroy a live runtime on uncertainty
 			fmt.Fprintf(stderr, "session reconciler: looking up process-table orphan session bead %s pid=%d: %v\n", live.SessionID, live.PID, err) //nolint:errcheck
@@ -3061,6 +3072,21 @@ func sweepProcessTableOrphans(
 		reaped++
 	}
 	return reaped
+}
+
+func processTableRuntimeMatchesClosedBead(live runtime.LiveRuntime, bead beads.Bead) bool {
+	if token := strings.TrimSpace(bead.Metadata["instance_token"]); token != "" {
+		return strings.TrimSpace(live.InstanceToken) == token
+	}
+	generation := strings.TrimSpace(bead.Metadata["generation"])
+	if generation == "" || live.Epoch <= 0 {
+		return false
+	}
+	parsed, err := strconv.Atoi(generation)
+	if err != nil || parsed <= 0 {
+		return false
+	}
+	return live.Epoch == parsed
 }
 
 func closeSessionBeadIfRuntimeStoppedAndUnassigned(
