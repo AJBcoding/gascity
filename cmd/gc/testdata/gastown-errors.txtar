@@ -52,10 +52,10 @@ stderr 'missing title'
 
 # --- Mail errors ---
 
-! exec gc mail send
+! exec gc mail send --from human
 stderr 'usage:'
 
-! exec gc mail send nobody 'hello'
+! exec gc mail send --from human nobody 'hello'
 stderr 'unknown recipient'
 
 ! exec gc mail read

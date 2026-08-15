@@ -1003,3 +1003,51 @@ func TestCmdHandoffRemoteDefaultSenderFallsBackToGCAliasWhenSessionIDMissing(t *
 		t.Fatalf("message Assignee = %q, want recipient", msg.Assignee)
 	}
 }
+
+func TestCmdHandoffRemoteAllowsExplicitHumanWhenIdentityEnvAbsent(t *testing.T) {
+	cityPath := newMailAuthorityCity(t)
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--from", "human", "--target", "recipient", "Context refresh", "Check current state"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("gc handoff --from human failed: %v; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
+	}
+
+	msgs := mailAuthorityMessages(t, cityPath)
+	if len(msgs) != 1 {
+		t.Fatalf("message count = %d, want 1; msgs=%#v", len(msgs), msgs)
+	}
+	if msgs[0].From != "human" {
+		t.Fatalf("message From = %q, want human", msgs[0].From)
+	}
+	if msgs[0].Assignee != "recipient" {
+		t.Fatalf("message Assignee = %q, want recipient", msgs[0].Assignee)
+	}
+}
+
+func TestCmdHandoffRemoteRejectsExplicitHumanFromAgentSession(t *testing.T) {
+	cityPath := newMailAuthorityCity(t)
+	t.Setenv("GC_AGENT", "gascity/bob")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--from", "human", "--target", "recipient", "Context refresh"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("gc handoff --from human from agent = nil error, want refusal; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+
+	if !strings.Contains(stderr.String(), "refusing --from human") {
+		t.Fatalf("stderr = %q, want forged-human refusal", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "gascity/bob") {
+		t.Fatalf("stderr = %q, want ambient agent identity", stderr.String())
+	}
+	for _, msg := range mailAuthorityMessages(t, cityPath) {
+		t.Fatalf("agent-forged operator handoff was delivered: From=%q", msg.From)
+	}
+}

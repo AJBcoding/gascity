@@ -18,7 +18,7 @@ stderr 'not in session context'
 
 # --- 2. Remote handoff to existing on-demand named agent ---
 
-exec gc handoff --target mayor 'Context refresh' 'Please review inbox for latest status'
+exec gc handoff --from human --target mayor 'Context refresh' 'Please review inbox for latest status'
 stdout 'Handoff.*sent mail.*to mayor'
 stdout 'named session; kill skipped'
 
@@ -29,7 +29,7 @@ stdout 'Context refresh'
 
 # --- 4. Remote handoff to nonexistent agent ---
 
-! exec gc handoff --target nonexistent 'hello'
+! exec gc handoff --from human --target nonexistent 'hello'
 stderr 'not found'
 
 # --- 5. Handoff requires at least one arg ---

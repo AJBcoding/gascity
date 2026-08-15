@@ -26,6 +26,7 @@ func newHandoffCmd(stdout, stderr io.Writer) *cobra.Command {
 	var target string
 	var auto bool
 	var hookFormat string
+	var from string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "handoff [subject] [message]",
@@ -67,7 +68,9 @@ For controller-restartable targets, equivalent to:
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
-or ID. Subject is required unless --auto is set.`,
+or ID. Remote handoff sender defaults to the current session identity; an
+operator process with no session identity must claim itself explicitly with
+--from human. Subject is required unless --auto is set.`,
 		Args: func(cmd *cobra.Command, args []string) error {
 			if auto {
 				return cobra.MaximumNArgs(2)(cmd, args)
@@ -79,7 +82,7 @@ or ID. Subject is required unless --auto is set.`,
 			if jsonOut {
 				out = io.Discard
 			}
-			if cmdHandoff(args, target, auto, hookFormat, out, stderr) != 0 {
+			if cmdHandoffWithSender(args, target, auto, hookFormat, from, out, stderr) != 0 {
 				return errExit
 			}
 			if jsonOut {
@@ -98,6 +101,7 @@ or ID. Subject is required unless --auto is set.`,
 	cmd.Flags().StringVar(&target, "target", "", "Remote session alias or ID to handoff (kills only controller-restartable sessions)")
 	cmd.Flags().BoolVar(&auto, "auto", false, "Send handoff mail without requesting restart (for PreCompact hooks)")
 	cmd.Flags().StringVar(&hookFormat, "hook-format", "", "format hook output for a provider")
+	cmd.Flags().StringVar(&from, "from", "", "sender identity for remote handoff mail; use --from human from an operator shell")
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSON summary")
 	return cmd
 }
@@ -132,12 +136,20 @@ func handoffJSONSubject(args []string, auto bool) string {
 }
 
 func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdout, stderr io.Writer) int {
+	return cmdHandoffWithSender(args, target, auto, hookFormat, "", stdout, stderr)
+}
+
+func cmdHandoffWithSender(args []string, target string, auto bool, hookFormat string, from string, stdout, stderr io.Writer) int {
 	if target != "" {
 		if auto {
 			fmt.Fprintln(stderr, "gc handoff: --auto cannot be used with --target") //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		return cmdHandoffRemote(args, target, stdout, stderr)
+		return cmdHandoffRemoteWithSender(args, target, from, stdout, stderr)
+	}
+	if from != "" {
+		fmt.Fprintln(stderr, "gc handoff: --from can only be used with --target") //nolint:errcheck // best-effort stderr
+		return 1
 	}
 
 	current, err := currentSessionRuntimeTarget()
@@ -191,6 +203,10 @@ func cmdHandoff(args []string, target string, auto bool, hookFormat string, stdo
 // cmdHandoffRemote sends handoff mail to a remote session and kills its runtime.
 // Returns immediately (non-blocking). The reconciler restarts the target.
 func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) int {
+	return cmdHandoffRemoteWithSender(args, target, "", stdout, stderr)
+}
+
+func cmdHandoffRemoteWithSender(args []string, target string, from string, stdout, stderr io.Writer) int {
 	targetInfo, err := resolveSessionRuntimeTarget(target, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc handoff: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -211,9 +227,25 @@ func cmdHandoffRemote(args []string, target string, stdout, stderr io.Writer) in
 	// kill/observe/identity, resolveSessionID, beadmail's session addressing) to the
 	// session coordination-class store; identity today, so byte-identical.
 	sessStore := cliSessionStore(store, cfg, cityPath)
-	sender, ok := resolveDefaultMailSenderForCommand(cityPath, cfg, sessStore, stderr, "gc handoff")
-	if !ok {
-		return 1
+	sender := from
+	switch {
+	case sender == "":
+		var ok bool
+		sender, ok = resolveDefaultMailSenderForCommand(cityPath, cfg, sessStore, stderr, "gc handoff")
+		if !ok {
+			return 1
+		}
+	case isOperatorMailSenderClaim(sender):
+		if rejectAgentClaimingOperatorIdentity(stderr, "gc handoff") {
+			return 1
+		}
+		sender = "human"
+	default:
+		sender, err = resolveMailIdentityWithConfig(cityPath, cfg, sessStore, sender)
+		if err != nil {
+			fmt.Fprintf(stderr, "gc handoff: invalid sender %q: %v\n", sender, err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 
 	sp, err := newSessionProvider()

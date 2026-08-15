@@ -1931,7 +1931,9 @@ For controller-restartable targets, equivalent to:
 
 Self-handoff requires session context (GC_ALIAS or GC_SESSION_ID, plus
 GC_SESSION_NAME and city context env). Remote handoff accepts a session alias
-or ID. Subject is required unless --auto is set.
+or ID. Remote handoff sender defaults to the current session identity; an
+operator process with no session identity must claim itself explicitly with
+--from human. Subject is required unless --auto is set.
 
 ```
 gc handoff [subject] [message] [flags]
@@ -1940,6 +1942,7 @@ gc handoff [subject] [message] [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--auto` | bool |  | Send handoff mail without requesting restart (for PreCompact hooks) |
+| `--from` | string |  | sender identity for remote handoff mail; use --from human from an operator shell |
 | `--hook-format` | string |  | format hook output for a provider |
 | `--json` | bool |  | emit JSON summary |
 | `--target` | string |  | Remote session alias or ID to handoff (kills only controller-restartable sessions) |
