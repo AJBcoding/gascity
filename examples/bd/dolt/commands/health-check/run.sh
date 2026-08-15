@@ -17,13 +17,29 @@ json_field() {
     printf '%s\n' "$report" | jq -r "if $field == null then \"\" else $field end" 2>/dev/null || true
     return
   fi
-  key=$(printf '%s' "$field" | sed 's/^\.server\.//')
-  printf '%s\n' "$report" \
-    | sed -n "/\"server\"[[:space:]]*:/,/}/p" \
-    | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([^,}]*\\).*/\\1/p" \
-    | head -1 \
-    | tr -d ' "'
+  case "$field" in
+    .server.*)
+      key=$(printf '%s' "$field" | sed 's/^\.server\.//')
+      printf '%s\n' "$report" \
+        | sed -n "/\"server\"[[:space:]]*:/,/}/p" \
+        | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([^,}]*\\).*/\\1/p" \
+        | head -1 \
+        | tr -d ' "'
+      ;;
+    .*)
+      key=$(printf '%s' "$field" | sed 's/^\.//')
+      printf '%s\n' "$report" \
+        | sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\\([^,}]*\\).*/\\1/p" \
+        | head -1 \
+        | sed 's/^[[:space:]]*//;s/[[:space:]]*$//;s/^"//;s/"$//'
+      ;;
+  esac
 }
+
+applicable=$(json_field ".applicable")
+case "$applicable" in
+  false) exit 0 ;;
+esac
 
 reachable=$(json_field ".server.reachable")
 running=$(json_field ".server.running")

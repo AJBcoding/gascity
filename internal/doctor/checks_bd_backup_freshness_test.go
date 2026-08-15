@@ -276,6 +276,23 @@ func TestBdBackupFreshnessCheck(t *testing.T) {
 		}
 	})
 
+	t.Run("non-dolt backend skips stale legacy backup state", func(t *testing.T) {
+		clearInheritedBeadsEnv(t)
+		t.Setenv("GC_BEADS_BACKEND", "")
+		cityPath := t.TempDir()
+		scope := filepath.Join(cityPath, "rig")
+		if err := os.MkdirAll(scope, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeDoctorBackendMetadata(t, scope, "mysql")
+		writeBackupStateForFreshness(t, scope, now.Add(-72*time.Hour).Format(time.RFC3339Nano))
+
+		r := NewBdBackupFreshnessCheckForScopeRoots(cityPath, []string{scope}, maxAge, clock).Run(nil)
+		if r.Status != StatusOK {
+			t.Fatalf("mysql scope with stale legacy backup_state.json: want StatusOK, got %v (%s)", r.Status, r.Message)
+		}
+	})
+
 	t.Run("Name and CanFix are stable", func(t *testing.T) {
 		c := NewBdBackupFreshnessCheckForScopeRoots("", nil, maxAge, clock)
 		if c.Name() != "bd-backup-freshness" {

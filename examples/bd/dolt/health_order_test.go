@@ -56,7 +56,14 @@ func TestDoltHealthCheckFailsUnreachableReportWithUsefulMessage(t *testing.T) {
 func TestDoltHealthCheckPassesReachableReport(t *testing.T) {
 	root := repoRoot(t)
 	script := filepath.Join(root, "commands", "health-check", "run.sh")
-	input := `{
+	tests := []struct {
+		name       string
+		input      string
+		wantOutput string
+	}{
+		{
+			name: "reachable",
+			input: `{
   "server": {
     "running": true,
     "reachable": true,
@@ -64,12 +71,36 @@ func TestDoltHealthCheckPassesReachableReport(t *testing.T) {
     "port": 3311,
     "latency_ms": 12
   }
-}`
+}`,
+		},
+		{
+			name: "not-applicable",
+			input: `{
+  "applicable": false,
+  "reason": "city beads backend is mysql; no managed Dolt runtime to probe",
+  "server": {
+    "running": false,
+    "reachable": false,
+    "pid": 0,
+    "port": 0,
+    "latency_ms": 0
+  }
+}`,
+			wantOutput: `"applicable": false`,
+		},
+	}
 
-	cmd := exec.Command("sh", script)
-	cmd.Stdin = strings.NewReader(input)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("health-check failed: %v\n%s", err, out)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := exec.Command("sh", script)
+			cmd.Stdin = strings.NewReader(tt.input)
+			out, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("health-check failed: %v\n%s", err, out)
+			}
+			if tt.wantOutput != "" && !strings.Contains(string(out), tt.wantOutput) {
+				t.Fatalf("health-check output missing %q:\n%s", tt.wantOutput, out)
+			}
+		})
 	}
 }

@@ -291,3 +291,29 @@ func TestDoltBackupCheck_ExternalEndpoint_NoWarn(t *testing.T) {
 		t.Errorf("external endpoint must not emit a localhost fix hint: %s", r.FixHint)
 	}
 }
+
+func TestDoltBackupCheck_NonDoltBackendNotRequired(t *testing.T) {
+	clearInheritedBeadsEnv(t)
+	t.Setenv("GC_BEADS_BACKEND", "")
+	cityPath := t.TempDir()
+	doltDataDir := filepath.Join(cityPath, ".beads", "dolt")
+	rigPath := filepath.Join(cityPath, "rig")
+	if err := os.MkdirAll(rigPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeDoctorBackendMetadata(t, rigPath, "mysql")
+
+	rig := config.Rig{Name: "mysqlrig", Path: rigPath}
+	c := NewDoltBackupCheck(cityPath, rig, doltDataDir)
+	r := c.Run(&CheckContext{CityPath: cityPath})
+
+	if r.Status != StatusOK {
+		t.Fatalf("status = %d, want StatusOK for non-Dolt backend; msg=%q", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "not required") || !strings.Contains(r.Message, "mysql") {
+		t.Fatalf("message = %q, want not-required mysql message", r.Message)
+	}
+	if r.FixHint != "" {
+		t.Fatalf("non-Dolt backend must not emit a Dolt backup fix hint: %s", r.FixHint)
+	}
+}

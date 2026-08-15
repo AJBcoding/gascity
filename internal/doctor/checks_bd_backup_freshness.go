@@ -135,6 +135,11 @@ func (c *BdBackupFreshnessCheck) freshnessScanTargets() []bdBackupFreshnessTarge
 			continue
 		}
 		seen[scopeRoot] = struct{}{}
+		if c.cityPath != "" {
+			if _, skip := scopeSkipsDoltEndpoint(c.cityPath, scopeRoot); skip {
+				continue
+			}
+		}
 		targets = append(targets, bdBackupFreshnessTarget{
 			Label:    bdBackupScopeLabel(c.cityPath, scopeRoot),
 			BeadsDir: filepath.Join(scopeRoot, ".beads"),
