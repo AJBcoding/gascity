@@ -135,14 +135,18 @@ type hookClaimOps struct {
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
-	// ResolveWorkBranch returns the git branch of the worker's worktree (dir),
-	// stamped onto the bead as gc.work_branch at claim time. Empty result (no
-	// repo / detached HEAD) omits the branch key — the session back-reference is
-	// still stamped. The stamp is PROVISIONAL (the work does not exist yet, so
-	// this is the best-known value, useful for salvage if the worker dies): the
-	// close gate resolves the truth at close time and emits a stale-stamp
-	// advisory when the work landed on a different branch (ADR-0009 Defect C,
-	// work_record_gate.go).
+	// ResolveWorkBranch returns the git branch of the directory it is given,
+	// stamped onto the bead as gc.work_branch at claim time. Which directory
+	// that is belongs to hookClaimWorkBranch: the bead's own recorded worktree
+	// (gc.work_dir / bare work_dir) when one exists, else the claimer's dir.
+	// Empty result (no repo / detached HEAD) omits the branch key — the session
+	// back-reference is still stamped. A claimer-dir stamp is PROVISIONAL (the
+	// work does not exist yet, so this is the best-known value, useful for
+	// salvage if the worker dies); once the bead records its worktree, every
+	// hook tick re-resolves from it, so the stamp converges to the branch the
+	// work is actually on (gas-l430). The close gate still resolves final truth
+	// at close time and emits a stale-stamp advisory when the work landed on a
+	// different branch (ADR-0009 Defect C, work_record_gate.go).
 	ResolveWorkBranch hookResolveWorkBranchFunc
 	// StampWorkMeta writes the claim-time execution-identity metadata patch
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
@@ -1092,8 +1096,8 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 }
 
 // hookClaimIdentityPatch builds the compare-and-skipped claim-time metadata patch.
-// It carries gc.work_branch when the worktree resolves a branch that differs from
-// the bead's, and the session back-reference gc.session_id / gc.session_name when
+// It carries gc.work_branch when hookClaimWorkBranch resolves a branch that differs
+// from the bead's, and the session back-reference gc.session_id / gc.session_name when
 // this is a session-run claim (GC_SESSION_ID present) of a non-control bead and the
 // values differ. Session identity is stamped even when the branch is empty — a
 // session with no worktree still needs its back-reference — but never on control
@@ -1103,7 +1107,7 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 // so the caller issues no write.
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
-	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
+	if branch := hookClaimWorkBranch(bead, ops, dir); branch != "" &&
 		strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey]) != branch {
 		patch[beadmeta.WorkBranchMetadataKey] = branch
 	}
@@ -1118,6 +1122,39 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 		}
 	}
 	return patch
+}
+
+// hookClaimWorkBranch resolves the branch to stamp as gc.work_branch: from the
+// bead's OWN recorded worktree when it names one (canonical gc.work_dir first,
+// then the pack-namespace bare work_dir the per-bead worktree helper stamps —
+// the same two-key read the worktree reaper's borrow-veto scan trusts), and
+// from the claimer's dir only when the bead records no worktree at all.
+//
+// Per-bead worktrees are created AFTER the claim, so at first claim the
+// claimer's dir is the previous context's checkout: stamping its branch
+// recorded another bead's branch onto in-flight work, and a polecat that died
+// between first commit and the done-sequence left a completed commit the
+// ledger could not name (gas-l430; gas-2jc was the realized loss). Resolving
+// from the bead's recorded worktree instead turns every hook tick — adoption
+// re-serves and formula-continuation claims — into a truth heartbeat: the
+// stamp converges to the real branch as soon as any tick fires after the
+// worktree exists, so an ABANDONED bead still names its branch.
+//
+// A recorded worktree that no longer resolves (reaped dir, detached HEAD)
+// returns "" rather than falling back to the claimer's dir: the last honest
+// stamp may be all that still names the work, and overwriting it with claimer
+// noise would re-point the bead at the wrong tree exactly when the worktree
+// is gone. The claimer-dir fallback is kept for beads with no recorded
+// worktree because in agent-home workflows (no per-bead worktrees) the claim
+// dir IS the work dir, and that provisional stamp is the documented salvage
+// value (ADR-0009; the close gate resolves final truth at close).
+func hookClaimWorkBranch(bead beads.Bead, ops hookClaimOps, dir string) string {
+	for _, key := range [...]string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+		if recorded := strings.TrimSpace(bead.Metadata[key]); recorded != "" {
+			return strings.TrimSpace(ops.ResolveWorkBranch(recorded))
+		}
+	}
+	return strings.TrimSpace(ops.ResolveWorkBranch(dir))
 }
 
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {

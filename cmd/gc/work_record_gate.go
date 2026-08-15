@@ -24,12 +24,13 @@ import (
 // recurring "drain-without-commit" close (a close that leaves no artifact at
 // all) into a machine-checkable violation.
 //
-// gc.work_branch is stamped at claim time (cmd_hook_claim.go) — before the work
-// exists — so it is a PROVISIONAL handle, not a promise. A shipped commit that
-// landed on a different branch than the stamp yields a non-blocking stale-stamp
-// advisory naming the actual landing branch (Defect C); only undelivered work
-// (no remote ref contains the commit) is a violation. Delivery is the guarantee;
-// the branch is the pointer.
+// gc.work_branch is stamped by hook claims/adoptions (cmd_hook_claim.go). The
+// first stamp can happen before the work exists, and later stamps can only be as
+// current as the bead's recorded worktree, so it is a PROVISIONAL handle, not a
+// promise. A shipped commit that landed on a different branch than the stamp
+// yields a non-blocking stale-stamp advisory naming the actual landing branch
+// (Defect C); only undelivered work (no remote ref contains the commit) is a
+// violation. Delivery is the guarantee; the branch is the pointer.
 //
 // The gate ships warn-only by default — violations are logged but the close
 // proceeds — so existing open beads migrate without breakage. Set
@@ -138,16 +139,16 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 // in existence.
 //
 // The containment resolver exists for the converse gap (ADR-0009 Defect C):
-// gc.work_branch is stamped at claim time, before the work exists, with whatever
-// branch the claiming worktree was on. When the work lands elsewhere the stamp is
-// stale, and treating the resulting unreachability as a violation blocks honest
-// delivered closes — under GC_WORK_RECORD_ENFORCE, citywide. Delivery is the
-// guarantee this gate protects; the branch handle is the record's pointer to the
-// work. So: a commit unreachable on its stamped branch but present on a
-// remote-tracking ref yields a precise stale-stamp ADVISORY naming the branch the
-// work actually landed on (so the record can be corrected), not a violation —
-// while a commit on no remote ref remains a blocking violation regardless of the
-// stamp.
+// gc.work_branch is a best-known hook stamp. It may still name the initial
+// claim branch, a stale recorded worktree branch, or a branch that diverged
+// before delivery. When the work lands elsewhere the stamp is stale, and
+// treating the resulting unreachability as a violation blocks honest delivered
+// closes — under GC_WORK_RECORD_ENFORCE, citywide. Delivery is the guarantee
+// this gate protects; the branch handle is the record's pointer to the work. So:
+// a commit unreachable on its stamped branch but present on a remote-tracking
+// ref yields a precise stale-stamp ADVISORY naming the branch the work actually
+// landed on (so the record can be corrected), not a violation — while a commit
+// on no remote ref remains a blocking violation regardless of the stamp.
 func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool, commitOnRemote func(commit string) bool, remoteBranchesContaining func(commit string) []string) (violations, advisories []string) {
 	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
 	if outcome == "" {

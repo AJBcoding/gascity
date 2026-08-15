@@ -820,6 +820,194 @@ func TestDoHookClaimSkipsStampWhenBranchUnchanged(t *testing.T) {
 	}
 }
 
+// TestDoHookClaimStampsBranchFromRecordedWorkDir covers the gas-l430 stranding
+// class: once a bead records its own worktree (gc.work_dir), the branch stamp
+// must be resolved from THAT directory, not from wherever the claim command
+// happens to run. Per-bead worktrees are created after the claim, so the
+// claimer's dir is the previous context's branch — stamping it wrote another
+// bead's branch onto in-flight work (gas-2jc was the realized loss).
+func TestDoHookClaimStampsBranchFromRecordedWorkDir(t *testing.T) {
+	meta := map[string]string{"gc.routed_to": "worker", "gc.work_dir": "/beads/hw-recdir/worktree"}
+	var resolvedDirs []string
+	var stampedBranch string
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-recdir","status":"open","metadata":{"gc.routed_to":"worker","gc.work_dir":"/beads/hw-recdir/worktree"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: meta}, true, nil
+		},
+		ResolveWorkBranch: func(dir string) string {
+			resolvedDirs = append(resolvedDirs, dir)
+			if dir == "/beads/hw-recdir/worktree" {
+				return "polecat/hw-recdir"
+			}
+			return "session-home-noise"
+		},
+		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, patch map[string]string) error {
+			stampedBranch = patch["gc.work_branch"]
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim(recorded work_dir) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stampedBranch != "polecat/hw-recdir" {
+		t.Fatalf("stamped branch = %q, want polecat/hw-recdir (the recorded worktree's branch, not the claimer's)", stampedBranch)
+	}
+	for _, dir := range resolvedDirs {
+		if dir == "/tmp/work" {
+			t.Fatalf("branch was resolved from the claim dir %q despite a recorded work_dir; resolutions: %v", dir, resolvedDirs)
+		}
+	}
+}
+
+// TestDoHookClaimStampsBranchFromLegacyWorkDir pins the pack-namespace
+// fallback: the per-bead worktree helper stamps the bare work_dir key, and the
+// branch resolution must honor it the same way the worktree reaper's
+// borrow-veto scan does.
+func TestDoHookClaimStampsBranchFromLegacyWorkDir(t *testing.T) {
+	meta := map[string]string{"gc.routed_to": "worker", "work_dir": "/beads/hw-legdir/worktree"}
+	var stampedBranch string
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-legdir","status":"open","metadata":{"gc.routed_to":"worker","work_dir":"/beads/hw-legdir/worktree"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: meta}, true, nil
+		},
+		ResolveWorkBranch: func(dir string) string {
+			if dir == "/beads/hw-legdir/worktree" {
+				return "polecat/hw-legdir"
+			}
+			return "session-home-noise"
+		},
+		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, patch map[string]string) error {
+			stampedBranch = patch["gc.work_branch"]
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim(legacy work_dir) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stampedBranch != "polecat/hw-legdir" {
+		t.Fatalf("stamped branch = %q, want polecat/hw-legdir (resolved from the bare work_dir key)", stampedBranch)
+	}
+}
+
+// TestDoHookClaimPrefersCanonicalWorkDirOverLegacy pins the precedence order:
+// when both keys are present, the canonical gc.work_dir wins, matching the
+// reaper's [WorkDirMetadataKey, LegacyWorkDirMetadataKey] read order.
+func TestDoHookClaimPrefersCanonicalWorkDirOverLegacy(t *testing.T) {
+	meta := map[string]string{
+		"gc.routed_to": "worker",
+		"gc.work_dir":  "/beads/hw-both/canonical",
+		"work_dir":     "/beads/hw-both/legacy",
+	}
+	var stampedBranch string
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-both","status":"open","metadata":{"gc.routed_to":"worker","gc.work_dir":"/beads/hw-both/canonical","work_dir":"/beads/hw-both/legacy"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: meta}, true, nil
+		},
+		ResolveWorkBranch: func(dir string) string {
+			switch dir {
+			case "/beads/hw-both/canonical":
+				return "polecat/hw-canonical"
+			case "/beads/hw-both/legacy":
+				return "polecat/hw-legacy"
+			}
+			return "session-home-noise"
+		},
+		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, patch map[string]string) error {
+			stampedBranch = patch["gc.work_branch"]
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim(both work_dir keys) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stampedBranch != "polecat/hw-canonical" {
+		t.Fatalf("stamped branch = %q, want polecat/hw-canonical (gc.work_dir precedes bare work_dir)", stampedBranch)
+	}
+}
+
+// TestDoHookClaimKeepsStampWhenRecordedWorkDirUnresolvable guards the
+// abandoned-worktree case: a recorded work_dir that no longer resolves (dir
+// reaped, repo gone, detached HEAD) must NOT be papered over with the
+// claimer's own branch. The last honest stamp is all that still names the
+// work, so the claim writes no branch at all rather than noise.
+func TestDoHookClaimKeepsStampWhenRecordedWorkDirUnresolvable(t *testing.T) {
+	meta := map[string]string{
+		"gc.routed_to":   "worker",
+		"gc.work_dir":    "/beads/hw-gone/worktree",
+		"gc.work_branch": "polecat/hw-last-honest",
+	}
+	var stampCalls int
+	runner := func(string, string) (string, error) {
+		return `[{"id":"hw-gone","status":"open","metadata":{"gc.routed_to":"worker","gc.work_dir":"/beads/hw-gone/worktree","gc.work_branch":"polecat/hw-last-honest"}}]`, nil
+	}
+	ops := hookClaimOps{
+		Runner: runner,
+		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: meta}, true, nil
+		},
+		ResolveWorkBranch: func(dir string) string {
+			if dir == "/beads/hw-gone/worktree" {
+				return "" // dir no longer resolves to a branch
+			}
+			return "session-home-noise"
+		},
+		StampWorkMeta: func(_ context.Context, _ string, _ []string, _, _ string, _ map[string]string) error {
+			stampCalls++
+			return nil
+		},
+	}
+	opts := hookClaimOptions{
+		Assignee:           "worker-1",
+		IdentityCandidates: []string{"worker-1"},
+		RouteTargets:       []string{"worker"},
+		JSON:               true,
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := doHookClaim("bd ready --json", "/tmp/work", opts, ops, &stdout, &stderr); code != 0 {
+		t.Fatalf("doHookClaim(unresolvable work_dir) = %d, want 0; stderr=%s", code, stderr.String())
+	}
+	if stampCalls != 0 {
+		t.Fatalf("stamp write count = %d, want 0 (recorded work_dir unresolvable; last stamp must survive)", stampCalls)
+	}
+}
+
 func TestDoHookClaimClaimsLegacyRunTargetWorkflowRoot(t *testing.T) {
 	var claimedID string
 	runner := func(string, string) (string, error) {

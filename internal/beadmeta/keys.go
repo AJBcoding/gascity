@@ -217,12 +217,17 @@ const (
 // and its outcome so observability/eval can answer "what work was done, by
 // whom, with what artifact, to what end":
 //
-//   - WorkBranchMetadataKey ("gc.work_branch") — the git branch the claiming
-//     worker is on; the handle from the bead to its work. Stamped at claim time
-//     alongside WorkDirMetadataKey, which makes it PROVISIONAL — the work does
-//     not exist yet when it is written. The close gate resolves the truth at
-//     close (remote-first) and advises when the work landed on a different
-//     branch (ADR-0009 Defect C, cmd/gc/work_record_gate.go).
+//   - WorkBranchMetadataKey ("gc.work_branch") — the git branch the work is
+//     on; the handle from the bead to its work. Stamped on every hook
+//     claim/adoption tick, resolved from the bead's OWN recorded worktree
+//     (WorkDirMetadataKey, then the pack-namespace bare work_dir) when one
+//     exists, and from the claimer's dir only before any worktree is recorded
+//     — that pre-worktree stamp is PROVISIONAL (the work does not exist yet
+//     when it is written), and later ticks converge it to the branch the work
+//     actually lands on, so a bead abandoned mid-flight still names its branch
+//     (gas-l430). The close gate resolves the truth at close (remote-first)
+//     and advises when the work landed on a different branch (ADR-0009
+//     Defect C, cmd/gc/work_record_gate.go).
 //   - WorkOutcomeMetadataKey ("gc.work_outcome") — the typed close disposition,
 //     one of "shipped" | "no-op" | "blocked" | "abandoned". Deliberately NOT
 //     OutcomeMetadataKey ("gc.outcome"): that key is the control-plane step
