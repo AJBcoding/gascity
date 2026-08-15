@@ -1,0 +1,31 @@
+[pack]
+name = "gastown-hq"
+schema = 2
+
+# The public gastown pack comes from the gascity-packs registry, pinned to a
+# release commit. The gc binary bundles the same content through its
+# gascity-packs Go module, so init and start resolve this import offline from
+# the primed repo cache.
+[imports.gastown]
+source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
+version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+
+# The public pack keeps refinery and polecat rig-scoped. The city repository is
+# also a git checkout, so the HQ wrapper reuses those imported templates at city
+# scope and points their worktrees at the city root.
+[[patches.agent]]
+name = "refinery"
+scope = "city"
+work_dir = ".gc/worktrees/city/refinery"
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.CityRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+
+[[patches.agent]]
+name = "polecat"
+scope = "city"
+work_dir = ".gc/worktrees/city/polecats/{{.AgentBase}}"
+pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.CityRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+
+[[named_session]]
+template = "refinery"
+scope = "city"
+mode = "on_demand"

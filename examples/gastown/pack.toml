@@ -1,7 +1,8 @@
 # Gas Town root pack — wires the gastown pack at both city and rig scope.
 #
-# City-level: [imports.gastown] expands city-scoped agents (mayor, deacon,
-# boot) on city startup.
+# City-level: [imports.gastown] expands city-scoped agents on city startup.
+# Its wrapper also exposes the imported refinery/polecat templates at HQ so
+# work against the city repository has a merge route.
 #
 # Rig-level: [defaults.rig.imports.gastown] ensures every new rig
 # automatically imports rig-scoped agents (witness, refinery, polecat)
@@ -23,11 +24,8 @@ version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
 source = "https://github.com/gastownhall/gascity.git//examples/bd"
 version = "sha:f895c0ff47d6ee9334ed282a416387eb5b084d24"
 
-# The gastown pack comes from the public gascity-packs registry, pinned to
-# a release commit. The gc binary bundles the same content (via the
-# gascity-packs Go module), so init and start resolve this import offline
-# from the primed repo cache. scripts/update-bundled-gastown-pack keeps the
-# pin in lockstep with the registry release and the module dependency.
+# The gastown binding points at a thin local wrapper. The wrapper imports the
+# pinned public gascity-packs release and adds the HQ route for city-repository
+# work without changing the upstream pack.
 [imports.gastown]
-source = "https://github.com/gastownhall/gascity-packs/tree/main/gastown"
-version = "sha:33d3a430a67d1782ad364556cb566bdb01d0afe3"
+source = "./packs/gastown-hq"

@@ -273,6 +273,62 @@ func loadExpanded(t *testing.T) *config.City {
 	return cfg
 }
 
+func loadExpandedWithRig(t *testing.T) *config.City {
+	t.Helper()
+	primeBundledGastownCache(t)
+
+	dir := t.TempDir()
+	rigPath := t.TempDir()
+	for _, name := range []string{"city.toml", "pack.toml"} {
+		data, err := os.ReadFile(filepath.Join(exampleDir(), name))
+		if err != nil {
+			t.Fatalf("reading %s: %v", name, err)
+		}
+		if name == "city.toml" {
+			data = append(data, []byte(`
+
+[[rigs]]
+name = "gascity"
+default_branch = "staging/gascity-lane"
+
+[rigs.imports.gastown]
+source = "`+config.PublicGastownPackSource+`"
+version = "`+config.PublicGastownPackVersion+`"
+`)...)
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o644); err != nil {
+			t.Fatalf("writing temp %s: %v", name, err)
+		}
+	}
+	wrapperDir := filepath.Join(dir, "packs", "gastown-hq")
+	if err := os.MkdirAll(wrapperDir, 0o755); err != nil {
+		t.Fatalf("creating temp wrapper pack dir: %v", err)
+	}
+	wrapperData, err := os.ReadFile(filepath.Join(exampleDir(), "packs", "gastown-hq", "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading gastown-hq wrapper pack.toml: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(wrapperDir, "pack.toml"), wrapperData, 0o644); err != nil {
+		t.Fatalf("writing temp gastown-hq wrapper pack.toml: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(config.SiteBindingPath(dir)), 0o755); err != nil {
+		t.Fatalf("creating temp site binding dir: %v", err)
+	}
+	siteBinding := `[[rig]]
+name = "gascity"
+path = "` + filepath.ToSlash(rigPath) + `"
+`
+	if err := os.WriteFile(config.SiteBindingPath(dir), []byte(siteBinding), 0o644); err != nil {
+		t.Fatalf("writing temp site binding: %v", err)
+	}
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(dir, "city.toml"))
+	if err != nil {
+		t.Fatalf("config.LoadWithIncludes with rig: %v", err)
+	}
+	return cfg
+}
+
 func TestCityTomlParses(t *testing.T) {
 	dir := exampleDir()
 	// city.toml is the deployment shell — imports and the default-rig
@@ -317,11 +373,30 @@ func TestCityPackTomlParses(t *testing.T) {
 	if !ok {
 		t.Fatalf("pack.toml imports = %v, want entry for \"gastown\"", tc.Imports)
 	}
-	if gastownImp.Source != config.PublicGastownPackSource {
-		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want the pinned public source %q", gastownImp.Source, config.PublicGastownPackSource)
+	if gastownImp.Source != "./packs/gastown-hq" {
+		t.Errorf("pack.toml imports[\"gastown\"].Source = %q, want local HQ wrapper", gastownImp.Source)
 	}
-	if gastownImp.Version != config.PublicGastownPackVersion {
-		t.Errorf("pack.toml imports[\"gastown\"].Version = %q, want %q", gastownImp.Version, config.PublicGastownPackVersion)
+	if gastownImp.Version != "" {
+		t.Errorf("pack.toml imports[\"gastown\"].Version = %q, want empty for local wrapper", gastownImp.Version)
+	}
+
+	wrapperData, err := os.ReadFile(filepath.Join(dir, "packs", "gastown-hq", "pack.toml"))
+	if err != nil {
+		t.Fatalf("reading gastown-hq wrapper pack.toml: %v", err)
+	}
+	var wrapper packFileConfig
+	if _, err := toml.Decode(string(wrapperData), &wrapper); err != nil {
+		t.Fatalf("parsing gastown-hq wrapper pack.toml: %v", err)
+	}
+	publicGastownImp, ok := wrapper.Imports["gastown"]
+	if !ok {
+		t.Fatalf("gastown-hq imports = %v, want entry for public \"gastown\"", wrapper.Imports)
+	}
+	if publicGastownImp.Source != config.PublicGastownPackSource {
+		t.Errorf("gastown-hq imports[\"gastown\"].Source = %q, want the pinned public source %q", publicGastownImp.Source, config.PublicGastownPackSource)
+	}
+	if publicGastownImp.Version != config.PublicGastownPackVersion {
+		t.Errorf("gastown-hq imports[\"gastown\"].Version = %q, want %q", publicGastownImp.Version, config.PublicGastownPackVersion)
 	}
 	cityData, err := os.ReadFile(filepath.Join(dir, "city.toml"))
 	if err != nil {
@@ -3802,13 +3877,18 @@ func TestPackPromptFilesExist(t *testing.T) {
 func TestCityAgentsFilter(t *testing.T) {
 	// Verify config.LoadWithIncludes with both packs produces
 	// only city-scoped agents when no rigs are registered:
-	// mayor/deacon/boot + the gastown dog pool + the dolt maintenance dog
-	// contributed by the composed builtin bd pack + the core control dispatcher
-	// = 6. The two dogs keep distinct binding-qualified identities
-	// (gastown.dog vs bd.dog).
+	// mayor/deacon/boot + gastown dog/refinery/polecat + the dolt maintenance
+	// dog contributed by the composed builtin bd pack + the core control
+	// dispatcher = 8. The two dogs keep distinct binding-qualified identities
+	// (gastown.dog vs bd.dog), and the HQ refinery/polecat route gives city-repo
+	// work a merge path even before any rig is registered.
 	cfg := loadExpanded(t)
 
-	cityAgents := map[string]bool{"mayor": true, "deacon": true, "boot": true, "dog": true, "control-dispatcher": true}
+	cityAgents := map[string]bool{
+		"mayor": true, "deacon": true, "boot": true,
+		"dog": true, "refinery": true, "polecat": true,
+		"control-dispatcher": true,
+	}
 	var explicit int
 	for _, a := range cfg.Agents {
 		if a.Implicit {
@@ -3822,8 +3902,72 @@ func TestCityAgentsFilter(t *testing.T) {
 			t.Errorf("city agent %q: dir = %q, want empty", a.Name, a.Dir)
 		}
 	}
-	if explicit != 6 {
-		t.Errorf("got %d explicit agents, want 6 city-scoped agents (incl. both dogs and control-dispatcher)", explicit)
+	if explicit != 8 {
+		t.Errorf("got %d explicit agents, want 8 city-scoped agents (incl. both dogs, HQ refinery/polecat, and control-dispatcher)", explicit)
+	}
+}
+
+func TestCityRepoMergeRouteAgentsExpandAtHQ(t *testing.T) {
+	cfg := loadExpanded(t)
+
+	for _, name := range []string{"refinery", "polecat"} {
+		qualified := "gastown." + name
+		agent := config.FindAgent(cfg, qualified)
+		if agent == nil {
+			t.Fatalf("FindAgent(%q) = nil; city-repo handoff has no HQ %s route", qualified, name)
+		}
+		if agent.Dir != "" {
+			t.Errorf("%s Dir = %q, want empty city scope", qualified, agent.Dir)
+		}
+		if agent.Scope != "city" {
+			t.Errorf("%s Scope = %q, want city", qualified, agent.Scope)
+		}
+		if agent.BindingName != "gastown" {
+			t.Errorf("%s BindingName = %q, want gastown", qualified, agent.BindingName)
+		}
+		if !strings.Contains(agent.WorkDir, ".gc/worktrees/city/") {
+			t.Errorf("%s WorkDir = %q, want city worktrees lane", qualified, agent.WorkDir)
+		}
+		if len(agent.PreStart) != 1 || !strings.Contains(agent.PreStart[0], "{{.CityRoot}}") || strings.Contains(agent.PreStart[0], "{{.RigRoot}}") {
+			t.Errorf("%s PreStart = %v, want city-root worktree setup", qualified, agent.PreStart)
+		}
+	}
+
+	refinery := config.FindNamedSession(cfg, "gastown.refinery")
+	if refinery == nil {
+		t.Fatal("FindNamedSession(gastown.refinery) = nil; HQ refinery must be wakeable on demand")
+	}
+	if refinery.TemplateQualifiedName() != "gastown.refinery" {
+		t.Fatalf("HQ refinery template = %q, want gastown.refinery", refinery.TemplateQualifiedName())
+	}
+}
+
+func TestRigMergeRouteAgentsStillExpandPerRig(t *testing.T) {
+	cfg := loadExpandedWithRig(t)
+
+	for _, name := range []string{"refinery", "polecat"} {
+		qualified := "gascity/gastown." + name
+		agent := config.FindAgent(cfg, qualified)
+		if agent == nil {
+			t.Fatalf("FindAgent(%q) = nil; rig handoff route regressed", qualified)
+		}
+		if agent.Dir != "gascity" {
+			t.Errorf("%s Dir = %q, want gascity", qualified, agent.Dir)
+		}
+		if agent.Scope != "rig" {
+			t.Errorf("%s Scope = %q, want rig", qualified, agent.Scope)
+		}
+		if !strings.Contains(agent.WorkDir, ".gc/worktrees/{{.Rig}}/") {
+			t.Errorf("%s WorkDir = %q, want rig worktrees lane", qualified, agent.WorkDir)
+		}
+	}
+
+	refinery := config.FindNamedSession(cfg, "gascity/gastown.refinery")
+	if refinery == nil {
+		t.Fatal("FindNamedSession(gascity/gastown.refinery) = nil; rig refinery must remain wakeable")
+	}
+	if refinery.TemplateQualifiedName() != "gascity/gastown.refinery" {
+		t.Fatalf("rig refinery template = %q, want gascity/gastown.refinery", refinery.TemplateQualifiedName())
 	}
 }
 
