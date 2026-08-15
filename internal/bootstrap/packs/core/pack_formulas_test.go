@@ -207,3 +207,65 @@ func TestCoreShippedAssetsAvoidNonexistentBDListSearchFlag(t *testing.T) {
 		t.Fatalf("walking embedded core pack: %v", err)
 	}
 }
+
+func TestCoreWorktreeSetupAvoidsAmbientPWDNesting(t *testing.T) {
+	cases := []struct {
+		file string
+		step string
+	}{
+		{file: "mol-scoped-work.toml", step: "workspace-setup"},
+		{file: "mol-polecat-commit.toml", step: "workspace-setup"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			step := formulaStep(t, readFormula(t, tc.file), tc.step)
+			if strings.Contains(step, "$(pwd)/worktrees") || strings.Contains(step, "$(pwd -P)/worktrees") {
+				t.Fatal("workspace setup must not create new worktrees below the ambient cwd; a polecat may already be inside another bead worktree")
+			}
+			for _, want := range []string{
+				"CURRENT_WORKTREE",
+				"WORKTREE_PARENT=$(dirname \"$CURRENT_WORKTREE\")",
+				"if [ \"$(basename \"$WORKTREE_PARENT\")\" != \"worktrees\" ]; then",
+				"mkdir -p \"$WORKTREE_PARENT\"",
+				"WORKTREE_PATH=\"$WORKTREE_PARENT/$WORK_BEAD_ID\"",
+			} {
+				if !strings.Contains(step, want) {
+					t.Fatalf("workspace setup missing %q; it must create siblings of an existing registered worktree instead of children", want)
+				}
+			}
+		})
+	}
+}
+
+func TestCoreWorktreeCleanupRefusesRegisteredDescendantWorktrees(t *testing.T) {
+	cases := []struct {
+		file string
+		step string
+	}{
+		{file: "mol-scoped-work.toml", step: "cleanup-worktree"},
+		{file: "mol-polecat-commit.toml", step: "commit-and-push"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			step := formulaStep(t, readFormula(t, tc.file), tc.step)
+			if strings.Contains(step, "--force") {
+				t.Fatal("worktree cleanup must not use --force; forced removal can delete ignored nested worktrees")
+			}
+			if strings.Contains(step, "rm -rf") {
+				t.Fatal("worktree cleanup must not fall back to rm -rf; that bypasses git's worktree safety checks")
+			}
+			for _, want := range []string{
+				"DESCENDANT_WORKTREE",
+				"worktree list --porcelain",
+				"index(path, root \"/\") == 1",
+				"git -C \"$GIT_CONTEXT\" worktree remove",
+			} {
+				if !strings.Contains(step, want) {
+					t.Fatalf("worktree cleanup missing %q; it must veto registered descendant worktrees before removing the parent", want)
+				}
+			}
+		})
+	}
+}

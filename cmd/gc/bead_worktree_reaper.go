@@ -71,7 +71,10 @@ type reapReport struct {
 //     sit at or beneath the worktree. If the liveness scan is indeterminate
 //     (no /proc), NOTHING is reaped this pass — the reaper cannot prove any
 //     tree is idle (root cause B: closed-bead != end-of-use).
-//  6. Git state: no uncommitted changes, no stashes, and no commits that
+//  6. Nested worktree veto: no other registered git worktree may live beneath
+//     the candidate path. Git status can hide ignored worktrees/ directories,
+//     but git worktree remove deletes the full directory tree.
+//  7. Git state: no uncommitted changes, no stashes, and no commits that
 //     removing the worktree would orphan — commits reachable from no branch,
 //     tag, or remote-tracking ref (git.HasUnreachableCommitsResult). The test
 //     is deliberately reachability, not push state: `git worktree remove`
@@ -268,6 +271,15 @@ func reapClosedBeadWorktrees(
 				reason = fmt.Sprintf("borrow-veto: referenced by non-terminal bead(s) %s", strings.Join(refs, ", "))
 			}
 
+			// Nested worktree veto. `git status` can be clean when
+			// worktrees/ is ignored, but removing the outer worktree would
+			// still delete any registered descendant checkout on disk.
+			if reason == "" {
+				if descendant := registeredDescendantWorktree(worktrees, worktreePath); descendant != "" {
+					reason = fmt.Sprintf("descendant worktree registered at %s", descendant)
+				}
+			}
+
 			// Liveness gate (fail closed). Protect the tree when a live process
 			// or active session is working in it, or when liveness could not be
 			// determined at all.
@@ -369,6 +381,18 @@ func reapClosedBeadWorktrees(
 type reapCandidate struct {
 	beadID       string
 	worktreePath string
+}
+
+func registeredDescendantWorktree(worktrees []git.Worktree, candidatePath string) string {
+	for _, wt := range worktrees {
+		if wt.Path == "" || pathutil.SamePath(candidatePath, wt.Path) {
+			continue
+		}
+		if isStrictlyUnderDir(candidatePath, wt.Path) {
+			return wt.Path
+		}
+	}
+	return ""
 }
 
 // reapSkipTracker makes the reaper's skip reporting edge-triggered, so a
