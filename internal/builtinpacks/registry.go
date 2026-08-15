@@ -66,7 +66,7 @@ func All() []Pack {
 		{Name: "core", Subpath: "internal/bootstrap/packs/core", FS: core.PackFS},
 		{Name: "bd", Subpath: "examples/bd", FS: bd.PackFS},
 		{Name: "dolt", Subpath: "examples/bd/dolt", FS: dolt.PackFS},
-		{Name: "gastown", Subpath: "examples/gastown/packs/gastown", FS: gascitypacks.Gastown()},
+		{Name: "gastown", Subpath: "examples/gastown/packs/gastown", FS: patchedGastownFS(gascitypacks.Gastown())},
 		// The gascity planning pack never lived in gascity.git: it is
 		// public-registry-only (empty Subpath), served solely through the
 		// PublicRepository alias.

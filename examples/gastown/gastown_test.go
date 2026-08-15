@@ -3326,6 +3326,37 @@ func witnessStateIsOrphanedForTest(state string) (bool, bool) {
 	}
 }
 
+func witnessClaimingSessionOutcomeForTest(assigneeState, claimingSessionID, currentAliasSessionID, claimingSessionState string) string {
+	switch {
+	case claimingSessionID == "":
+		return "not-orphaned"
+	case currentAliasSessionID == "":
+		return "unverifiable"
+	case claimingSessionID == currentAliasSessionID:
+		return "not-orphaned"
+	}
+	switch assigneeState {
+	case string(session.StateActive), string(session.StateAwake):
+		switch claimingSessionState {
+		case string(session.StateArchived), "closed", "absent":
+			return "stalled-not-orphaned"
+		case string(session.StateActive),
+			string(session.StateAwake),
+			string(session.StateCreating),
+			string(session.StateAsleep),
+			string(session.StateDrained),
+			string(session.StateSuspended),
+			string(session.StateDraining),
+			string(session.StateQuarantined):
+			return "not-orphaned"
+		default:
+			return "unverifiable"
+		}
+	default:
+		return "not-orphaned"
+	}
+}
+
 func TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity(t *testing.T) {
 	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-witness-patrol.toml")
 	data, err := os.ReadFile(path)
@@ -3390,6 +3421,72 @@ func TestWitnessPatrolLivenessProcedureUsesExactSessionIdentity(t *testing.T) {
 	}
 	if got, ok := resolveWitnessAssigneeForTest("polecat-hq-00ohd", sessions, sessionBeads); ok {
 		t.Fatalf("embedded fixed-prefix assignee resolved to %q; want exact lookup miss", got)
+	}
+}
+
+func TestWitnessPatrolCrossChecksClaimingSessionBehindLiveAlias(t *testing.T) {
+	path := filepath.Join(packRoot(), "packs", "gastown", "formulas", "mol-witness-patrol.toml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading witness patrol formula: %v", err)
+	}
+	body := string(data)
+
+	for _, want := range []string{
+		`metadata."gc.session_id"`,
+		`CLAIMING_SESSION_ID`,
+		`CURRENT_ALIAS_SESSION_ID`,
+		`stalled-not-orphaned`,
+		`UNVERIFIABLE`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("witness patrol formula missing live-alias claiming-session guard %q", want)
+		}
+	}
+	assertContainsInOrder(t, body,
+		"assignee resolves live",
+		`metadata."gc.session_id"`,
+		"claiming session probes",
+		"stalled-not-orphaned",
+	)
+
+	tests := []struct {
+		name                  string
+		assigneeState         string
+		claimingSessionID     string
+		currentAliasSessionID string
+		claimingSessionState  string
+		want                  string
+	}{
+		{
+			name:                  "live recycled alias masking dead claiming session",
+			assigneeState:         string(session.StateActive),
+			claimingSessionID:     "az-wisp-old",
+			currentAliasSessionID: "az-wisp-new",
+			claimingSessionState:  "absent",
+			want:                  "stalled-not-orphaned",
+		},
+		{
+			name:                  "current alias holder still owns the claim",
+			assigneeState:         string(session.StateActive),
+			claimingSessionID:     "az-wisp-live",
+			currentAliasSessionID: "az-wisp-live",
+			claimingSessionState:  string(session.StateActive),
+			want:                  "not-orphaned",
+		},
+		{
+			name:                  "claiming session probe unknown abstains",
+			assigneeState:         string(session.StateAwake),
+			claimingSessionID:     "az-wisp-old",
+			currentAliasSessionID: "az-wisp-new",
+			claimingSessionState:  "future-state",
+			want:                  "unverifiable",
+		},
+	}
+	for _, tc := range tests {
+		if got := witnessClaimingSessionOutcomeForTest(tc.assigneeState, tc.claimingSessionID, tc.currentAliasSessionID, tc.claimingSessionState); got != tc.want {
+			t.Errorf("%s: outcome = %q, want %q", tc.name, got, tc.want)
+		}
 	}
 }
 

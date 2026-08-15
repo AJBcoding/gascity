@@ -1,6 +1,7 @@
 package gastown_test
 
 import (
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -8,17 +9,15 @@ import (
 	"sync"
 	"testing"
 
-	gascitypacks "github.com/gastownhall/gascity-packs"
-
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/packman"
 )
 
-// The gastown pack is no longer a checked-in copy: the gc binary embeds it
-// from the gascity-packs Go module. These integration tests run against
-// those exact embedded bytes so a runtime/pack mismatch fails here, in
-// gascity CI, before it ships.
+// The gastown pack is no longer a checked-in copy: the gc binary bundles it
+// from the gascity-packs Go module through builtinpacks. These integration
+// tests run against the bundled FS so a runtime/pack mismatch fails here,
+// in gascity CI, before it ships.
 
 var (
 	packRootOnce sync.Once
@@ -26,7 +25,7 @@ var (
 	packRootErr  error
 )
 
-// packRoot materializes the module-embedded gastown pack into a shared
+// packRoot materializes the bundled gastown pack into a shared
 // temp root shaped like the historical example layout
 // (<root>/packs/gastown/...), so pack-content tests keep their relative
 // paths while exercising the embedded bytes. Files get the same modes the
@@ -39,7 +38,12 @@ func packRoot() string {
 			return
 		}
 		target := filepath.Join(dir, "packs", "gastown")
-		packRootErr = fs.WalkDir(gascitypacks.Gastown(), ".", func(rel string, d fs.DirEntry, err error) error {
+		gastownPack, ok := builtinpacks.ByName("gastown")
+		if !ok {
+			packRootErr = errors.New("bundled gastown pack is not registered")
+			return
+		}
+		packRootErr = fs.WalkDir(gastownPack.FS, ".", func(rel string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -47,7 +51,7 @@ func packRoot() string {
 			if d.IsDir() {
 				return os.MkdirAll(dst, 0o755)
 			}
-			data, err := fs.ReadFile(gascitypacks.Gastown(), rel)
+			data, err := fs.ReadFile(gastownPack.FS, rel)
 			if err != nil {
 				return err
 			}
