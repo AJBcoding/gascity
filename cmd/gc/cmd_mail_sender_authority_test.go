@@ -197,10 +197,110 @@ func TestCmdMailReply_AllowsExplicitHumanWhenIdentityEnvAbsent(t *testing.T) {
 	}
 }
 
-// An explicit --from names the identity to stamp. Resolving the ambient chain
-// regardless would silently discard it and re-stamp the reply as whoever the
-// process happens to be.
-func TestCmdMailReply_ExplicitFromIsNotOverwrittenByAmbientIdentity(t *testing.T) {
+func TestCmdMailSend_RejectsForeignExplicitSenderFromAgentSession(t *testing.T) {
+	cityPath := newMailAuthorityCity(t)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "courier",
+			"session_name": "courier-gc-9",
+		},
+	}); err != nil {
+		t.Fatalf("Create courier: %v", err)
+	}
+
+	t.Setenv("GC_AGENT", "recipient")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"recipient", "hello"}, false, false, "courier", "", "", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from courier) = 0, want refusal; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing --from courier") {
+		t.Fatalf("stderr = %q, want forged-sender refusal", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "recipient") {
+		t.Fatalf("stderr = %q, want ambient agent identity", stderr.String())
+	}
+	for _, msg := range mailAuthorityMessages(t, cityPath) {
+		t.Fatalf("foreign explicit sender was delivered: From=%q", msg.From)
+	}
+}
+
+func TestCmdMailSend_AllowsExplicitSenderOwnedByAmbientSession(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		ambientKey  string
+		ambient     func(beads.Bead) string
+		explicit    func(beads.Bead) string
+		wantDisplay string
+	}{
+		{
+			name:       "explicit alias owned by ambient session id",
+			ambientKey: "GC_SESSION_ID",
+			ambient: func(sender beads.Bead) string {
+				return sender.ID
+			},
+			explicit: func(beads.Bead) string {
+				return "sender"
+			},
+			wantDisplay: "sender",
+		},
+		{
+			name:       "explicit session id owned by ambient alias",
+			ambientKey: "GC_ALIAS",
+			ambient: func(beads.Bead) string {
+				return "sender"
+			},
+			explicit: func(sender beads.Bead) string {
+				return sender.ID
+			},
+			wantDisplay: "sender",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath := newMailAuthorityCity(t)
+			store, err := openCityStoreAt(cityPath)
+			if err != nil {
+				t.Fatalf("openCityStoreAt: %v", err)
+			}
+			sender, err := store.Create(beads.Bead{
+				Type:   session.BeadType,
+				Labels: []string{session.LabelSession},
+				Metadata: map[string]string{
+					"alias":        "sender",
+					"session_name": "sender-gc-9",
+				},
+			})
+			if err != nil {
+				t.Fatalf("Create sender: %v", err)
+			}
+			t.Setenv(tc.ambientKey, tc.ambient(sender))
+
+			var stdout, stderr bytes.Buffer
+			code := cmdMailSend([]string{"recipient", "hello"}, false, false, tc.explicit(sender), "", "", "", &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("cmdMailSend() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+
+			msgs := mailAuthorityMessages(t, cityPath)
+			if len(msgs) != 1 {
+				t.Fatalf("message count = %d, want 1; msgs=%#v", len(msgs), msgs)
+			}
+			if msgs[0].From != tc.wantDisplay {
+				t.Fatalf("message From = %q, want %q", msgs[0].From, tc.wantDisplay)
+			}
+		})
+	}
+}
+
+func TestCmdMailReply_RejectsForeignExplicitSenderFromAgentSession(t *testing.T) {
 	cityPath := newMailAuthorityCity(t)
 
 	store, err := openCityStoreAt(cityPath)
@@ -223,26 +323,20 @@ func TestCmdMailReply_ExplicitFromIsNotOverwrittenByAmbientIdentity(t *testing.T
 		t.Fatalf("mp.Send(): %v", err)
 	}
 
-	// Ambient identity says "recipient"; the flag says "courier". The flag wins.
 	t.Setenv("GC_AGENT", "recipient")
 
 	var stdout, stderr bytes.Buffer
 	code := cmdMailReplyFrom([]string{original.ID, "reply body"}, "courier", "", "", false, &stdout, &stderr)
-	if code != 0 {
-		t.Fatalf("cmdMailReplyFrom(--from courier) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	if code == 0 {
+		t.Fatalf("cmdMailReplyFrom(--from courier) = 0, want refusal; stdout=%s stderr=%s", stdout.String(), stderr.String())
 	}
-
-	var reply beads.Bead
+	if !strings.Contains(stderr.String(), "refusing --from courier") {
+		t.Fatalf("stderr = %q, want forged-sender refusal", stderr.String())
+	}
 	for _, m := range mailAuthorityMessages(t, cityPath) {
 		if m.ID != original.ID {
-			reply = m
+			t.Fatalf("foreign explicit reply was delivered: From=%q", m.From)
 		}
-	}
-	if reply.ID == "" {
-		t.Fatalf("reply bead not found")
-	}
-	if reply.From != "courier" {
-		t.Fatalf("reply From = %q, want courier (explicit --from must survive)", reply.From)
 	}
 }
 
@@ -284,5 +378,56 @@ func TestCmdMailSend_RejectsOperatorClaimVariantsFromAgentSession(t *testing.T) 
 				t.Fatalf("--from %q was delivered as From=%q", from, msg.From)
 			}
 		})
+	}
+}
+
+func TestCmdMailSend_RejectsExplicitControllerFromAgentSession(t *testing.T) {
+	cityPath := newMailAuthorityCity(t)
+	t.Setenv("GC_AGENT", "gascity/bob")
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"recipient", "hello"}, false, false, "controller", "", "", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from controller) = 0, want refusal from an agent session; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "refusing --from controller") {
+		t.Fatalf("stderr = %q, want forged-controller refusal", stderr.String())
+	}
+	for _, msg := range mailAuthorityMessages(t, cityPath) {
+		t.Fatalf("agent-forged controller mail was delivered: From=%q", msg.From)
+	}
+}
+
+func TestCmdMailSend_AllowsExplicitControllerWhenIdentityEnvAbsent(t *testing.T) {
+	cityPath := newMailAuthorityCity(t)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"recipient", "hello"}, false, false, "controller", "", "", "", &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("cmdMailSend(--from controller) = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+
+	msgs := mailAuthorityMessages(t, cityPath)
+	if len(msgs) != 1 {
+		t.Fatalf("message count = %d, want 1; msgs=%#v", len(msgs), msgs)
+	}
+	if msgs[0].From != "controller" {
+		t.Fatalf("message From = %q, want controller", msgs[0].From)
+	}
+}
+
+func TestCmdMailSend_RejectsExplicitConfiguredSenderWhenIdentityEnvAbsent(t *testing.T) {
+	cityPath := newMailAuthorityCity(t)
+
+	var stdout, stderr bytes.Buffer
+	code := cmdMailSend([]string{"recipient", "hello"}, false, false, "recipient", "", "", "", &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("cmdMailSend(--from recipient) = 0, want refusal without ambient identity; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no sender identity") {
+		t.Fatalf("stderr = %q, want no-sender-identity refusal", stderr.String())
+	}
+	for _, msg := range mailAuthorityMessages(t, cityPath) {
+		t.Fatalf("agentless configured sender was delivered: From=%q", msg.From)
 	}
 }

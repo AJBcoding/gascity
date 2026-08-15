@@ -1051,3 +1051,39 @@ func TestCmdHandoffRemoteRejectsExplicitHumanFromAgentSession(t *testing.T) {
 		t.Fatalf("agent-forged operator handoff was delivered: From=%q", msg.From)
 	}
 }
+
+func TestCmdHandoffRemoteRejectsForeignExplicitSenderFromAgentSession(t *testing.T) {
+	cityPath := newMailAuthorityCity(t)
+
+	store, err := openCityStoreAt(cityPath)
+	if err != nil {
+		t.Fatalf("openCityStoreAt: %v", err)
+	}
+	if _, err := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+		Metadata: map[string]string{
+			"alias":        "courier",
+			"session_name": "courier-gc-9",
+		},
+	}); err != nil {
+		t.Fatalf("Create courier: %v", err)
+	}
+	t.Setenv("GC_AGENT", "recipient")
+
+	var stdout, stderr bytes.Buffer
+	cmd := newHandoffCmd(&stdout, &stderr)
+	cmd.SilenceErrors = true
+	cmd.SilenceUsage = true
+	cmd.SetArgs([]string{"--from", "courier", "--target", "recipient", "Context refresh"})
+	if err := cmd.Execute(); err == nil {
+		t.Fatalf("gc handoff --from courier from recipient agent = nil error, want refusal; stdout=%s stderr=%s", stdout.String(), stderr.String())
+	}
+
+	if !strings.Contains(stderr.String(), "refusing --from courier") {
+		t.Fatalf("stderr = %q, want forged-sender refusal", stderr.String())
+	}
+	for _, msg := range mailAuthorityMessages(t, cityPath) {
+		t.Fatalf("foreign explicit handoff was delivered: From=%q", msg.From)
+	}
+}
