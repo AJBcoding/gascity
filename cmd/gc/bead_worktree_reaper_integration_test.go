@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -12,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -100,30 +100,6 @@ func backdateWorktreeGitFile(t *testing.T, worktreePath string, age time.Duratio
 	if err := os.Chtimes(gitFile, backdated, backdated); err != nil {
 		t.Fatalf("backdate %s: %v", gitFile, err)
 	}
-}
-
-func mustGitOutput(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	fullArgs := append([]string{"-c", "core.hooksPath="}, args...)
-	cmd := exec.Command("git", fullArgs...)
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	for _, env := range os.Environ() {
-		if key, _, ok := strings.Cut(env, "="); ok && testGitEnvBlacklist[key] {
-			continue
-		}
-		cmd.Env = append(cmd.Env, env)
-	}
-	cmd.Env = append(cmd.Env,
-		"GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@test.com",
-		"GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@test.com",
-	)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %s: %s: %v", strings.Join(args, " "), string(out), err)
-	}
-	return string(out)
 }
 
 func reapTestConfig(rigRoot string) *config.City {
@@ -219,8 +195,8 @@ func TestReapClosedBeadWorktrees_ProtectsWorktreeContainingRegisteredDescendant(
 	if err := os.WriteFile(excludePath, append(existing, []byte("\nworktrees/\n")...), 0o644); err != nil {
 		t.Fatalf("write git exclude: %v", err)
 	}
-	if got := strings.TrimSpace(mustGitOutput(t, outer, "status", "--porcelain")); got != "" {
-		t.Fatalf("outer worktree status = %q, want clean with nested worktrees/ ignored", got)
+	if git.New(outer).HasUncommittedWork() {
+		t.Fatal("outer worktree reports uncommitted work; want clean with nested worktrees/ ignored")
 	}
 
 	var stderr bytes.Buffer
