@@ -281,6 +281,16 @@ nothing to narrow within. Drop --rig for a class-owned id. Auto-detected
 scope (GC_RIG, -C, cwd) is unaffected, and --city still selects which city's
 binding answers.
 
+"gc bd ready" is refused outright on such a city, whatever arguments it is
+given, and so is "gc bd list --ready", which bd documents as the same
+semantics: both compute a frontier over one ledger and take no selector that
+could reach another, so the answer is the work-class subset of the city's
+ready set with no way to tell. Use "gc ready", which federates every store
+the city spreads work across. It is flag-compatible with the "bd ready"
+invocation the generated work query builds, not with all of "bd ready" —
+"gc ready --help" lists what it takes. A city that relocates no class is
+unaffected.
+
 All arguments after "gc bd" are forwarded to bd unchanged. Two subcommands
 get extra handling: "heartbeat &lt;issue-id&gt;" is validated and forwarded to
 bd's own heartbeat, renewing the claim lease so a long-running worker keeps
@@ -312,9 +322,9 @@ gc bd release-if-current my-project-abc worker-1
 
 Manage the beads provider (backing store for issue tracking).
 
-Subcommands for topology operations, health checking, diagnostics, and
-read-only list/show routed through the supervisor API with transparent
-fallback to direct bd reads.
+Subcommands for topology operations, health checking, diagnostics, exact-store
+metadata compare-and-set, and read-only list/show routed through the supervisor
+API with transparent fallback to direct bd reads.
 
 ```
 gc beads
@@ -325,6 +335,7 @@ gc beads
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
+| [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
 
 ## gc beads city
@@ -447,6 +458,48 @@ gc beads list --status open --format=json
 | `--format` | string | `text` | output format: text or json |
 | `--label` | string |  | filter to beads carrying this label |
 | `--status` | string |  | filter to beads in this status |
+
+## gc beads metadata-cas
+
+Atomically compare and set one metadata key in one exact local bead store.
+
+The store must be selected explicitly with --store-ref=city:&lt;name&gt; or
+--store-ref=rig:&lt;name&gt;. This command never scans other stores, follows a
+cross-store fallback, or operates on a remote city. A conflict is an ordinary
+zero-exit outcome; capability, transport, readback, and validation failures are
+non-zero.
+
+Legacy file-provider cities created before scope-local file stores may map city
+and rig references to the same shared city file. That provider-layout alias is
+preserved for compatibility; it is not a search or cross-store fallback.
+
+Use --json for the canonical machine-output contract. --format=json remains
+accepted for compatibility. Combining --json with an explicit --format=text is
+a usage error.
+
+```
+gc beads metadata-cas <bead-id> [flags]
+```
+
+**Example:**
+
+```
+gc beads metadata-cas tr-123 \
+  --store-ref=rig:tributary \
+  --key=semantic_review_sha \
+  --expected=old-sha \
+  --next=new-sha \
+  --json
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--expected` | string |  | expected current value (explicit empty is allowed) |
+| `--format` | string | `text` | output format: text or json |
+| `--json` | bool |  | emit the canonical JSON result |
+| `--key` | string |  | metadata key to compare and set |
+| `--next` | string |  | replacement value (explicit empty is allowed) |
+| `--store-ref` | string |  | exact local store: city:&lt;name&gt; or rig:&lt;name&gt; |
 
 ## gc beads show
 
@@ -1661,14 +1714,33 @@ per-source workflow lock and is idempotent: a repeat cook for the same
 source bead reuses the live workflow instead of duplicating it, and a
 conflicting live workflow from the same source is an error.
 
-On a city that serves a coordination class from its own [storage] binding,
---attach follows the ATTACH BEAD: the sub-DAG and the blocking dependency
-are written to the store that holds it, so the two ends of the edge stay in
-one store. A v2 (graph.v2) formula is the exception and is refused for an
-attach bead the binding owns: it normalizes its target into a synthetic
-input convoy, which is a work bead that can live neither in the binding nor
-in the work ledger, whose membership edge to the target would be
-cross-class. Attach a v1 formula to that bead instead.
+On a city that serves the graph class from its own [storage] binding, most
+of --attach in CITY scope is NOT SUPPORTED YET and refuses rather than
+serving. A graft is graph class whatever the formula's version — every bead
+it creates carries gc.root_bead_id — so the sub-DAG belongs in the binding
+while the blocking dependency belongs beside the attach bead, and a split
+city cannot have both:
+
+  * attach bead in the city's WORK ledger — refused. Writing the sub-DAG
+    beside it strands graph-class beads in the work store, which gc storage
+    status reports and exits non-zero on; writing it into the binding leaves
+    the work store holding a blocks row naming an id it cannot resolve,
+    which never clears. Representing that block across the store boundary
+    needs a cross-class membership edge: ga-2orlf.
+  * attach bead in the BINDING, v2 (graph.v2) formula — refused. It
+    normalizes its target into a synthetic input convoy, which is a work
+    bead that can live in neither store; its membership edge to the target
+    would be cross-class. Same remedy: ga-2orlf.
+  * attach bead in the BINDING, v1 formula — served. The sub-DAG and its
+    blocking dependency are both written to the binding.
+  * RIG scope (--rig, GC_RIG, or a cwd inside a rig) — served, unchanged.
+    A relocation moves city-level stores only, so a rig's ledger holds both
+    ends of the graft and nothing it writes can be stranded.
+
+Single-store cities are unaffected: --attach behaves exactly as it always
+has. If an earlier cook already stranded beads in a split city's work
+store, copy them into the binding with
+gc storage recover-stranded --from-work --fleet-stopped.
 
 ```
 gc formula cook <formula-name> [flags]
@@ -2429,6 +2501,9 @@ gc mail read <id> [flags]
 Reply to a message. The reply is addressed to the original sender.
 
 Inherits the thread ID from the original message for conversation tracking.
+The sender defaults to $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT. With none of
+those set this command refuses to reply rather than stamping the message as
+the operator; an operator claims that identity explicitly with --from human.
 Use --notify to request a recipient turn after replying. In a managed city,
 it can request a wake for a non-running recipient.
 Unread mail alone does not request a wake.
@@ -2440,6 +2515,7 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT; required when none is set) |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | reply body text |
 | `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
@@ -2450,9 +2526,12 @@ gc mail reply <id> [-s subject] [-m body] [flags]
 Send a message to a session alias or human.
 
 Creates a message bead addressed to the recipient. The sender defaults
-to $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human". Use --notify to request
-a recipient turn after sending. In a managed city, it can request a wake for
-a non-running recipient. Unread mail alone does not request a wake.
+to $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT. With none of those set this
+command refuses to send rather than stamping the message as the operator;
+an operator claims that identity explicitly with --from human.
+Use --notify to request a recipient turn after sending. In a managed city,
+it can request a wake for a non-running recipient.
+Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
@@ -2477,7 +2556,7 @@ gc mail send --all "Status update: tests passing"
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
-| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, $GC_AGENT, or "human") |
+| `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT; required when none is set) |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |
 | `--notify` | bool |  | request a recipient turn (including a managed wake if not running), even with earlier unread mail |
@@ -3284,6 +3363,10 @@ Rows are emitted in canonical ready order (priority, created_at, id) unless
 read is the true top-N of the merged set rather than the top-N of whichever
 store answered first.
 
+Every leg is read across both storage tiers, so the wisp/ephemeral rows an
+orchestration step runs as are claimable work here whether or not
+--include-ephemeral is passed.
+
 ```
 gc ready [flags]
 ```
@@ -3293,7 +3376,7 @@ gc ready [flags]
 | `--assignee` | string |  | only work assigned to this identity |
 | `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
-| `--include-ephemeral` | bool |  | include the wisp/ephemeral tier |
+| `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |
 | `--json` | bool | `true` | accept --json for bd-ready parity (output is always a JSON array) |
 | `--limit` | int |  | max beads to return (0 = unlimited) |
 | `--metadata-field` | stringArray |  | require metadata "key=value", or bare "key" for any non-empty value (repeatable) |
@@ -4388,6 +4471,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--branch` | string |  | stamp metadata.branch on the routed bead (the branch carrying its work — required by merge-queue find-work contracts) |
 | `-n`, `--dry-run` | bool |  | show what would be done without executing |
 | `--force` | bool |  | suppress warnings, allow cross-rig routing, allow formulas v2 workflow replacement, and for direct bead routes dispatch even if the bead does not resolve in the local store |
 | `-f`, `--formula` | bool |  | treat argument as formula name |
@@ -4402,6 +4486,7 @@ gc sling [target] <bead-or-formula-or-text> [flags]
 | `--scope-kind` | string |  | logical workflow scope kind for formulas v2 launches |
 | `--scope-ref` | string |  | logical workflow scope ref for formulas v2 launches |
 | `--stdin` | bool |  | read bead text from stdin (first line = title, rest = description) |
+| `--target` | string |  | stamp metadata.target on the routed bead (the branch its work merges into) |
 | `-t`, `--title` | string |  | wisp root bead title (with --formula or --on) |
 | `--var` | stringArray |  | variable substitution for formula (key=value, repeatable) |
 
@@ -4489,6 +4574,7 @@ gc storage
 | Subcommand | Description |
 |------------|-------------|
 | [gc storage migrate](#gc-storage-migrate) | Migrate this city's infrastructure classes onto their configured binding |
+| [gc storage recover-stranded](#gc-storage-recover-stranded) | Copy stranded infrastructure beads from the retained work store into the converged binding |
 | [gc storage status](#gc-storage-status) | Report this city's storage-class layout (read-only) |
 
 ## gc storage migrate
@@ -4514,6 +4600,34 @@ gc storage migrate [flags]
 |------|------|---------|-------------|
 | `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
 | `--from-work` | bool |  | migrate the infrastructure classes out of this city's work store |
+
+## gc storage recover-stranded
+
+Copy the infrastructure beads a converged city's proven copy never carried
+out of the retained work store and into the binding that is already serving.
+
+This is the recovery the stranded-write refusal names. It is additive: it moves
+only ids the binding does not hold and the proven-copy manifest does not record,
+it deletes nothing from either store, and it extends the manifest only after
+every moved bead has been proven equal against a closed and reopened
+destination. A bead whose class it cannot state is named and left where it is.
+
+It refuses on a city that has NOT converged — the whole copy is still owed
+there, and `gc storage migrate --from-work` is what owes it. It is not that
+command run twice: the migration is one-shot on purpose, and forcing it to
+re-copy would re-import a serving binding from a source that no longer holds
+what the binding does.
+
+```
+gc storage recover-stranded [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool |  | report the gap and write the dump without touching the binding or the manifest |
+| `--dump` | string |  | write every stranded bead and its source dep edges to this JSON file before any write |
+| `--fleet-stopped` | bool |  | attest that every writer that can reach this city's work store is stopped — not just its controller, which this command proves on its own |
+| `--from-work` | bool |  | recover the stranded infrastructure beads out of this city's work store |
 
 ## gc storage status
 

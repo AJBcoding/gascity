@@ -56,7 +56,20 @@ gc sling <bead-id>                     # Use rig's default_sling_target
 
 The agent receives the bead on its hook and runs it per GUPP.
 
-## Formula dispatch (formula on agent)
+## Merge-queue handoff (stamp the branch contract while routing)
+
+```
+gc sling <merge-queue-session> <bead-id> --branch <work-branch> [--target <merge-into>]
+```
+
+Stamps `metadata.branch` (and optionally `metadata.target`) on the bead
+before routing. Merge-queue consumers find work by filtering
+`--has-metadata-key=branch` alongside `--assignee=$GC_AGENT`, so a bead
+routed without the stamp is silently invisible to them. The flags stamp
+before the route commits, so the bead enters the queue contract-complete.
+Not valid with `--formula` (no bead to stamp) or on a convoy container
+(branch is per-work-bead — use `gc convoy target` for a convoy-wide
+merge target).
 
 ```
 gc sling <agent> -f <formula>          # Run a formula, creating a molecule

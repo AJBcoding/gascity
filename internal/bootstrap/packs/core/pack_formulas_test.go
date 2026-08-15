@@ -2,6 +2,7 @@ package core
 
 import (
 	"io/fs"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -206,4 +207,249 @@ func TestCoreShippedAssetsAvoidNonexistentBDListSearchFlag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("walking embedded core pack: %v", err)
 	}
+}
+
+func TestCoreWorktreeSetupAvoidsAmbientPWDNesting(t *testing.T) {
+	cases := []struct {
+		file string
+		step string
+	}{
+		{file: "mol-scoped-work.toml", step: "workspace-setup"},
+		{file: "mol-polecat-commit.toml", step: "workspace-setup"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			step := formulaStep(t, readFormula(t, tc.file), tc.step)
+			if strings.Contains(step, "$(pwd)/worktrees") || strings.Contains(step, "$(pwd -P)/worktrees") {
+				t.Fatal("workspace setup must not create new worktrees below the ambient cwd; a polecat may already be inside another bead worktree")
+			}
+			for _, want := range []string{
+				"CURRENT_WORKTREE",
+				"CURRENT_WORKTREE_PARENT=$(dirname \"$CURRENT_WORKTREE\")",
+				"if [ \"$(basename \"$CURRENT_WORKTREE_PARENT\")\" = \"worktrees\" ]; then",
+				"WORKTREE_PARENT=\"$CURRENT_WORKTREE/worktrees\"",
+				"mkdir -p \"$WORKTREE_PARENT\"",
+				"WORKTREE_PATH=\"$WORKTREE_PARENT/$WORK_BEAD_ID\"",
+			} {
+				if !strings.Contains(step, want) {
+					t.Fatalf("workspace setup missing %q; it must create bead worktrees below the registered agent home instead of the shared polecats parent", want)
+				}
+			}
+		})
+	}
+}
+
+func TestCoreWorktreeSetupPlacesNewWorktreeUnderAgentHome(t *testing.T) {
+	cases := []struct {
+		file string
+		step string
+	}{
+		{file: "mol-scoped-work.toml", step: "workspace-setup"},
+		{file: "mol-polecat-commit.toml", step: "workspace-setup"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			step := formulaStep(t, readFormula(t, tc.file), tc.step)
+			cityRoot := filepath.Join("Users", "anthonybyrnes", "code", "cities", "anthony", ".gc", "worktrees", "gascity")
+			agentHome := string(filepath.Separator) + filepath.Join(cityRoot, "polecats", "gastown.furiosa")
+			rigRoot := string(filepath.Separator) + filepath.Join("Users", "anthonybyrnes", "code", "gascity")
+			got := simulateFormulaWorkspaceSetupPath(t, step, agentHome, []string{rigRoot, agentHome}, "gas-new")
+			want := filepath.Join(agentHome, "worktrees", "gas-new")
+			if got != want {
+				t.Fatalf("workspace setup path = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCoreWorktreeSetupAvoidsNestedBeadWorktreeWhenAlreadyInsideOne(t *testing.T) {
+	cases := []struct {
+		file string
+		step string
+	}{
+		{file: "mol-scoped-work.toml", step: "workspace-setup"},
+		{file: "mol-polecat-commit.toml", step: "workspace-setup"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			step := formulaStep(t, readFormula(t, tc.file), tc.step)
+			agentHome := filepath.Join(string(filepath.Separator), "city", ".gc", "worktrees", "gascity", "polecats", "gastown.furiosa")
+			existingBead := filepath.Join(agentHome, "worktrees", "gas-old")
+			currentDir := filepath.Join(existingBead, "subdir")
+			got := simulateFormulaWorkspaceSetupPath(t, step, currentDir, []string{agentHome, existingBead}, "gas-new")
+			want := filepath.Join(agentHome, "worktrees", "gas-new")
+			if got != want {
+				t.Fatalf("workspace setup path = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestCoreWorktreeCleanupRefusesRegisteredDescendantWorktrees(t *testing.T) {
+	cases := []struct {
+		file string
+		step string
+	}{
+		{file: "mol-scoped-work.toml", step: "cleanup-worktree"},
+		{file: "mol-polecat-commit.toml", step: "commit-and-push"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			step := formulaStep(t, readFormula(t, tc.file), tc.step)
+			if strings.Contains(step, "--force") {
+				t.Fatal("worktree cleanup must not use --force; forced removal can delete ignored nested worktrees")
+			}
+			if strings.Contains(step, "rm -rf") {
+				t.Fatal("worktree cleanup must not fall back to rm -rf; that bypasses git's worktree safety checks")
+			}
+			for _, want := range []string{
+				"DESCENDANT_WORKTREE",
+				"worktree list --porcelain",
+				"index(path, root \"/\") == 1",
+				"if ! git -C \"$GIT_CONTEXT\" worktree remove",
+			} {
+				if !strings.Contains(step, want) {
+					t.Fatalf("worktree cleanup missing %q; it must veto registered descendant worktrees before removing the parent", want)
+				}
+			}
+		})
+	}
+}
+
+func TestCoreWorktreeCleanupKeepsMetadataWhenGitRemoveFails(t *testing.T) {
+	cases := []struct {
+		file string
+		step string
+		root string
+	}{
+		{file: "mol-scoped-work.toml", step: "cleanup-worktree", root: "WORKTREE"},
+		{file: "mol-polecat-commit.toml", step: "commit-and-push", root: "WORKTREE_PATH"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			step := formulaStep(t, readFormula(t, tc.file), tc.step)
+			result := simulateFormulaCleanup(t, step, tc.root, true)
+			if result.unsetWorkDir {
+				t.Fatal("cleanup unset work_dir after simulated git worktree remove failure")
+			}
+			if result.exitCode == 0 {
+				t.Fatal("cleanup succeeded after simulated git worktree remove failure")
+			}
+		})
+	}
+}
+
+func simulateFormulaWorkspaceSetupPath(t *testing.T, step, currentDir string, registeredWorktrees []string, beadID string) string {
+	t.Helper()
+	block := shellBlockContaining(t, step, "WORKTREE_PATH=\"$WORKTREE_PARENT/$WORK_BEAD_ID\"")
+	currentWorktree := shortestContainingWorktree(currentDir, registeredWorktrees)
+	worktreeParent := currentDir
+	if currentWorktree != "" {
+		currentWorktreeParent := filepath.Dir(currentWorktree)
+		switch {
+		case strings.Contains(block, "CURRENT_WORKTREE_PARENT=$(dirname \"$CURRENT_WORKTREE\")") &&
+			strings.Contains(block, "basename \"$CURRENT_WORKTREE_PARENT\")\" = \"worktrees\"") &&
+			strings.Contains(block, "WORKTREE_PARENT=\"$CURRENT_WORKTREE/worktrees\""):
+			if filepath.Base(currentWorktreeParent) == "worktrees" {
+				worktreeParent = currentWorktreeParent
+			} else {
+				worktreeParent = filepath.Join(currentWorktree, "worktrees")
+			}
+		case strings.Contains(block, "WORKTREE_PARENT=$(dirname \"$CURRENT_WORKTREE\")"):
+			worktreeParent = filepath.Dir(currentWorktree)
+		default:
+			t.Fatalf("workspace setup block does not contain a recognized worktree parent assignment:\n%s", block)
+		}
+	}
+	if filepath.Base(worktreeParent) != "worktrees" {
+		worktreeParent = filepath.Join(worktreeParent, "worktrees")
+	}
+	return filepath.Join(worktreeParent, beadID)
+}
+
+func shortestContainingWorktree(currentDir string, registered []string) string {
+	var best string
+	for _, path := range registered {
+		if currentDir == path || strings.HasPrefix(currentDir, path+string(filepath.Separator)) {
+			if best == "" || len(path) < len(best) {
+				best = path
+			}
+		}
+	}
+	return best
+}
+
+type cleanupSimulationResult struct {
+	exitCode     int
+	unsetWorkDir bool
+}
+
+func simulateFormulaCleanup(t *testing.T, step, worktreeVar string, gitRemoveFails bool) cleanupSimulationResult {
+	t.Helper()
+	block := shellBlockContaining(t, step, "worktree remove")
+	removeLine := "git -C \"$GIT_CONTEXT\" worktree remove \"$" + worktreeVar + "\""
+	removeAt := strings.Index(block, removeLine)
+	if removeAt < 0 {
+		t.Fatalf("cleanup block missing %q:\n%s", removeLine, block)
+	}
+	unsetAt := strings.Index(block, "gc bd update \"$WORK_BEAD_ID\" --unset-metadata work_dir")
+	if unsetAt < 0 {
+		t.Fatalf("cleanup block missing work_dir metadata cleanup:\n%s", block)
+	}
+	if !gitRemoveFails {
+		return cleanupSimulationResult{exitCode: 0, unsetWorkDir: true}
+	}
+	lineStart := strings.LastIndex(block[:removeAt], "\n") + 1
+	lineEnd := strings.Index(block[removeAt:], "\n")
+	if lineEnd < 0 {
+		lineEnd = len(block)
+	} else {
+		lineEnd += removeAt
+	}
+	removeStmt := strings.TrimSpace(block[lineStart:lineEnd])
+	if removeStmt == "if ! "+removeLine+"; then" {
+		exitAt := strings.Index(block[removeAt:unsetAt], "exit 1")
+		if exitAt >= 0 {
+			return cleanupSimulationResult{exitCode: 1}
+		}
+	}
+	return cleanupSimulationResult{exitCode: 0, unsetWorkDir: true}
+}
+
+func shellBlockContaining(t *testing.T, text, needle string) string {
+	t.Helper()
+	for _, block := range shellBlocks(text) {
+		if strings.Contains(block, needle) {
+			return block
+		}
+	}
+	t.Fatalf("no shell block contains %q", needle)
+	return ""
+}
+
+func shellBlocks(text string) []string {
+	var blocks []string
+	inBlock := false
+	var current strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		switch {
+		case strings.HasPrefix(line, "```"):
+			if inBlock {
+				blocks = append(blocks, current.String())
+				current.Reset()
+				inBlock = false
+				continue
+			}
+			inBlock = true
+		case inBlock:
+			current.WriteString(line)
+			current.WriteByte('\n')
+		}
+	}
+	return blocks
 }

@@ -2004,9 +2004,9 @@ func TestCmdMailReply_FallsBackToGCSessionIDWhenAliasMissing(t *testing.T) {
 	t.Setenv("GC_AGENT", "codeprobe-worker")
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-2", "reply body"}, "", "", false, &stdout, &stderr)
+	code := cmdMailReplyFrom([]string{"gc-2", "reply body"}, "", "", "", false, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Replied to gc-2") {
 		t.Fatalf("stdout = %q, want reply confirmation", stdout.String())
@@ -2054,9 +2054,11 @@ func TestCmdMailReplyHumanNotifyQueuesNudge(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{original.ID, "reply body"}, "", "", true, &stdout, &stderr)
+	// No ambient identity here, so the operator claims "human" explicitly
+	// rather than inheriting it by default (gas-j2t7).
+	code := cmdMailReplyFrom([]string{original.ID, "reply body"}, "human", "", "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "to alice") {
 		t.Fatalf("stdout = %q, want reply addressed to alice", stdout.String())
@@ -2089,9 +2091,11 @@ func TestCmdMailReplyExecProviderNotifyQueuesNudge(t *testing.T) {
 	t.Setenv("GC_MAIL", "exec:"+script)
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-1", "reply body"}, "", "", true, &stdout, &stderr)
+	// No ambient identity here, so the operator claims "human" explicitly
+	// rather than inheriting it by default (gas-j2t7).
+	code := cmdMailReplyFrom([]string{"gc-1", "reply body"}, "human", "", "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	assertQueuedMailNudge(t, cityPath, sessionID, stderr.String())
@@ -2106,7 +2110,7 @@ func TestMailReplyNudgeAliasQueuesNudge(t *testing.T) {
 	if cmd.Flags().Lookup("nudge") == nil {
 		t.Fatal("reply command missing --nudge alias")
 	}
-	cmd.SetArgs([]string{"gc-1", "--nudge", "reply body"})
+	cmd.SetArgs([]string{"gc-1", "--nudge", "--from", "human", "reply body"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("reply --nudge: %v; stdout=%s stderr=%s", err, stdout.String(), stderr.String())
 	}
@@ -2126,9 +2130,11 @@ func TestCmdMailReplyExecProviderNotifyWithoutCityWarnsAndSendsReply(t *testing.
 	t.Chdir(t.TempDir())
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-1", "reply body"}, "", "", true, &stdout, &stderr)
+	// No ambient identity here, so the operator claims "human" explicitly
+	// rather than inheriting it by default (gas-j2t7).
+	code := cmdMailReplyFrom([]string{"gc-1", "reply body"}, "human", "", "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "Replied to gc-1") {
 		t.Fatalf("stdout = %q, want reply confirmation", stdout.String())
@@ -2160,9 +2166,9 @@ func TestCmdMailReplyExecProviderNotifyResolvesNonHumanSender(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdMailReply([]string{"gc-1", "reply body"}, "", "", true, &stdout, &stderr)
+	code := cmdMailReplyFrom([]string{"gc-1", "reply body"}, "", "", "", true, &stdout, &stderr)
 	if code != 0 {
-		t.Fatalf("cmdMailReply() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		t.Fatalf("cmdMailReplyFrom() = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
 	}
 
 	assertQueuedMailNudgeMessage(t, cityPath, sessionID, "You have mail from bob", stderr.String())
@@ -2265,7 +2271,7 @@ func TestMailCommandsRejectMissingIDBeforeProviderCall(t *testing.T) {
 		{
 			name: "reply",
 			run: func(stdout, stderr *bytes.Buffer) int {
-				return cmdMailReply(nil, "", "", false, stdout, stderr)
+				return cmdMailReplyFrom(nil, "", "", "", false, stdout, stderr)
 			},
 			wantStderr: "gc mail reply: missing message ID\n",
 		},
@@ -3606,6 +3612,27 @@ func TestMailCheckInjectDoesNotCloseBeads(t *testing.T) {
 	}
 }
 
+// assertAutoHandoffRetainedAddressable pins the dip-6ov51a contract at the inject
+// integration boundary: an injected auto-handoff is MARK-READ + CLOSED and stamped
+// with the retention marker (retain-addressable), NOT hard-deleted, so an
+// unconsumed handoff stays recoverable until the read-gated TTL sweep reclaims it.
+func assertAutoHandoffRetainedAddressable(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("auto handoff %s must be retained addressable after injection, not hard-deleted; store.Get = %v", id, err)
+	}
+	if b.Status != "closed" {
+		t.Errorf("auto handoff %s status = %q, want closed", id, b.Status)
+	}
+	if got := b.Metadata[mail.ReadMetadataKey]; got != "true" {
+		t.Errorf("auto handoff %s metadata[%q] = %q, want %q (marked read)", id, mail.ReadMetadataKey, got, "true")
+	}
+	if got := b.Metadata["close_reason"]; got != beadmail.RetentionSweepCloseReason {
+		t.Errorf("auto handoff %s close_reason = %q, want %q (retain-addressable)", id, got, beadmail.RetentionSweepCloseReason)
+	}
+}
+
 func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3632,9 +3659,7 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("injected output missing auto handoff id %s:\n%s", auto.ID, stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto handoff mail should be archived after injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 	b, err := store.Get(ordinary.ID)
 	if err != nil {
 		t.Fatalf("ordinary mail should remain: %v", err)
@@ -3645,9 +3670,10 @@ func TestMailCheckInjectArchivesAutoHandoffMessages(t *testing.T) {
 }
 
 // TestMailCheckInjectArchivesEphemeralAutoHandoffMessages verifies that
-// ephemeral (wisp-tier) auto-handoff mail is archived after injection.
+// ephemeral (wisp-tier) auto-handoff mail is retired after injection.
 // gc handoff --auto creates Ephemeral:true beads; BdStore.Get must fall back
-// to the wisp tier so ArchiveInjectedAutoHandoffs can delete them.
+// to the wisp tier so ArchiveInjectedAutoHandoffs can retire them
+// (mark-read + close, retain-addressable — dip-6ov51a).
 func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	store := beads.NewMemStore()
 	mp := beadmail.New(store)
@@ -3671,9 +3697,7 @@ func TestMailCheckInjectArchivesEphemeralAutoHandoffMessages(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("injected output missing auto handoff id %s:\n%s", auto.ID, stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("ephemeral auto handoff mail should be archived after injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 // TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow is the deliberate
@@ -3719,10 +3743,8 @@ func TestMailCheckInjectFloatsPriorityAutoHandoffIntoWindow(t *testing.T) {
 	if !strings.Contains(stdout.String(), auto.ID) {
 		t.Fatalf("priority:1 auto handoff id %s should float into the injection window:\n%s", auto.ID, stdout.String())
 	}
-	// ...and is archived (deleted) after injection.
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("priority:1 auto handoff should be archived after injection, got err=%v", err)
-	}
+	// ...and is retired (mark-read+closed, retain-addressable) after injection.
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 	// The lowest-ranked ordinary message is the one clamped out — still open.
 	clampedOut := ordinaryIDs[len(ordinaryIDs)-1]
 	b, err := store.Get(clampedOut)
@@ -4637,9 +4659,7 @@ name = "mayor"
 	if strings.Contains(stdout.String(), "msg-1") {
 		t.Fatalf("inject path used API inbox instead of local provider:\n%s", stdout.String())
 	}
-	if _, err := store.Get(auto.ID); !errors.Is(err, beads.ErrNotFound) {
-		t.Fatalf("auto handoff mail should be archived after local injection, got err=%v", err)
-	}
+	assertAutoHandoffRetainedAddressable(t, store, auto.ID)
 }
 
 func TestRenderMailCheckFromAPIInjectCodexUsesUserPromptSubmit(t *testing.T) {

@@ -12,9 +12,11 @@ import (
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/hooks"
+	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/packman"
 	"github.com/gastownhall/gascity/internal/rig"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -938,6 +940,12 @@ func cmdRigSuspend(args []string, stdout, stderr io.Writer) int {
 		err := c.SuspendRig(rigName)
 		if err == nil {
 			fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
+			// The controller records the rig.suspended event; the scheduled-order
+			// warning is client-side so the human (or agent) running the command
+			// sees what the suspension turns off.
+			if cfg, cfgErr := loadCityConfig(cityPath, io.Discard); cfgErr == nil {
+				warnRigScheduledOrders(fsys.OSFS{}, cityPath, cfg, rigName, stdout, stderr)
+			}
 			return 0
 		}
 		if !api.ShouldFallback(c, err) {
@@ -987,8 +995,52 @@ func doRigSuspend(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer
 		return 1
 	}
 
+	openCityRecorderAt(cityPath, stderr).Record(events.Event{
+		Type:    events.RigSuspended,
+		Actor:   eventActor(),
+		Subject: rigName,
+	})
 	fmt.Fprintf(stdout, "Suspended rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
+	// The edit-oriented cfg above skips pack/include expansion, so it cannot
+	// see pack-imported rig orders — the warning needs a full load.
+	if fullCfg, cfgErr := loadCityConfigFS(fs, tomlPath, io.Discard); cfgErr == nil {
+		warnRigScheduledOrders(fs, cityPath, fullCfg, rigName, stdout, stderr)
+	}
 	return 0
+}
+
+// rigScheduledOrderNames returns the scoped names of enabled, auto-dispatchable
+// orders (trigger neither manual nor webhook) that target the named rig. These
+// are exactly the orders that stop firing while the rig is suspended.
+func rigScheduledOrderNames(aa []orders.Order, rigName string) []string {
+	var names []string
+	for _, a := range orders.FilterEnabled(aa) {
+		if a.Rig != rigName || a.Trigger == "manual" || a.Trigger == "webhook" {
+			continue
+		}
+		names = append(names, a.ScopedName())
+	}
+	return names
+}
+
+// warnRigScheduledOrders tells the suspending caller which scheduled orders the
+// suspension turns off. A rig whose work arrives via cron/cooldown orders has
+// an empty bead backlog, so it looks idle to whoever is suspending it — and
+// suspension then silently stops that scheduled work (gas-9gny: 2.5 days of
+// unfired orders). Best-effort: a scan failure is reported and skipped, never
+// fatal to the suspend itself.
+func warnRigScheduledOrders(fs fsys.FS, cityPath string, cfg *config.City, rigName string, stdout, stderr io.Writer) {
+	snapshot, err := scanOrderSetSnapshotFS(fs, cityPath, cfg, stderr, "gc rig suspend")
+	if err != nil {
+		fmt.Fprintf(stderr, "gc rig suspend: scanning orders for suspension warning: %v\n", err) //nolint:errcheck // best-effort stderr
+		return
+	}
+	names := rigScheduledOrderNames(snapshot.Orders, rigName)
+	if len(names) == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "warning: %d scheduled order(s) target rig '%s' and will NOT fire while it is suspended: %s\n", //nolint:errcheck // best-effort stdout
+		len(names), rigName, strings.Join(names, ", "))
 }
 
 func newRigResumeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -1105,6 +1157,11 @@ func doRigResume(fs fsys.FS, cityPath, rigName string, stdout, stderr io.Writer)
 		return 1
 	}
 
+	openCityRecorderAt(cityPath, stderr).Record(events.Event{
+		Type:    events.RigResumed,
+		Actor:   eventActor(),
+		Subject: rigName,
+	})
 	fmt.Fprintf(stdout, "Resumed rig '%s'\n", rigName) //nolint:errcheck // best-effort stdout
 	return 0
 }

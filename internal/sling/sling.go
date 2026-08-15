@@ -68,6 +68,20 @@ type SlingOpts struct {
 	InlineText bool
 	ScopeKind  string
 	ScopeRef   string
+	// Branch, when non-empty, is stamped as metadata.branch on the routed
+	// bead; TargetBranch does the same for metadata.target. These are the
+	// branch-handoff contract keys merge-queue consumers filter on
+	// (--has-metadata-key=branch) and read to know what to merge, so one
+	// sling can hand off landed work without a separate, forgettable
+	// `bd update --set-metadata` first (gas-jyi5). Stamping happens BEFORE
+	// routing: the assignee write inside Route is what makes the bead
+	// visible to `--assignee=$GC_AGENT` consumers, so pre-stamping means a
+	// bead enters the consumer's queue contract-complete instead of being
+	// silently filtered while half-stamped. Rejected on IsFormula launches
+	// (no subject bead exists) and on container beads (branch is
+	// per-work-bead; see DoSlingBatch).
+	Branch       string
+	TargetBranch string
 }
 
 // AgentResolver resolves an agent name to a config.Agent.
@@ -105,7 +119,7 @@ type SourceWorkflowStore struct {
 type RouteRequest struct {
 	BeadID   string
 	Target   string            // qualified agent name
-	Metadata map[string]string // gc.routed_to, pool label, etc.
+	Metadata map[string]string // additional route metadata to persist atomically with gc.routed_to
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
@@ -268,6 +282,13 @@ type RouteOpts struct {
 	// target agent has one configured. Without this field, ExpandConvoy
 	// cannot propagate --no-formula through DoSlingBatch.
 	NoFormula bool
+	// Branch/TargetBranch mirror SlingOpts: stamp metadata.branch /
+	// metadata.target on the routed bead before routing. Carried here so
+	// RouteBead API callers can stamp, and so the CLI's plain-bead convoy
+	// path (ExpandConvoy) threads the values through to DoSlingBatch's
+	// container rejection instead of silently dropping them.
+	Branch       string
+	TargetBranch string
 }
 
 // FormulaOpts holds options for formula-based operations.
@@ -311,6 +332,8 @@ func (s *Sling) RouteBead(_ context.Context, beadID string, target config.Agent,
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,
 		NoFormula:     opts.NoFormula,
+		Branch:        opts.Branch,
+		TargetBranch:  opts.TargetBranch,
 	}, s.deps, s.deps.Store)
 }
 
@@ -371,6 +394,8 @@ func (s *Sling) ExpandConvoy(_ context.Context, convoyID string, target config.A
 		DryRun:        opts.DryRun,
 		InlineText:    opts.InlineText,
 		NoFormula:     opts.NoFormula,
+		Branch:        opts.Branch,
+		TargetBranch:  opts.TargetBranch,
 	}, s.deps, querier)
 }
 
@@ -912,6 +937,18 @@ func ClonePriorityPtr(v *int) *int {
 	return &cloned
 }
 
+// beadBranchMetadataKey and beadTargetMetadataKey are the unprefixed,
+// pack-facing metadata keys of the branch-handoff contract: branch is the
+// branch carrying a bead's work, target the branch it merges into. Unlike
+// the gc.*-namespaced SDK keys (internal/beadmeta), these are written and
+// read by pack formulas directly (workspace-setup stamps branch; merge-queue
+// find-work queries filter --has-metadata-key=branch), so the bare names are
+// pack API and must not change.
+const (
+	beadBranchMetadataKey = "branch"
+	beadTargetMetadataKey = "target"
+)
+
 // BeadMetadataTarget walks the bead's parent chain looking for a "target"
 // metadata value (used for branch targeting).
 func BeadMetadataTarget(store beads.Store, beadID string) string {
@@ -931,7 +968,7 @@ func BeadMetadataTarget(store beads.Store, beadID string) string {
 		if err != nil {
 			return ""
 		}
-		if target := strings.TrimSpace(b.Metadata["target"]); target != "" {
+		if target := strings.TrimSpace(b.Metadata[beadTargetMetadataKey]); target != "" {
 			if beadID == rootID || b.Type == "convoy" {
 				return target
 			}

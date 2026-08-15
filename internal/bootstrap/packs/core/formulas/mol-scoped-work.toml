@@ -98,7 +98,30 @@ if [ -z "$WORK_BEAD_ID" ]; then
 fi
 WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -z "$WORKTREE" ]; then
-  WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
+  CURRENT_DIR=$(pwd -P)
+  CURRENT_WORKTREE=$(
+    git worktree list --porcelain | awk -v cwd="$CURRENT_DIR" '
+      $1 == "worktree" {
+        path = substr($0, 10)
+        if (cwd == path || index(cwd, path "/") == 1) {
+          if (best == "" || length(path) < length(best)) best = path
+        }
+      }
+      END { print best }
+    '
+  )
+  if [ -n "$CURRENT_WORKTREE" ]; then
+    CURRENT_WORKTREE_PARENT=$(dirname "$CURRENT_WORKTREE")
+    if [ "$(basename "$CURRENT_WORKTREE_PARENT")" = "worktrees" ]; then
+      WORKTREE_PARENT="$CURRENT_WORKTREE_PARENT"
+    else
+      WORKTREE_PARENT="$CURRENT_WORKTREE/worktrees"
+    fi
+  else
+    WORKTREE_PARENT="$CURRENT_DIR/worktrees"
+  fi
+  mkdir -p "$WORKTREE_PARENT"
+  WORKTREE_PATH="$WORKTREE_PARENT/$WORK_BEAD_ID"
   git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
   gc bd update "$WORK_BEAD_ID" --set-metadata work_dir="$WORKTREE_PATH"
   WORKTREE="$WORKTREE_PATH"
@@ -204,7 +227,31 @@ if [ -z "$WORK_BEAD_ID" ]; then
 fi
 WORKTREE=$(gc bd show "$WORK_BEAD_ID" --json | jq -r '.[0].metadata.work_dir // empty')
 if [ -n "$WORKTREE" ] && [ -d "$WORKTREE" ]; then
-  git worktree remove --force "$WORKTREE" || rm -rf "$WORKTREE"
+  WORKTREE=$(cd "$WORKTREE" && pwd -P)
+  GIT_CONTEXT=$(git -C "$WORKTREE" worktree list --porcelain | sed -n '1s/^worktree //p')
+  if [ -z "$GIT_CONTEXT" ]; then
+    echo "Cannot resolve git worktree context for $WORKTREE" >&2
+    exit 1
+  fi
+  DESCENDANT_WORKTREE=$(
+    git -C "$GIT_CONTEXT" worktree list --porcelain | awk -v root="$WORKTREE" '
+      $1 == "worktree" {
+        path = substr($0, 10)
+        if (path != root && index(path, root "/") == 1) {
+          print path
+          exit
+        }
+      }
+    '
+  )
+  if [ -n "$DESCENDANT_WORKTREE" ]; then
+    echo "Refusing cleanup: registered descendant worktree at $DESCENDANT_WORKTREE" >&2
+    exit 1
+  fi
+  if ! git -C "$GIT_CONTEXT" worktree remove "$WORKTREE"; then
+    echo "Refusing cleanup: git worktree remove failed for $WORKTREE" >&2
+    exit 1
+  fi
 fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```

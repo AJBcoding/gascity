@@ -262,6 +262,44 @@ func TestTypedEventEnvelopeUnionsCoverKnownEventTypes(t *testing.T) {
 	}
 }
 
+func TestBeadClaimCompensationFailedHasTypedEventEnvelopePayload(t *testing.T) {
+	const wantPayloadRef = "#/components/schemas/BeadClaimCompensationFailedPayload"
+	for _, source := range eventStreamSpecCases(t) {
+		t.Run(source.name, func(t *testing.T) {
+			schemas := componentSchemas(t, source.spec)
+			if _, ok := schemas["BeadClaimCompensationFailedPayload"]; !ok {
+				t.Fatalf("components.schemas missing BeadClaimCompensationFailedPayload")
+			}
+			for _, schemaName := range []string{"TypedEventStreamEnvelope", "TypedTaggedEventStreamEnvelope"} {
+				t.Run(schemaName, func(t *testing.T) {
+					union, ok := schemas[schemaName]
+					if !ok {
+						t.Fatalf("components.schemas missing %s", schemaName)
+					}
+					discriminator := typedEventDiscriminatorMapping(t, union, schemaName)
+					ref := discriminator[events.BeadClaimCompensationFailed]
+					if ref == "" {
+						t.Fatalf("%s discriminator missing %s", schemaName, events.BeadClaimCompensationFailed)
+					}
+					variant := schemaByRef(t, schemas, ref)
+					properties, ok := variant["properties"].(map[string]any)
+					if !ok {
+						t.Fatalf("%s variant %s properties missing", schemaName, ref)
+					}
+					payloadProperty, ok := properties["payload"].(map[string]any)
+					if !ok {
+						t.Fatalf("%s variant %s payload property missing", schemaName, ref)
+					}
+					gotPayloadRef, _ := payloadProperty["$ref"].(string)
+					if gotPayloadRef != wantPayloadRef {
+						t.Fatalf("%s payload ref = %q, want %q", schemaName, gotPayloadRef, wantPayloadRef)
+					}
+				})
+			}
+		})
+	}
+}
+
 func eventStreamSpecCases(t *testing.T) []struct {
 	name string
 	spec map[string]any

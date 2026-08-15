@@ -47,4 +47,16 @@ if [ -n "$SEVERITY" ] && ! printf '%s' "$SUBJECT" | grep -Eq '\[[^]]+\]$'; then
 fi
 
 RECIPIENT="${GC_ESCALATION_RECIPIENT:-human}"
-gc mail send "$RECIPIENT" -s "$SUBJECT" -m "$MESSAGE"
+
+# An agent invoking this hook is identified by its session, and mail picks that
+# up on its own. Run from a maintenance script under the orchestrator there is
+# no session, and mail refuses to guess a sender rather than speak as the
+# operator — so name the orchestrator, which is what actually escalated.
+#
+# --from trails the message so that "mail send <recipient> -s <subject>" stays
+# contiguous; callers assert on that shape to pin escalation routing.
+if [ -n "${GC_SESSION_ID:-}${GC_ALIAS:-}${GC_AGENT:-}" ]; then
+    gc mail send "$RECIPIENT" -s "$SUBJECT" -m "$MESSAGE"
+else
+    gc mail send "$RECIPIENT" -s "$SUBJECT" -m "$MESSAGE" --from controller
+fi

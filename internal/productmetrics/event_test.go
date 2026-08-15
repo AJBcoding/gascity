@@ -350,12 +350,13 @@ func TestInjectedImmutableCommandCatalogRoundTripsWithoutExpandingProduction(t *
 
 	generatedCount := 0
 	generatedCommandIDCatalog(func(commandIDEntry) { generatedCount++ })
-	// 198 = upstream's 196 plus this lane's two commands, which the gas-to2q
-	// merge renumbered to 201/202 because both lanes had independently assigned
-	// 196/197 (see gas-to2q). The number follows the regenerated catalog, not
-	// either side's pre-merge count.
-	if generatedCount != 198 {
-		t.Fatalf("generated production catalog has %d entries, want 198", generatedCount)
+	// 200 = the post-gas-to2q 198 (upstream's 196 + this lane's two commands,
+	// renumbered to 201/202 there) plus upstream's storage-recover-stranded and
+	// beads-metadata-cas, which the gas-0lex lane refresh renumbered to 203/204
+	// because both forks had again independently assigned 201/202. The number
+	// follows the regenerated catalog, not either side's pre-merge count.
+	if generatedCount != 200 {
+		t.Fatalf("generated production catalog has %d entries, want 200", generatedCount)
 	}
 
 	injected := func(yield func(commandIDEntry)) {

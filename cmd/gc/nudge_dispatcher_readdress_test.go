@@ -104,7 +104,7 @@ func TestDispatchAllQueuedNudgesReaddressesOrphanedFence(t *testing.T) {
 	// Delivery itself is not under test (nil provider; target resolution may
 	// skip) — the assertion is that the dispatcher's re-address pass persisted
 	// before any delivery attempt.
-	if _, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, nil, snap); err != nil {
+	if _, err := dispatchAllQueuedNudges(dir, supervisorCfg(), nil, nil, nil, snap, nil); err != nil {
 		t.Logf("dispatchAllQueuedNudges (delivery not under test): %v", err)
 	}
 

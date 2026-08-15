@@ -884,7 +884,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		}
 	}
 
-	sp, err := newSessionProvider()
+	sp, err := newSessionProviderForCity(cfg, cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc start: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -1031,7 +1031,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		poolDesired = make(map[string]int)
 	}
 	mergeNamedSessionDemand(poolDesired, dsResult.NamedSessionDemand, cfg)
-	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
+	awakeAssignedWorkBeads, awakeAssignedStoreRefs := filterAssignedWorkBeadsForSessionWake(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	reconcileSessionBeadsAtPathWithNamedDemand(
 		sigCtx, cityPath, sessionBeads.OpenForReconcile(), sessionBeads, ds, cfgNames, cfg, sp, sessStore,
 		nil, awakeAssignedWorkBeads, rigStores, nil, dt, nil, poolDesired,

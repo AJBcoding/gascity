@@ -69,7 +69,30 @@ If the directory is missing, fall through to create a new one.
 
 **If no worktree** — create one:
 ```bash
-WORKTREE_PATH=$(pwd)/worktrees/"$WORK_BEAD_ID"
+CURRENT_DIR=$(pwd -P)
+CURRENT_WORKTREE=$(
+  git worktree list --porcelain | awk -v cwd="$CURRENT_DIR" '
+    $1 == "worktree" {
+      path = substr($0, 10)
+      if (cwd == path || index(cwd, path "/") == 1) {
+        if (best == "" || length(path) < length(best)) best = path
+      }
+    }
+    END { print best }
+  '
+)
+if [ -n "$CURRENT_WORKTREE" ]; then
+  CURRENT_WORKTREE_PARENT=$(dirname "$CURRENT_WORKTREE")
+  if [ "$(basename "$CURRENT_WORKTREE_PARENT")" = "worktrees" ]; then
+    WORKTREE_PARENT="$CURRENT_WORKTREE_PARENT"
+  else
+    WORKTREE_PARENT="$CURRENT_WORKTREE/worktrees"
+  fi
+else
+  WORKTREE_PARENT="$CURRENT_DIR/worktrees"
+fi
+mkdir -p "$WORKTREE_PARENT"
+WORKTREE_PATH="$WORKTREE_PARENT/$WORK_BEAD_ID"
 git worktree add "$WORKTREE_PATH" --detach origin/{{base_branch}}
 cd "$WORKTREE_PATH"
 ```
@@ -135,9 +158,34 @@ done
 
 **3. Clean up worktree:**
 ```bash
-WORKTREE_PATH=$(pwd)
-cd ..
-git worktree remove "$WORKTREE_PATH" --force
+WORKTREE_PATH=$(pwd -P)
+GIT_CONTEXT=$(git worktree list --porcelain | sed -n '1s/^worktree //p')
+if [ -z "$GIT_CONTEXT" ]; then
+    echo "Cannot resolve git worktree context for $WORKTREE_PATH"
+    gc runtime drain-ack
+    exit 1
+fi
+DESCENDANT_WORKTREE=$(
+    git -C "$GIT_CONTEXT" worktree list --porcelain | awk -v root="$WORKTREE_PATH" '
+      $1 == "worktree" {
+        path = substr($0, 10)
+        if (path != root && index(path, root "/") == 1) {
+          print path
+          exit
+        }
+      }
+    '
+)
+if [ -n "$DESCENDANT_WORKTREE" ]; then
+    echo "Refusing cleanup: registered descendant worktree at $DESCENDANT_WORKTREE"
+    gc runtime drain-ack
+    exit 1
+fi
+if ! git -C "$GIT_CONTEXT" worktree remove "$WORKTREE_PATH"; then
+    echo "Refusing cleanup: git worktree remove failed for $WORKTREE_PATH"
+    gc runtime drain-ack
+    exit 1
+fi
 gc bd update "$WORK_BEAD_ID" --unset-metadata work_dir
 ```
 

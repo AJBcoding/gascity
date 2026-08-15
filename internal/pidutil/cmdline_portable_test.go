@@ -136,59 +136,24 @@ func TestCmdline_FailsClosedWhenUnreadable(t *testing.T) {
 	}
 	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
 
-	if AliveWithCmdline(os.Getpid(), func([]string) bool { return true }) {
-		t.Fatal("AliveWithCmdline = true with no readable argv; must fail closed so the caller starts its poller.\n" +
-			"\n" +
-			"If you are seeing this after merging upstream, the safety property is probably NOT broken — check\n" +
-			"TestCmdlineArgvReadStaysOnTheStubbablePSSeam in this package first. This test fabricates \"unreadable\n" +
-			"argv\" by putting a failing ps on PATH, which only works while ps is the sole argv reader. A\n" +
-			"platform-specific reader (kern.procargs2 via cmdline_darwin.go) ignores the stub, argv stays readable,\n" +
-			"and this test reports that correct answer as a safety failure. Measured on origin/main: argv for a\n" +
-			"genuinely unreadable process DOES fail closed there. See gas-txwt.")
-	}
-}
-
-// TestCmdlineArgvReadStaysOnTheStubbablePSSeam guards a merge hazard that the
-// test above cannot report clearly.
-//
-// #4853 deliberately removed the darwin kern.procargs2 reader in favor of ps,
-// "which is how the rest of this repo already reads another process's argv". An
-// upstream merge that restores cmdline_darwin.go/procargs2.go re-arms the
-// confusion: the behavioral test above starts failing with a message about
-// failing closed, pointing at a safety bug that does not exist. That cost a
-// 40-minute gate and a wrong root cause in a P1 (gas-txwt).
-//
-// This runs on every platform on purpose. The behavioral test skips on linux,
-// so a reintroduced darwin-only reader sails through a linux CI runner and only
-// explodes on the macOS agents — which is the whole fleet here.
-func TestCmdlineArgvReadStaysOnTheStubbablePSSeam(t *testing.T) {
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("ReadDir(pidutil): %v", err)
-	}
-	for _, entry := range entries {
-		name := entry.Name()
-		if name != "cmdline_darwin.go" && name != "procargs2.go" {
-			continue
+	// On Darwin argv comes from kern.procargs2, which the ps stub cannot make
+	// unreadable for our own pid — sysctl returns the test binary's argv
+	// regardless of PATH (measured on the gas-0lex host: the stub left this
+	// test red on macOS while linux CI skips it above). Probe launchd instead:
+	// reading another user's procargs2 is EPERM for an unprivileged caller,
+	// which is the genuinely-unreadable case this test exists to pin. Alive(1)
+	// stays true (kill-0 EPERM means exists; the stubbed ps cannot claim
+	// zombie), so the assertion still exercises the Cmdline-error fail-closed
+	// branch and not a vacuous not-alive early return.
+	pid := os.Getpid()
+	if runtime.GOOS == "darwin" {
+		if os.Geteuid() == 0 {
+			t.Skip("running as root: kern.procargs2 of pid 1 is readable, argv cannot be made unreadable")
 		}
-		t.Fatalf("%s is back in internal/pidutil. It reads argv through a syscall instead of ps, so the ps\n"+
-			"stub in TestCmdline_FailsClosedWhenUnreadable cannot make argv unreadable and that test fails with a\n"+
-			"misleading message about failing closed. #4853/#4854 removed this path on purpose; if upstream wants\n"+
-			"it back, the fabricated-unreadable test has to be reworked in the same change. See gas-txwt.", name)
+		pid = 1
 	}
-
-	// The same hazard reached through the source rather than the filename: any
-	// argv read that is not the ps seam defeats the stub the test above relies on.
-	source, err := os.ReadFile("pidutil.go")
-	if err != nil {
-		t.Fatalf("ReadFile(pidutil.go): %v", err)
-	}
-	for _, forbidden := range []string{"kern.procargs2", "platformCmdline"} {
-		if strings.Contains(string(source), forbidden) {
-			t.Fatalf("pidutil.go references %q, so Cmdline no longer reads argv only through the stubbable ps\n"+
-				"seam. See the failure message above for why that breaks TestCmdline_FailsClosedWhenUnreadable.",
-				forbidden)
-		}
+	if AliveWithCmdline(pid, func([]string) bool { return true }) {
+		t.Fatal("AliveWithCmdline = true with no readable argv; must fail closed so the caller starts its poller")
 	}
 }
 

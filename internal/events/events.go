@@ -32,6 +32,41 @@ const (
 	// Turns the otherwise-silent lost-claim race (RCA gc-typpc: one bead, four
 	// concurrent polecat claims) into an observable signal. ADR-0009.
 	BeadClaimRejected = "bead.claim_rejected"
+	// BeadClaimReleased fires when a claim this process WON is given back
+	// because it could not be delivered to a live consumer: the worker's result
+	// write failed (the provider closed the tool pipe), the CAS landed after the
+	// invoking turn's claim window was already spent, or continuation sibling
+	// preassignment failed before the result could be written. Each shape
+	// produces a held bead nobody will execute, so the assignment is released
+	// compare-and-swap and this event records that it happened. It is the
+	// release dual of BeadClaimRejected: that one reports a claim we did not
+	// get, this one a claim we could not keep.
+	//
+	// COMPENSATION PAIR — read this before treating step lifecycle as monotonic.
+	// A bead.claim_released whose subject already has an execution.step_started
+	// is the second half of a compensating pair, not a step that ran and
+	// finished: the claim path emits step_started at claim time and only then
+	// discovers it cannot deliver the result (or that the CAS landed past its
+	// window), so the release UNDOES a step that never executed. An
+	// event-sourcing consumer — the runs view especially — must treat that pair
+	// as "no attempt happened" rather than leaving the step in-flight forever
+	// waiting for an execution.step_completed that is never coming. The pair is
+	// always same-subject and same-process, and the payload's reason names which
+	// unwind ran.
+	BeadClaimReleased = "bead.claim_released"
+	// BeadClaimCompensationFailed fires when gc hook --claim assigned
+	// continuation siblings for a claim but could not release every sibling
+	// during failure compensation. The payload names the primary claim, the
+	// assignee whose compare-and-swap release was attempted, the unwind reason,
+	// and the residual sibling bead IDs that remain assigned.
+	BeadClaimCompensationFailed = "bead.claim_compensation_failed"
+	// ExecutionClaimWindowExpired fires when gc hook --claim reaches a claim
+	// mutation after its invocation window has elapsed — the signature of a
+	// claim command that outlived the agent turn that invoked it (an abandoned
+	// or killed provider tool call). No claim is minted. The payload's
+	// invocation_age_ms and parent_alive let the fleet distinguish honest slow
+	// stores from orphaned claimers reparented to init.
+	ExecutionClaimWindowExpired = "execution.claim_window_expired"
 	// ExecutionWorkAssociated records an authoritative association between a
 	// graph.v2 workflow run and one physical input work bead. Subject carries
 	// the work bead and RunID carries the workflow root.
@@ -45,6 +80,13 @@ const (
 	// RunID, SessionID, StepID, and DependsOnStepIDs carry its durable identity.
 	ExecutionStepStarted   = "execution.step_started"
 	ExecutionStepCompleted = "execution.step_completed"
+	// ExecutionStepStalled records that a session claimed a step and then never
+	// executed it: the claim-without-execution shape the controller's execution
+	// backstop gave up re-delivering a claim nudge for. Subject carries the work
+	// bead, RunID the workflow root, SessionID the holder. It is a controller
+	// LIVENESS fact, not a graph execution fact — nothing about the step's
+	// topology is asserted, and no projector consumes it.
+	ExecutionStepStalled = "execution.step_stalled"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -103,12 +145,20 @@ const (
 	// session, template, reset timestamp, and elapsed wait.
 	SessionResetStalled = "session.reset_stalled"
 	// SessionWorkQueryFailed fires when the current managed session's
-	// work-discovery query subprocess is killed by an external signal or
-	// aborted by the runner-imposed timeout before producing output.
+	// work-discovery query FAILED — killed by an external signal, aborted by the
+	// runner-imposed timeout, or exited non-zero — before producing output.
 	// Emission requires the current session ID so the lifecycle payload
 	// remains correlated; the companion reconciler handler is tracked in
 	// #1497.
 	SessionWorkQueryFailed = "session.work_query_failed"
+	// SessionDemandClaimDivergence fires when a seat the controller spawned on
+	// DEMAND evidence drains with no work. It is a diagnostics counter for the
+	// agreement invariant between the two readers — the controller's demand read
+	// and the worker's claim read — and it never influences the drain it reports
+	// on. Two classifications: benign (a sibling legitimately claimed the row
+	// first, which is correct pull, not a defect) and divergence (the row is
+	// still open, unassigned and route-matching, so the readers disagreed).
+	SessionDemandClaimDivergence = "session.demand_claim_divergence"
 	// SessionColdStartTimeout fires when a pool session's first runtime spawn
 	// (a pending create) exceeds the start deadline and is rolled back. It is
 	// per-session: it fires whenever a fresh spawn times out, including a warm
@@ -138,6 +188,17 @@ const (
 	SupervisorRequest = "supervisor.request"
 	CitySuspended     = "city.suspended"
 	CityResumed       = "city.resumed"
+	// RigSuspended fires when a rig's runtime suspension is recorded — via
+	// CLI (`gc rig suspend`) or the dashboard API. Suspension removes the
+	// rig's agents from the desired state AND stops its rig-scoped orders
+	// from firing, so the flip must be attributable on the event bus: a
+	// silent suspension left every rig-scoped order in a city unfired for
+	// 2.5 days with no audit trail of who or when (gas-9gny). Subject is
+	// the rig name.
+	RigSuspended = "rig.suspended"
+	// RigResumed fires when a rig's runtime suspension is lifted. Subject
+	// is the rig name.
+	RigResumed = "rig.resumed"
 	// Typed async request result events. 5 success types (one per
 	// operation, fully typed payload) + 1 shared failure type.
 	RequestResultCityCreate     = "request.result.city.create"
@@ -280,17 +341,21 @@ var KnownEventTypes = []string{
 	SessionUnknownState,
 	SessionResetStalled,
 	SessionWorkQueryFailed,
+	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
-	BeadClaimRejected,
+	BeadClaimRejected, BeadClaimReleased, BeadClaimCompensationFailed,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
+	ExecutionClaimWindowExpired,
+	ExecutionStepStalled,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	CitySuspended, CityResumed,
+	RigSuspended, RigResumed,
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,

@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
 
@@ -70,6 +71,21 @@ func addClosedWorktreeWithAge(t *testing.T, rigRoot, cityPath, agentHome, beadID
 	if age > 0 {
 		backdateWorktreeGitFile(t, wtPath, age)
 	}
+	return wtPath
+}
+
+// addNestedRegisteredWorktree adds a registered git worktree physically inside
+// parentPath/worktrees/<beadID>. This mirrors the production hazard: the inner
+// checkout is a real worktree, but the outer checkout can hide it from status
+// when "worktrees/" is excluded.
+func addNestedRegisteredWorktree(t *testing.T, rigRoot, parentPath, beadID string) string {
+	t.Helper()
+	wtPath := filepath.Join(parentPath, "worktrees", beadID)
+	if err := os.MkdirAll(filepath.Dir(wtPath), 0o755); err != nil {
+		t.Fatalf("mkdir nested worktree parent: %v", err)
+	}
+	mustGit(t, rigRoot, "worktree", "add", "-b", "wt-"+beadID, wtPath)
+	backdateWorktreeGitFile(t, wtPath, 24*time.Hour)
 	return wtPath
 }
 
@@ -151,6 +167,52 @@ func TestReapClosedBeadWorktrees_ProtectsLiveWorktree(t *testing.T) {
 	}
 	if _, err := os.Stat(wt); err != nil {
 		t.Fatalf("live worktree %s was removed or unstattable: %v", wt, err)
+	}
+}
+
+// TestReapClosedBeadWorktrees_ProtectsWorktreeContainingRegisteredDescendant
+// catches the silent data-loss path from gas-o248. A closed outer worktree can
+// be git-clean while containing another registered worktree under an ignored
+// worktrees/ directory. Removing the outer tree destroys the inner checkout and
+// leaves the inner worktree registration dangling, so the reaper must refuse
+// the outer tree before it reaches git worktree remove.
+func TestReapClosedBeadWorktrees_ProtectsWorktreeContainingRegisteredDescendant(t *testing.T) {
+	cityPath, rigRoot := initReapRig(t)
+	outer := addClosedWorktree(t, rigRoot, cityPath, "builder", "ga-outer1")
+	inner := addNestedRegisteredWorktree(t, rigRoot, outer, "ga-inner1")
+	store := beads.NewMemStoreFrom(1, []beads.Bead{
+		{ID: "ga-outer1", Status: "closed"},
+		{ID: "ga-inner1", Status: "open", Metadata: map[string]string{"work_dir": inner}},
+	}, nil)
+	cfg := reapTestConfig(rigRoot)
+	injectLiveness(t, liveWorktreeState{scanned: true})
+
+	excludePath := filepath.Join(rigRoot, ".git", "info", "exclude")
+	existing, err := os.ReadFile(excludePath)
+	if err != nil {
+		t.Fatalf("read git exclude: %v", err)
+	}
+	if err := os.WriteFile(excludePath, append(existing, []byte("\nworktrees/\n")...), 0o644); err != nil {
+		t.Fatalf("write git exclude: %v", err)
+	}
+	if git.New(outer).HasUncommittedWork() {
+		t.Fatal("outer worktree reports uncommitted work; want clean with nested worktrees/ ignored")
+	}
+
+	var stderr bytes.Buffer
+	report := reapClosedBeadWorktrees(cityPath, cfg, map[string]beads.Store{"mrig": store}, nil, false, events.Discard, nil, &stderr)
+
+	if len(report.Reaped) != 0 {
+		t.Fatalf("Reaped = %+v, want 0 when a registered descendant worktree exists\nstderr:\n%s", report.Reaped, stderr.String())
+	}
+	if len(report.Protected) != 1 || !strings.Contains(report.Protected[0].Reason, "descendant worktree") {
+		t.Fatalf("Protected = %+v, want descendant-worktree protection", report.Protected)
+	}
+	if _, err := os.Stat(outer); err != nil {
+		t.Fatalf("outer worktree should remain protected, stat err=%v", err)
+	}
+	if _, err := os.Stat(inner); err != nil {
+		t.Fatalf("inner registered worktree should remain protected, stat err=%v", err)
 	}
 }
 

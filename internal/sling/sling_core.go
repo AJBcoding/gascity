@@ -117,10 +117,36 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 		}
 	}
 
+	if opts.Branch != "" || opts.TargetBranch != "" {
+		if opts.IsFormula {
+			return result, fmt.Errorf("--branch/--target stamp the routed bead; a --formula launch has no bead to stamp")
+		}
+		if IsCustomSlingQuery(a) {
+			return result, fmt.Errorf("--branch/--target require built-in sling routing; custom sling_query for %s cannot persist the route contract atomically", a.QualifiedName())
+		}
+	}
+
+	if opts.ScopeKind != "" && !opts.IsFormula && opts.OnFormula == "" && (opts.NoFormula || a.EffectiveDefaultSlingFormula() == "") {
+		return result, fmt.Errorf("--scope-kind/--scope-ref require a formula-backed workflow launch")
+	}
+
 	// Pre-flight idempotency check.
 	if shouldCheckBeadState(opts) {
 		if resolveIdempotentShortCircuit(opts, a, deps, querier, &result) {
+			if err := repairIdempotentRouteMetadata(opts, deps); err != nil {
+				return result, err
+			}
 			return result, nil
+		}
+	}
+
+	// In-flight dispatch gate: refuse to double-route work another actor
+	// already holds (gas-cnx6). Runs after the idempotency check so settled
+	// same-target re-slings stay no-ops; --force and --reassign bypass it as
+	// the documented takeover escape hatches.
+	if shouldCheckInFlightDispatch(opts) {
+		if err := CheckInFlightDispatch(querier, opts.BeadOrFormula, a, deps); err != nil {
+			return result, err
 		}
 	}
 	if shouldValidateBuiltInRouteStoreReachable(opts, deps) {
@@ -153,10 +179,6 @@ func preflight(opts SlingOpts, deps SlingDeps, querier BeadQuerier) (SlingResult
 			result.Method = "on-formula"
 		}
 		return result, nil
-	}
-
-	if opts.ScopeKind != "" && !opts.IsFormula && opts.OnFormula == "" && (opts.NoFormula || a.EffectiveDefaultSlingFormula() == "") {
-		return result, fmt.Errorf("--scope-kind/--scope-ref require a formula-backed workflow launch")
 	}
 
 	return result, nil
@@ -345,6 +367,38 @@ func shouldValidateBuiltInRouteStoreReachable(opts SlingOpts, deps SlingDeps) bo
 // !IsFormula guard, mirroring the auto-convoy block. Dry-run never mutates.
 func shouldReopenForReassign(opts SlingOpts) bool {
 	return opts.Reassign && !opts.IsFormula && !opts.DryRun
+}
+
+func routeContractMetadata(opts SlingOpts) map[string]string {
+	metadata := make(map[string]string, 2)
+	if branch := strings.TrimSpace(opts.Branch); branch != "" {
+		metadata[beadBranchMetadataKey] = branch
+	}
+	if target := strings.TrimSpace(opts.TargetBranch); target != "" {
+		metadata[beadTargetMetadataKey] = target
+	}
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+// repairIdempotentRouteMetadata preserves the documented repair path for a bead
+// already routed to the target but missing the branch-handoff contract. Refusal
+// gates have already accepted this as an idempotent same-target route, so the
+// repair is the only pre-route metadata write allowed by preflight.
+func repairIdempotentRouteMetadata(opts SlingOpts, deps SlingDeps) error {
+	metadata := routeContractMetadata(opts)
+	if len(metadata) == 0 || opts.IsFormula || opts.DryRun {
+		return nil
+	}
+	if deps.Store == nil {
+		return fmt.Errorf("route-metadata repair requires a bead store")
+	}
+	if err := deps.Store.Update(opts.BeadOrFormula, beads.UpdateOpts{Metadata: metadata}); err != nil {
+		return fmt.Errorf("repairing route metadata on %s: %w", opts.BeadOrFormula, err)
+	}
+	return nil
 }
 
 func validateExistingBead(beadID string, deps SlingDeps) error {
@@ -663,7 +717,7 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	// Execute routing -- prefer typed Router, fall back to shell Runner.
 	slingEnv := ResolveSlingEnv(a, deps, beadID)
 	rigDir := SlingDirForBead(deps.Cfg, deps.CityPath, beadID)
-	if deps.Router != nil {
+	if deps.Router != nil || len(routeContractMetadata(opts)) > 0 {
 		if err := validateBuiltInRouteStoreReachable(deps, beadID, a); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
@@ -675,12 +729,17 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 		req := RouteRequest{
 			BeadID:   beadID,
 			Target:   agentutil.RoutedToIdentity(&a),
+			Metadata: routeContractMetadata(opts),
 			Assignee: assignee,
 			WorkDir:  rigDir,
 			Env:      slingEnv,
 			Force:    opts.Force,
 		}
-		if err := deps.Router.Route(context.Background(), req); err != nil {
+		router := deps.Router
+		if router == nil {
+			router = builtInStoreRouter{store: deps.Store, cfg: deps.Cfg}
+		}
+		if err := router.Route(context.Background(), req); err != nil {
 			telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), method, err)
 			return result, fmt.Errorf("%w", err)
 		}
@@ -765,6 +824,34 @@ func finalize(opts SlingOpts, deps SlingDeps, beadID, method string, result Slin
 	}
 
 	return result, nil
+}
+
+type builtInStoreRouter struct {
+	store beads.Store
+	cfg   *config.City
+}
+
+func (r builtInStoreRouter) Route(_ context.Context, req RouteRequest) error {
+	if r.store == nil {
+		return fmt.Errorf("built-in sling routing requires a store")
+	}
+	routedTo := agentutil.NormalizePoolRouteTarget(r.cfg, strings.TrimSpace(req.Target))
+	if routedTo == "" {
+		routedTo = strings.TrimSpace(req.Target)
+	}
+	metadata := make(map[string]string, len(req.Metadata)+1)
+	for k, v := range req.Metadata {
+		metadata[k] = v
+	}
+	metadata[beadmeta.RoutedToMetadataKey] = routedTo
+	update := beads.UpdateOpts{Metadata: metadata}
+	if assignee := strings.TrimSpace(req.Assignee); assignee != "" {
+		update.Assignee = &assignee
+	}
+	if err := r.store.Update(req.BeadID, update); err != nil {
+		return fmt.Errorf("routing %s to %s: %w", req.BeadID, routedTo, err)
+	}
+	return nil
 }
 
 func validateBuiltInRouteStoreReachable(deps SlingDeps, beadID string, a config.Agent) error {
@@ -1562,6 +1649,16 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return DoSling(singleOpts, singleDeps, querier)
 	}
 
+	// Container expansion routes each child individually and never passes the
+	// container through DoSling, so --branch/--target would be silently
+	// dropped here — and honoring them is not meaningful either: branch is a
+	// per-work-bead value with no single recipient in a container, and
+	// fanning one value across every child would mis-stamp all but one of
+	// them. Reject loudly; a convoy-wide merge target has its own tool.
+	if opts.Branch != "" || opts.TargetBranch != "" {
+		return SlingResult{}, fmt.Errorf("%s %s is a container: --branch/--target stamp a single routed bead; set a convoy-wide target with 'gc convoy target' instead", b.Type, b.ID)
+	}
+
 	if useFormula != "" {
 		_, isGraph, err := prepareGraphV2FormulaInvocation(context.Background(), useFormula, b.ID, opts, deps, a)
 		if err != nil {
@@ -1674,6 +1771,22 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 				continue
 			}
 			batchResult.BeadWarnings = append(batchResult.BeadWarnings, check.Warnings...)
+		}
+
+		// In-flight dispatch gate per child (gas-cnx6). The open-status filter
+		// above already excludes claimed children; this catches pour evidence —
+		// a live root referencing the child through a live tracking convoy —
+		// which leaves the child reading open.
+		if shouldCheckInFlightDispatch(opts) {
+			if err := CheckInFlightDispatch(querier, child.ID, a, deps); err != nil {
+				childResult.Failed = true
+				childResult.FailReason = err.Error()
+				batchResult.Children = append(batchResult.Children, childResult)
+				childErrors = append(childErrors, err)
+				telemetry.RecordSling(context.Background(), a.QualifiedName(), TargetType(&a), batchMethod, err)
+				failed++
+				continue
+			}
 		}
 
 		if shouldValidateBuiltInRouteStoreReachable(opts, deps) {

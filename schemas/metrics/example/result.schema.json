@@ -212,7 +212,9 @@
               "storage-status",
               "ready",
               "beads-city-use-mysql",
-              "session-key"
+              "session-key",
+              "storage-recover-stranded",
+              "beads-metadata-cas"
             ]
           },
           "event_id": {

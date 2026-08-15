@@ -64,6 +64,21 @@ new one, and files an audit event bead. It does **not** touch `status`,
 `owner`, or `metadata` — update those separately (or add a dependency edge)
 if they also need to change.
 
+### Retesting a hold that waits on an upstream PR review
+
+When a held bead's external condition is "an upstream PR review", whether
+that condition has moved is decided by the **timeline court test** in
+[pr-review-handoff.md](pr-review-handoff.md): the newest human event in the
+PR's `issues/N/comments` + `pulls/N/reviews` timeline, compared against our
+newest commit/comment — **never** by `reviewDecision`, `reviews`, or
+`requested_reviewers`. Both directions of the state-field trap have bitten
+live hold-retests in this repo: sticky `CHANGES_REQUESTED` made three
+answered PRs (#5116/#5119/#5120) look unanswered and re-dispatched finished
+work, and a review posted as plain issue comments made an active review on
+#5103 look absent for 29 hours (gas-0wqy). The same page records the
+@-mention ping convention and the `gh pr edit --add-reviewer`
+exit-0-on-failure hazard.
+
 ## Clearing a hold
 
 Releasing a hold is the same kind of write as setting one, so it uses the same
