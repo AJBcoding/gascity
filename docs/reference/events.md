@@ -179,6 +179,19 @@ For stream mode, keep these separate:
 
 `gc events` outputs the JSON payloads and envelopes, not the raw SSE frame text.
 
+### Verified landing events
+
+`delivery.landed` is emitted only after `gc landing record` observes the exact
+expected commit at the named remote ref. Its payload carries a deterministic
+`gcl-` receipt ID, the approved and observed commit identities, the publication
+mode, the integration-result artifact hash, and the included work bead IDs.
+
+The event records an observation; it does not publish a branch, merge a pull
+request, stamp a work bead, or imply that a bead was closed. Generic
+`gc event emit` validation does not emit `delivery.landed`; callers must use the
+strict landing receipt command so the remote ref is re-observed before every
+record or replay.
+
 ## Errors
 
 Successful event queries write only data to stdout.
