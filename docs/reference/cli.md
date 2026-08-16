@@ -53,6 +53,7 @@ gc [flags]
 | [gc hook](#gc-hook) | Find routed work for an agent |
 | [gc import](#gc-import) | Manage pack imports |
 | [gc init](#gc-init) | Initialize a new city |
+| [gc landing](#gc-landing) | Verify and record authoritative landing observations |
 | [gc lint](#gc-lint) | Validate a pack before merge |
 | [gc login](#gc-login) | Log in to a hosted Gas City service |
 | [gc logout](#gc-logout) | Log out of a hosted Gas City service (revoke the session and forget the token) |
@@ -2246,6 +2247,31 @@ gc init --template gascity --default-provider claude \
 | `--skip-provider-readiness` | bool |  | skip provider login/readiness checks during init and continue startup |
 | `--template` | string |  | non-interactive template to write: minimal, gastown, gascity, custom, or empty |
 | `--yes` | bool |  | bypass the cross-city supervisor cycle confirmation prompt (warning is still printed for the audit trail) |
+
+## gc landing
+
+Verify and record authoritative landing observations
+
+```
+gc landing
+```
+
+| Subcommand | Description |
+|------------|-------------|
+| [gc landing record](#gc-landing-record) | Observe an exact remote ref and record typed landing evidence |
+
+## gc landing record
+
+Observe an exact remote ref and record typed landing evidence
+
+```
+gc landing record --receipt <absolute-json-path> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | emit JSON summary |
+| `--receipt` | string |  | absolute path to a landing receipt JSON file |
 
 ## gc lint
 
