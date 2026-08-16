@@ -99,6 +99,24 @@ func (e ConversationKind) Valid() bool {
 	}
 }
 
+// Defines values for DeliveryLandedPayloadPublicationMode.
+const (
+	Direct      DeliveryLandedPayloadPublicationMode = "direct"
+	PullRequest DeliveryLandedPayloadPublicationMode = "pull_request"
+)
+
+// Valid indicates whether the value is a known member of the DeliveryLandedPayloadPublicationMode enum.
+func (e DeliveryLandedPayloadPublicationMode) Valid() bool {
+	switch e {
+	case Direct:
+		return true
+	case PullRequest:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for EventRotateArchiveCompressionStatus.
 const (
 	EventRotateArchiveCompressionStatusComplete EventRotateArchiveCompressionStatus = "complete"
@@ -1624,6 +1642,31 @@ type DeliveryContextRecord struct {
 	SessionID         string            `json:"SessionID"`
 	SourceSessionID   string            `json:"SourceSessionID"`
 }
+
+// DeliveryLandedPayload defines model for DeliveryLandedPayload.
+type DeliveryLandedPayload struct {
+	ApprovedCandidateSha string `json:"approved_candidate_sha"`
+
+	// EventId Deterministic landing receipt identifier.
+	EventId               string                               `json:"event_id"`
+	ExpectedTargetSha     string                               `json:"expected_target_sha"`
+	IntegrationAttemptId  string                               `json:"integration_attempt_id"`
+	IntegrationResultHash string                               `json:"integration_result_hash"`
+	IntegrationResultPath string                               `json:"integration_result_path"`
+	ObservedLandedSha     string                               `json:"observed_landed_sha"`
+	PublicationMode       DeliveryLandedPayloadPublicationMode `json:"publication_mode"`
+	Remote                string                               `json:"remote"`
+
+	// Repository Credential-free authoritative remote identity.
+	Repository  string    `json:"repository"`
+	TargetRef   string    `json:"target_ref"`
+	VerifiedAt  time.Time `json:"verified_at"`
+	WorkBeadIds *[]string `json:"work_bead_ids"`
+	WorkflowId  string    `json:"workflow_id"`
+}
+
+// DeliveryLandedPayloadPublicationMode defines model for DeliveryLandedPayload.PublicationMode.
+type DeliveryLandedPayloadPublicationMode string
 
 // Dep defines model for Dep.
 type Dep struct {
@@ -5578,6 +5621,22 @@ type TypedEventStreamEnvelopeCustom struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeDeliveryLanded defines model for TypedEventStreamEnvelopeDeliveryLanded.
+type TypedEventStreamEnvelopeDeliveryLanded struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          DeliveryLandedPayload    `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeEmergencyAcked defines model for TypedEventStreamEnvelopeEmergencyAcked.
 type TypedEventStreamEnvelopeEmergencyAcked struct {
 	Actor            string                   `json:"actor"`
@@ -7033,6 +7092,23 @@ type TypedTaggedEventStreamEnvelopeCustom struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          interface{}              `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeDeliveryLanded defines model for TypedTaggedEventStreamEnvelopeDeliveryLanded.
+type TypedTaggedEventStreamEnvelopeDeliveryLanded struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          DeliveryLandedPayload    `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -10139,6 +10215,32 @@ func (t *EventPayload) FromConditionalWritesDegradedPayload(v ConditionalWritesD
 
 // MergeConditionalWritesDegradedPayload performs a merge with any union data inside the EventPayload, using the provided ConditionalWritesDegradedPayload
 func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWritesDegradedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsDeliveryLandedPayload returns the union data inside the EventPayload as a DeliveryLandedPayload
+func (t EventPayload) AsDeliveryLandedPayload() (DeliveryLandedPayload, error) {
+	var body DeliveryLandedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromDeliveryLandedPayload overwrites any union data inside the EventPayload as the provided DeliveryLandedPayload
+func (t *EventPayload) FromDeliveryLandedPayload(v DeliveryLandedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeDeliveryLandedPayload performs a merge with any union data inside the EventPayload, using the provided DeliveryLandedPayload
+func (t *EventPayload) MergeDeliveryLandedPayload(v DeliveryLandedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13318,6 +13420,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeConvoyCreated(v 
 	return err
 }
 
+// AsTypedEventStreamEnvelopeDeliveryLanded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeDeliveryLanded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeDeliveryLanded() (TypedEventStreamEnvelopeDeliveryLanded, error) {
+	var body TypedEventStreamEnvelopeDeliveryLanded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeDeliveryLanded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeDeliveryLanded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeDeliveryLanded(v TypedEventStreamEnvelopeDeliveryLanded) error {
+	v.Type = "delivery.landed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeDeliveryLanded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeDeliveryLanded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeDeliveryLanded(v TypedEventStreamEnvelopeDeliveryLanded) error {
+	v.Type = "delivery.landed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeEmergencyAcked returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeEmergencyAcked
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeEmergencyAcked() (TypedEventStreamEnvelopeEmergencyAcked, error) {
 	var body TypedEventStreamEnvelopeEmergencyAcked
@@ -15360,6 +15490,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeConvoyClosed()
 	case "convoy.created":
 		return t.AsTypedEventStreamEnvelopeConvoyCreated()
+	case "delivery.landed":
+		return t.AsTypedEventStreamEnvelopeDeliveryLanded()
 	case "emergency.acked":
 		return t.AsTypedEventStreamEnvelopeEmergencyAcked()
 	case "emergency.signaled":
@@ -16037,6 +16169,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeConvo
 // MergeTypedTaggedEventStreamEnvelopeConvoyCreated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeConvoyCreated
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeConvoyCreated(v TypedTaggedEventStreamEnvelopeConvoyCreated) error {
 	v.Type = "convoy.created"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeDeliveryLanded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeDeliveryLanded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeDeliveryLanded() (TypedTaggedEventStreamEnvelopeDeliveryLanded, error) {
+	var body TypedTaggedEventStreamEnvelopeDeliveryLanded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeDeliveryLanded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeDeliveryLanded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeDeliveryLanded(v TypedTaggedEventStreamEnvelopeDeliveryLanded) error {
+	v.Type = "delivery.landed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeDeliveryLanded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeDeliveryLanded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeDeliveryLanded(v TypedTaggedEventStreamEnvelopeDeliveryLanded) error {
+	v.Type = "delivery.landed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18089,6 +18249,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeConvoyClosed()
 	case "convoy.created":
 		return t.AsTypedTaggedEventStreamEnvelopeConvoyCreated()
+	case "delivery.landed":
+		return t.AsTypedTaggedEventStreamEnvelopeDeliveryLanded()
 	case "emergency.acked":
 		return t.AsTypedTaggedEventStreamEnvelopeEmergencyAcked()
 	case "emergency.signaled":

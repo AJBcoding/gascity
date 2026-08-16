@@ -792,6 +792,29 @@ export type DeliveryContextRecord = {
     SourceSessionID: string;
 };
 
+export type DeliveryLandedPayload = {
+    approved_candidate_sha: string;
+    /**
+     * Deterministic landing receipt identifier.
+     */
+    event_id: string;
+    expected_target_sha: string;
+    integration_attempt_id: string;
+    integration_result_hash: string;
+    integration_result_path: string;
+    observed_landed_sha: string;
+    publication_mode: 'direct' | 'pull_request';
+    remote: string;
+    /**
+     * Credential-free authoritative remote identity.
+     */
+    repository: string;
+    target_ref: string;
+    verified_at: string;
+    work_bead_ids: Array<string> | null;
+    workflow_id: string;
+};
+
 export type Dep = {
     depends_on_id: string;
     issue_id: string;
@@ -870,7 +893,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | DeliveryLandedPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionResetStalledPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5194,6 +5217,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'delivery.landed';
+} & TypedEventStreamEnvelopeDeliveryLanded) | ({
     type: 'emergency.acked';
 } & TypedEventStreamEnvelopeEmergencyAcked) | ({
     type: 'emergency.signaled';
@@ -5694,6 +5719,24 @@ export type TypedEventStreamEnvelopeCustom = {
     subject?: string;
     ts: string;
     type: string;
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope delivery.landed
+ */
+export type TypedEventStreamEnvelopeDeliveryLanded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: DeliveryLandedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'delivery.landed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7001,6 +7044,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeConvoyClosed) | ({
     type: 'convoy.created';
 } & TypedTaggedEventStreamEnvelopeConvoyCreated) | ({
+    type: 'delivery.landed';
+} & TypedTaggedEventStreamEnvelopeDeliveryLanded) | ({
     type: 'emergency.acked';
 } & TypedTaggedEventStreamEnvelopeEmergencyAcked) | ({
     type: 'emergency.signaled';
@@ -7521,6 +7566,25 @@ export type TypedTaggedEventStreamEnvelopeCustom = {
     subject?: string;
     ts: string;
     type: string;
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope delivery.landed
+ */
+export type TypedTaggedEventStreamEnvelopeDeliveryLanded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: DeliveryLandedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'delivery.landed';
     workflow?: WorkflowEventProjection;
 };
 

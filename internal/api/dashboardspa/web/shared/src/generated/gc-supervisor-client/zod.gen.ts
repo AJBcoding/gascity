@@ -354,6 +354,23 @@ export const zDeliveryContextRecord = z.object({
     SourceSessionID: z.string()
 });
 
+export const zDeliveryLandedPayload = z.object({
+    approved_candidate_sha: z.string(),
+    event_id: z.string(),
+    expected_target_sha: z.string(),
+    integration_attempt_id: z.string(),
+    integration_result_hash: z.string(),
+    integration_result_path: z.string(),
+    observed_landed_sha: z.string(),
+    publication_mode: z.enum(['direct', 'pull_request']),
+    remote: z.string(),
+    repository: z.string(),
+    target_ref: z.string(),
+    verified_at: z.iso.datetime(),
+    work_bead_ids: z.array(z.string()).max(256).nullable(),
+    workflow_id: z.string()
+});
+
 export const zDep = z.object({
     depends_on_id: z.string(),
     issue_id: z.string(),
@@ -3254,6 +3271,7 @@ export const zEventPayload = z.union([
     zCityLifecyclePayload,
     zCityUnregisterSucceededPayload,
     zConditionalWritesDegradedPayload,
+    zDeliveryLandedPayload,
     zExecutionClaimWindowExpiredPayload,
     zExecutionStepStalledPayload,
     zGroupCreatedEventPayload,
@@ -3740,6 +3758,24 @@ export const zTypedEventStreamEnvelopeCustom = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.string(),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope delivery.landed
+ */
+export const zTypedEventStreamEnvelopeDeliveryLanded = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zDeliveryLandedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('delivery.landed'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5028,6 +5064,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeControllerStopped.extend({ type: z.literal('controller.stopped') }),
     zTypedEventStreamEnvelopeConvoyClosed.extend({ type: z.literal('convoy.closed') }),
     zTypedEventStreamEnvelopeConvoyCreated.extend({ type: z.literal('convoy.created') }),
+    zTypedEventStreamEnvelopeDeliveryLanded.extend({ type: z.literal('delivery.landed') }),
     zTypedEventStreamEnvelopeEmergencyAcked.extend({ type: z.literal('emergency.acked') }),
     zTypedEventStreamEnvelopeEmergencySignaled.extend({ type: z.literal('emergency.signaled') }),
     zTypedEventStreamEnvelopeEventsRotated.extend({ type: z.literal('events.rotated') }),
@@ -5486,6 +5523,25 @@ export const zTypedTaggedEventStreamEnvelopeCustom = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.string(),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope delivery.landed
+ */
+export const zTypedTaggedEventStreamEnvelopeDeliveryLanded = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zDeliveryLandedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('delivery.landed'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -6844,6 +6900,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeControllerStopped.extend({ type: z.literal('controller.stopped') }),
     zTypedTaggedEventStreamEnvelopeConvoyClosed.extend({ type: z.literal('convoy.closed') }),
     zTypedTaggedEventStreamEnvelopeConvoyCreated.extend({ type: z.literal('convoy.created') }),
+    zTypedTaggedEventStreamEnvelopeDeliveryLanded.extend({ type: z.literal('delivery.landed') }),
     zTypedTaggedEventStreamEnvelopeEmergencyAcked.extend({ type: z.literal('emergency.acked') }),
     zTypedTaggedEventStreamEnvelopeEmergencySignaled.extend({ type: z.literal('emergency.signaled') }),
     zTypedTaggedEventStreamEnvelopeEventsRotated.extend({ type: z.literal('events.rotated') }),

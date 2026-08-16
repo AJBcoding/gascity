@@ -206,6 +206,7 @@ const (
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
+	DeliveryLanded                  = "delivery.landed"
 	SupervisorFSPressureSkippedTick = "supervisor.fs_pressure.skipped_tick"
 
 	// MoleculeResolved fires once at the molecule-autoclose Go close site
@@ -343,7 +344,7 @@ var KnownEventTypes = []string{
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed,
-	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
+	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, DeliveryLanded, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
 	ExtMsgBound, ExtMsgUnbound, ExtMsgGroupCreated,
