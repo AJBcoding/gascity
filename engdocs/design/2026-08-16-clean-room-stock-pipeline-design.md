@@ -276,6 +276,14 @@ must use an ephemeral scratch ref and may advance the single integration target
 only by a verified fast-forward or compare-and-swap operation; it must never
 make the target worktree track a source branch.
 
+The detailed post-baseline integration, publication-evidence, and shipped-close
+contract is defined in
+[Ephemeral Integration and Truthful Landing Contract](2026-08-16-ephemeral-integration-and-landing-contract.md).
+Until that contract is implemented and independently qualified, the golden
+stock workflow must use `drain_policy=same-session`, `push=false`, and
+`open_pr=false`. The stock default `separate` drain is a capability under test,
+not an admitted production topology.
+
 ## Acceptance criteria
 
 The design is implemented successfully only when all of the following are
@@ -292,3 +300,5 @@ true:
    result without consulting the broken city.
 7. No deployment, production migration, legacy patch replay, branch cleanup, or
    refinery repair occurs as part of the baseline proof.
+8. The baseline build uses one coherent same-session implementation worktree;
+   no detached implementation commit is treated as integrated or shipped.

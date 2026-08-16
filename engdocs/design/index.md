@@ -16,6 +16,8 @@ lives in the [Architecture](../architecture/index.md) section.
 
 | Document | Status | Notes |
 |---|---|---|
+| `2026-08-16-clean-room-stock-pipeline-design` | Accepted locally / Proposed upstream | Isolated official-source golden baseline with stock managed Dolt and no legacy ancestry |
+| `2026-08-16-ephemeral-integration-and-landing-contract` | Accepted locally / Proposed upstream | Replaces persistent refinery correctness with bounded integration, typed landing evidence, and universal shipped-close validation |
 | `machine-wide-supervisor-v0` | Accepted | Current supervisor direction |
 | `convoy-first-formulas-and-drain-v0` | Implemented | Convoy-first graph.v2 formula inputs and drain scatter semantics |
 | `api-ops-design` | Implemented | State-mutation API surface |
