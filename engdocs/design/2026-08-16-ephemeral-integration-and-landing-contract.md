@@ -2,8 +2,10 @@
 
 ## Status
 
-Approved for mechanic implementation planning; proposed for upstream adoption.
-Pending written-spec review.
+Approved for mechanic implementation and proposed for upstream adoption.
+Shadow integration in `gascity-packs` and the stock file-backed typed landing
+observation primitive in `gascity` are implemented. Pack publication wiring,
+work-record stamping, and universal shipped-close enforcement remain pending.
 
 This design replaces the useful delivery guarantees of a persistent refinery
 with a bounded integration workflow, an evidence-producing publication

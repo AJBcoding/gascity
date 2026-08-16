@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "gc landing record result",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "ok",
+    "event_id",
+    "observed_landed_sha",
+    "already_recorded"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1"
+    },
+    "ok": {
+      "const": true
+    },
+    "event_id": {
+      "type": "string",
+      "pattern": "^gcl-[0-9a-f]{64}$"
+    },
+    "observed_landed_sha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "already_recorded": {
+      "type": "boolean"
+    }
+  },
+  "additionalProperties": false
+}
