@@ -24557,12 +24557,16 @@
           "store_ref": {
             "type": "string"
           },
+          "usage_id": {
+            "type": "string"
+          },
           "violation_count": {
             "format": "int64",
             "type": "integer"
           }
         },
         "required": [
+          "usage_id",
           "route",
           "store_ref",
           "bead_id",

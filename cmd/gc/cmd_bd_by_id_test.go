@@ -970,7 +970,9 @@ func reservedClassID(t *testing.T, suffix string) string {
 // test exercises the residence probe rather than the prefix rule.
 func classResidentWorkShapedBead(t *testing.T, classStore beads.Store, id, title string) beads.Bead {
 	t.Helper()
-	created, err := classStore.Create(beads.Bead{ID: id, Title: title, Type: "task"})
+	created, err := classStore.Create(beads.Bead{ID: id, Title: title, Type: "task", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+	}})
 	if err != nil {
 		t.Fatalf("seeding %s in the class binding: %v", id, err)
 	}
@@ -1451,7 +1453,7 @@ func TestBdUpdateUnservedSpellingOnResidentRefusesNamingFlag(t *testing.T) {
 			if err != nil {
 				t.Fatalf("re-reading %s: %v", relic.ID, err)
 			}
-			if len(after.Metadata) != 0 || after.Status == "closed" {
+			if len(after.Metadata) != 1 || after.Metadata[beadmeta.WorkOutcomeMetadataKey] != beadmeta.WorkOutcomeNoOp || after.Status == "closed" {
 				t.Errorf("the refused mutation wrote anyway: status=%q metadata=%v", after.Status, after.Metadata)
 			}
 		})

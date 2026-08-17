@@ -1063,7 +1063,7 @@
         },
         "shipped_close_warn_only": {
           "type": "boolean",
-          "description": "ShippedCloseWarnOnly temporarily permits managed closes that violate the\nshipped work-record contract after emitting warnings and telemetry. It is\nfalse by default, so managed closes enforce the contract. This setting\nexists for one compatibility release and must be removed at v1.5.0 after\ngc beads audit-shipped reports complete=true clean=true and no\nwork.close.warn_only.used event has occurred since controller restart.",
+          "description": "ShippedCloseWarnOnly temporarily permits managed closes that violate the\nshipped work-record contract after emitting warnings and durably confirmed\ntelemetry. It is false by default, so managed closes enforce the contract.\nThis setting\nexists for one compatibility release and must be removed at v1.6.0 after\ngc beads audit-shipped reports complete=true clean=true and the durable\njournal confirms zero acknowledged warn-only-use events throughout the\ndeclared observation window. Warn-only closes fail if readback fails.",
           "default": false
         },
         "policies": {

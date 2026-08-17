@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"log"
 	"os/exec"
 	"strings"
@@ -16,6 +15,7 @@ import (
 )
 
 func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref storeref.StoreRef) error {
+	storeRef := s.canonicalWorkCloseStoreRef(ref)
 	repoDir := strings.TrimSpace(prospective.Metadata[beadmeta.WorkDirMetadataKey])
 	if repoDir == "" {
 		repoDir = s.state.CityPath()
@@ -31,18 +31,21 @@ func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref s
 		ProspectiveType:     prospective.Type,
 		ProspectiveStatus:   prospective.Status,
 		ProspectiveMetadata: prospective.Metadata,
-		StoreRef:            s.canonicalWorkCloseStoreRef(ref),
+		StoreRef:            storeRef,
 	})
 	mode := "enforced"
 	if s.bootFlags.ShippedCloseWarnOnly() {
 		mode = "warn-only"
 	}
 	if mode == "warn-only" {
-		payload, _ := json.Marshal(events.WorkCloseWarnOnlyUsedPayload{
-			Route: "api", StoreRef: s.canonicalWorkCloseStoreRef(ref), BeadID: prospective.ID,
+		_, telemetryErr := events.RecordWorkCloseWarnOnlyUse(s.state.EventProvider(), events.WorkCloseWarnOnlyUsedPayload{
+			Route: "api", StoreRef: storeRef, BeadID: prospective.ID,
 			ViolationCount: len(violations), RemovalVersion: rollout.ShippedCloseWarnOnlyRemovalVersion,
 		})
-		s.state.EventProvider().Record(events.Event{Type: events.WorkCloseWarnOnlyUsed, Actor: "gc.workclose", Subject: prospective.ID, Payload: payload})
+		if telemetryErr != nil {
+			log.Printf("api: work-record gate (enforced): close of %s refused: warn-only compatibility telemetry could not be confirmed: %v", prospective.ID, telemetryErr)
+			return apierr.ConflictWrongState.Msg("conflict: work-record close refused: warn-only compatibility telemetry is unavailable")
+		}
 	}
 	if len(violations) == 0 {
 		return nil

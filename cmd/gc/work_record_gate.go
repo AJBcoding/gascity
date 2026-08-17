@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/workclose"
-	"github.com/gastownhall/gascity/internal/workstamp"
 )
 
 // Work-record close gate (ADR-0009). Closing a work bead through the SDK close
@@ -165,6 +164,9 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 	journal, closeJournal, journalErr := openWorkRecordEvidenceJournal(cityPath, cfg)
 	if journalErr == nil {
 		defer closeJournal()
+	} else if !enforce {
+		fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close refused: warn-only compatibility telemetry is unavailable: %v\n", journalErr) //nolint:errcheck
+		return true
 	}
 	store := preOpened
 	if store == nil {
@@ -177,7 +179,10 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 			}
 			fmt.Fprintf(stderr, "gc bd: work-record gate (warn-only): authoritative store is unreadable; compatibility telemetry records an unclassified use: %v\n", err) //nolint:errcheck
 			for _, id := range ids {
-				recordWorkCloseWarnOnlyUse(journal, "gc.bd", storeRef, id, 1)
+				if telemetryErr := recordWorkCloseWarnOnlyUse(journal, "gc.bd", storeRef, id, 1); telemetryErr != nil {
+					fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close refused: warn-only compatibility telemetry could not be confirmed: %v\n", telemetryErr) //nolint:errcheck
+					return true
+				}
 			}
 			return false
 		}
@@ -222,7 +227,7 @@ func workRecordCanonicalStoreRef(scopeRoot, cityPath string, cfg *config.City) s
 // each violation and reports whether the close should be blocked. preFetched
 // (optional) supplies beads already read by an earlier guard in this same
 // invocation, avoiding a duplicate store.Get for the same ID.
-func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot, storeRef string, evidence workstamp.EvidenceReader, enforce bool, stderr io.Writer) (block bool) {
+func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot, storeRef string, evidence events.Provider, enforce bool, stderr io.Writer) (block bool) {
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
@@ -242,7 +247,10 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 					block = true
 				} else {
 					fmt.Fprintf(stderr, "gc bd: work-record gate (warn-only): close of %s: authoritative bead is unreadable; compatibility telemetry records an unclassified use: %v\n", id, getErr) //nolint:errcheck
-					recordWorkCloseWarnOnlyUse(evidence, "gc.bd", storeRef, id, 1)
+					if telemetryErr := recordWorkCloseWarnOnlyUse(evidence, "gc.bd", storeRef, id, 1); telemetryErr != nil {
+						fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close refused: warn-only compatibility telemetry could not be confirmed: %v\n", telemetryErr) //nolint:errcheck
+						block = true
+					}
 				}
 				continue
 			}
@@ -274,7 +282,10 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, v) //nolint:errcheck // best-effort stderr
 		}
 		if !enforce {
-			recordWorkCloseWarnOnlyUse(evidence, "gc.bd", storeRef, id, len(violations))
+			if telemetryErr := recordWorkCloseWarnOnlyUse(evidence, "gc.bd", storeRef, id, len(violations)); telemetryErr != nil {
+				fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close refused: warn-only compatibility telemetry could not be confirmed: %v\n", telemetryErr) //nolint:errcheck
+				block = true
+			}
 		}
 		if enforce && len(violations) > 0 {
 			block = true
@@ -289,7 +300,14 @@ func evaluateResolvedWorkClose(current, prospective beads.Bead, repoFallback, st
 	evidence, closeEvidence, err := openWorkRecordEvidenceJournal(cityPath, cfg)
 	if err == nil {
 		defer closeEvidence()
+	} else if !workRecordEnforceEnabled(cfg) {
+		fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close of %s refused: warn-only compatibility telemetry is unavailable: %v\n", prospective.ID, err) //nolint:errcheck
+		return true
 	}
+	return evaluateResolvedWorkCloseWithProvider(current, prospective, repoFallback, storeRef, cfg, evidence, stderr)
+}
+
+func evaluateResolvedWorkCloseWithProvider(current, prospective beads.Bead, repoFallback, storeRef string, cfg *config.City, evidence events.Provider, stderr io.Writer) bool {
 	repoDir := strings.TrimSpace(prospective.Metadata[beadmeta.WorkDirMetadataKey])
 	if repoDir == "" {
 		repoDir = repoFallback
@@ -313,24 +331,20 @@ func evaluateResolvedWorkClose(current, prospective beads.Bead, repoFallback, st
 		fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, prospective.ID, violation) //nolint:errcheck // best-effort stderr
 	}
 	if !enforce {
-		recordWorkCloseWarnOnlyUse(evidence, "gc.bd.by-id", storeRef, prospective.ID, len(violations))
+		if telemetryErr := recordWorkCloseWarnOnlyUse(evidence, "gc.bd.by-id", storeRef, prospective.ID, len(violations)); telemetryErr != nil {
+			fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close of %s refused: warn-only compatibility telemetry could not be confirmed: %v\n", prospective.ID, telemetryErr) //nolint:errcheck
+			return true
+		}
 	}
 	return enforce && len(violations) > 0
 }
 
-func recordWorkCloseWarnOnlyUse(recorder any, route, storeRef, beadID string, violationCount int) {
-	r, ok := recorder.(events.Recorder)
-	if !ok || r == nil {
-		return
-	}
-	payload, err := json.Marshal(events.WorkCloseWarnOnlyUsedPayload{
+func recordWorkCloseWarnOnlyUse(provider events.Provider, route, storeRef, beadID string, violationCount int) error {
+	_, err := events.RecordWorkCloseWarnOnlyUse(provider, events.WorkCloseWarnOnlyUsedPayload{
 		Route: route, StoreRef: storeRef, BeadID: beadID, ViolationCount: violationCount,
 		RemovalVersion: rollout.ShippedCloseWarnOnlyRemovalVersion,
 	})
-	if err != nil {
-		return
-	}
-	r.Record(events.Event{Type: events.WorkCloseWarnOnlyUsed, Actor: "gc.workclose", Subject: beadID, Payload: payload})
+	return err
 }
 
 // workRecordMetadataEdits is the parsed metadata mutation of a `bd update` arg

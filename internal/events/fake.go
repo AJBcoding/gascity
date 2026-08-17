@@ -46,6 +46,31 @@ func (f *Fake) Record(e Event) {
 	f.notify = make(chan struct{})
 }
 
+// AppendBatch provides the acknowledged append contract used by correctness
+// events. Unlike Record, it returns the fake provider's configured failure.
+func (f *Fake) AppendBatch(batch []Event) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.broken {
+		return fmt.Errorf("events provider unavailable")
+	}
+	for _, e := range batch {
+		f.seq++
+		e.Seq = f.seq
+		if e.Ts.IsZero() {
+			e.Ts = time.Now()
+		}
+		f.Events = append(f.Events, e)
+	}
+	if len(batch) != 0 {
+		if f.notify != nil {
+			close(f.notify)
+		}
+		f.notify = make(chan struct{})
+	}
+	return nil
+}
+
 // List returns events matching the filter from the in-memory store.
 func (f *Fake) List(filter Filter) ([]Event, error) {
 	f.mu.Lock()

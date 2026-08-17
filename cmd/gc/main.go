@@ -1377,6 +1377,18 @@ func openAuthoritativeStoreAtForCity(storePath, cityPath string) (beads.Store, e
 	return openStoreAtForCityWithAuthority(storePath, cityPath, true)
 }
 
+// openAuthoritativeStoreAtForCityWithConfig is the arbitrary-scope resolver
+// for a caller that already loaded the city's effective config. It combines
+// on-disk store identity (so an ambient GC_BEADS cannot redirect a census) with
+// config reuse (so one command cannot observe two different config generations).
+func openAuthoritativeStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+	result, err := openStoreResultAtForCityWithConfig(storePath, cityPath, cfg, gate.ModeUnset, false, true)
+	if err != nil {
+		return nil, err
+	}
+	return result.Store, nil
+}
+
 func openStoreAtForCityWithAuthority(storePath, cityPath string, authoritative bool) (beads.Store, error) {
 	result, err := openStoreResultAtForCityWithAuthority(storePath, cityPath, gate.ModeUnset, false, authoritative)
 	if err != nil {

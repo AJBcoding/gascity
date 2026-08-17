@@ -263,12 +263,13 @@ check-dolt:
 ## to reject pre-release tags (vX.Y.Z-rc1, -beta, etc.) — the release workflow
 ## publishes stable releases only.
 check-version-tag:
-	@TAG=$$(git describe --tags --exact-match HEAD 2>/dev/null || true); \
+	@TAG=$${GC_RELEASE_VERSION:-$$(git describe --tags --exact-match HEAD 2>/dev/null || true)}; \
 	if [ -z "$$TAG" ]; then \
 		echo "check-version-tag: HEAD is not a release tag, skipping"; \
 		exit 0; \
 	fi; \
 	if echo "$$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$$'; then \
+		./scripts/check-shipped-close-graduation.sh "$$TAG" . || exit $$?; \
 		echo "check-version-tag: OK ($$TAG is a stable release tag)"; \
 		exit 0; \
 	fi; \

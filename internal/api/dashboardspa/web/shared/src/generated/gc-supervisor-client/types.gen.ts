@@ -9318,6 +9318,7 @@ export type WorkCloseWarnOnlyUsedPayload = {
     removal_version: string;
     route: string;
     store_ref: string;
+    usage_id: string;
     violation_count: number;
 };
 

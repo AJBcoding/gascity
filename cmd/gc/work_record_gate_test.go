@@ -344,7 +344,11 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr strings.Builder
-			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, t.TempDir(), "", nil, tc.enforce, &stderr)
+			var journal events.Provider
+			if !tc.enforce {
+				journal = events.NewFake()
+			}
+			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, t.TempDir(), "", journal, tc.enforce, &stderr)
 			if block != tc.wantBlock {
 				t.Fatalf("block = %v, want %v; stderr=%s", block, tc.wantBlock, stderr.String())
 			}
@@ -514,6 +518,12 @@ func (unreadableWorkRecordStore) Get(string) (beads.Bead, error) {
 	return beads.Bead{}, errors.New("authoritative store unavailable")
 }
 
+type unreadableWarnOnlyProvider struct{ *events.Fake }
+
+func (p unreadableWarnOnlyProvider) List(events.Filter) ([]events.Event, error) {
+	return nil, errors.New("usage readback unavailable")
+}
+
 func TestEvaluateWorkRecordCloseGateFailsClosedWhenAuthoritativeReadCannotClassifyOutcome(t *testing.T) {
 	args := []string{"close", "wr-unreadable"}
 	var stderr strings.Builder
@@ -555,6 +565,82 @@ func TestWarnOnlyCloseEmitsTypedUsageTelemetry(t *testing.T) {
 	}
 	if len(got) != 1 {
 		t.Fatalf("warn-only telemetry events = %d, want exactly one", len(got))
+	}
+}
+
+func TestWarnOnlyCloseFailsClosedWhenUsageCannotBeConfirmed(t *testing.T) {
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: "wr-warn", Type: "task", Status: "open",
+		Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp},
+	}}, nil)
+	for _, test := range []struct {
+		name     string
+		provider events.Provider
+	}{
+		{name: "nil"},
+		{name: "append failure", provider: events.NewFailFake()},
+		{name: "readback failure", provider: unreadableWarnOnlyProvider{Fake: events.NewFake()}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr strings.Builder
+			if block := evaluateWorkRecordCloseGate([]string{"close", "wr-warn"}, store, nil, t.TempDir(), "city:test", test.provider, false, &stderr); !block {
+				t.Fatalf("warn-only close proceeded without confirmed usage telemetry; stderr=%q", stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "telemetry") {
+				t.Fatalf("telemetry refusal not diagnosed: %q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunWorkRecordCloseGateWarnOnlyFailsClosedWhenJournalOpenFails(t *testing.T) {
+	warnOnly := true
+	cfg := &config.City{Beads: config.BeadsConfig{ShippedCloseWarnOnly: &warnOnly}}
+	bead := beads.Bead{ID: "wr-noop", Type: "task", Status: "open", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+	}}
+	var stderr strings.Builder
+	if block := runWorkRecordCloseGate([]string{"close", bead.ID}, t.TempDir(), "/nonexistent/no-event-journal", cfg, panicOnGetStore{}, map[string]beads.Bead{bead.ID: bead}, &stderr); !block {
+		t.Fatalf("warn-only close proceeded after journal open failure; stderr=%q", stderr.String())
+	}
+}
+
+func TestResolvedByIDWarnOnlyCloseFailsClosedWhenUsageCannotBeConfirmed(t *testing.T) {
+	warnOnly := true
+	cfg := &config.City{Beads: config.BeadsConfig{ShippedCloseWarnOnly: &warnOnly}}
+	current := beads.Bead{ID: "wr-noop", Type: "task", Status: "open", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+	}}
+	prospective := current
+	prospective.Status = "closed"
+	for _, test := range []struct {
+		name     string
+		provider events.Provider
+	}{
+		{name: "nil"},
+		{name: "append failure", provider: events.NewFailFake()},
+		{name: "readback failure", provider: unreadableWarnOnlyProvider{Fake: events.NewFake()}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var stderr strings.Builder
+			if block := evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), "city:test", cfg, test.provider, &stderr); !block {
+				t.Fatalf("by-ID warn-only close proceeded without confirmed telemetry; stderr=%q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestResolvedByIDWarnOnlyCloseProceedsAfterConfirmedUsage(t *testing.T) {
+	warnOnly := true
+	cfg := &config.City{Beads: config.BeadsConfig{ShippedCloseWarnOnly: &warnOnly}}
+	current := beads.Bead{ID: "wr-noop", Type: "task", Status: "open", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+	}}
+	prospective := current
+	prospective.Status = "closed"
+	var stderr strings.Builder
+	if block := evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), "city:test", cfg, events.NewFake(), &stderr); block {
+		t.Fatalf("by-ID warn-only close blocked after confirmed telemetry; stderr=%q", stderr.String())
 	}
 }
 

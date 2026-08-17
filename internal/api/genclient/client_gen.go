@@ -8626,6 +8626,7 @@ type WorkCloseWarnOnlyUsedPayload struct {
 	RemovalVersion string `json:"removal_version"`
 	Route          string `json:"route"`
 	StoreRef       string `json:"store_ref"`
+	UsageId        string `json:"usage_id"`
 	ViolationCount int64  `json:"violation_count"`
 }
 

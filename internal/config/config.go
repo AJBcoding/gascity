@@ -1407,11 +1407,13 @@ type BeadsConfig struct {
 	// Any other value fails config load.
 	GuardedRelease string `toml:"guarded_release,omitempty" jsonschema:"enum=off,enum=auto,enum=require"`
 	// ShippedCloseWarnOnly temporarily permits managed closes that violate the
-	// shipped work-record contract after emitting warnings and telemetry. It is
-	// false by default, so managed closes enforce the contract. This setting
-	// exists for one compatibility release and must be removed at v1.5.0 after
-	// gc beads audit-shipped reports complete=true clean=true and no
-	// work.close.warn_only.used event has occurred since controller restart.
+	// shipped work-record contract after emitting warnings and durably confirmed
+	// telemetry. It is false by default, so managed closes enforce the contract.
+	// This setting
+	// exists for one compatibility release and must be removed at v1.6.0 after
+	// gc beads audit-shipped reports complete=true clean=true and the durable
+	// journal confirms zero acknowledged warn-only-use events throughout the
+	// declared observation window. Warn-only closes fail if readback fails.
 	ShippedCloseWarnOnly *bool `toml:"shipped_close_warn_only,omitempty" jsonschema:"default=false"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are

@@ -13,10 +13,10 @@ const (
 	keyBeadsShippedCloseWarnOnly = KeyBeadsShippedCloseWarnOnly
 	// ShippedCloseWarnOnlyRemovalVersion is the exact release floor at which
 	// the setting, warning path, doctor notice, and telemetry must be deleted.
-	ShippedCloseWarnOnlyRemovalVersion = "v1.5.0"
+	ShippedCloseWarnOnlyRemovalVersion = "v1.6.0"
 	// ShippedCloseWarnOnlyRemovalCondition is the operator-verifiable readiness
 	// condition for that mandatory deletion.
-	ShippedCloseWarnOnlyRemovalCondition = "gc beads audit-shipped reports complete=true clean=true and no work.close.warn_only.used event has occurred since the last controller restart"
+	ShippedCloseWarnOnlyRemovalCondition = "gc beads audit-shipped reports complete=true clean=true and the durable event-journal query completes with zero acknowledged work.close.warn_only.used events throughout the declared observation window (warn-only closes refuse unless each event is durably read back)"
 )
 
 // ShippedCloseWarnOnly reports whether managed close violations warn instead

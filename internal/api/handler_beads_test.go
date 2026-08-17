@@ -578,6 +578,50 @@ func TestHTTPWarnOnlyCloseEmitsUsageTelemetryEvenWithoutViolation(t *testing.T) 
 	}
 }
 
+type apiUnreadableWarnOnlyProvider struct{ *events.Fake }
+
+func (p apiUnreadableWarnOnlyProvider) List(events.Filter) ([]events.Event, error) {
+	return nil, errors.New("usage readback unavailable")
+}
+
+func TestHTTPWarnOnlyCloseRefusesWhenUsageCannotBeConfirmed(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		provider events.Provider
+	}{
+		{name: "append failure", provider: events.NewFailFake()},
+		{name: "readback failure", provider: apiUnreadableWarnOnlyProvider{Fake: events.NewFake()}},
+		{name: "nil provider"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			state := newFakeState(t)
+			warnOnly := true
+			state.cfg.Beads.ShippedCloseWarnOnly = &warnOnly
+			state.eventProv = test.provider
+			store := state.stores["myrig"]
+			created, err := store.Create(beads.Bead{Title: "valid no-op", Type: "task", Metadata: beads.StringMap{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newTestCityHandler(t, state)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+created.ID+"/close", nil))
+			if rec.Code != http.StatusConflict {
+				t.Fatalf("close status = %d, want conflict when telemetry is unavailable: %s", rec.Code, rec.Body.String())
+			}
+			after, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Status == "closed" {
+				t.Fatal("HTTP warn-only close mutated work without confirmed usage telemetry")
+			}
+		})
+	}
+}
+
 func TestBeadUpdateCannotAtomicallyManufactureUngatedShippedTask(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]

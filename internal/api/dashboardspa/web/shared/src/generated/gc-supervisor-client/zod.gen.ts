@@ -3247,6 +3247,7 @@ export const zWorkCloseWarnOnlyUsedPayload = z.object({
     removal_version: z.string(),
     route: z.string(),
     store_ref: z.string(),
+    usage_id: z.string(),
     violation_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 

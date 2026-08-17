@@ -58,7 +58,7 @@ var specs = []Spec{
 		Expires:        "2026-12-31",
 		VersionAnchor:  ShippedCloseWarnOnlyRemovalVersion,
 		SelectsBetween: [2]string{"refuse invalid managed shipped close", "warn and permit invalid managed shipped close"},
-		Justification:  "Provide one bounded compatibility release for repairing legacy shipped records while enforcement becomes the managed-close default; deletion readiness requires a complete+clean shipped audit and zero warn-only-use events since controller restart.",
+		Justification:  "Provide one bounded compatibility release for repairing legacy shipped records while enforcement becomes the managed-close default; deletion readiness requires a complete+clean shipped audit and a successful durable-journal query showing zero acknowledged warn-only-use events throughout the declared observation window.",
 	},
 	{
 		Key:            keyDaemonFormulaV2,
