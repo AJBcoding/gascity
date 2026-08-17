@@ -53,13 +53,13 @@ type FileRecorder struct {
 	closed bool
 
 	// AppendBatch's acknowledged contract is stronger than Record's
-	// best-effort contract: bytes are accepted only after the active file is
-	// synced, and a newly created directory entry is accepted only after its
-	// parent directory is synced. The function fields keep that durability
-	// boundary directly failure-injectable in same-package tests.
-	syncFileFn           func(*os.File) error
-	syncDirFn            func(string) error
-	directorySyncPending bool
+	// best-effort contract: bytes are accepted only after the active file and
+	// its parent directory are synced. Every acknowledged append establishes
+	// both barriers so the guarantee does not depend on process-local creation
+	// state. The function fields keep that durability boundary directly
+	// failure-injectable in same-package tests.
+	syncFileFn func(*os.File) error
+	syncDirFn  func(string) error
 
 	// rotations tracks in-flight rotation goroutines so Close can
 	// drain them. Without this, callers that read events.jsonl
@@ -182,7 +182,7 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		return nil, err
 	}
 
-	file, created, err := openAppendRecorderFile(path)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return nil, fmt.Errorf("opening event log: %w", err)
 	}
@@ -194,7 +194,6 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		stderr:                stderr,
 		syncFileFn:            func(file *os.File) error { return file.Sync() },
 		syncDirFn:             syncRecorderDirectory,
-		directorySyncPending:  created,
 		maxSize:               0,
 		rotationCheckRecords:  defaultRotationCheckRecords,
 		rotationCheckInterval: defaultRotationCheckInterval,
@@ -204,29 +203,6 @@ func NewFileRecorder(path string, stderr io.Writer, opts ...FileRecorderOption) 
 		opt(r)
 	}
 	return r, nil
-}
-
-// openAppendRecorderFile reports whether this open atomically created the
-// active journal. The retry closes the only race between an exclusive create
-// observing an existing path and that path disappearing before the non-create
-// open; an extra creator simply retries the exclusive arm.
-func openAppendRecorderFile(path string) (*os.File, bool, error) {
-	for {
-		file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
-		if err == nil {
-			return file, true, nil
-		}
-		if !errors.Is(err, os.ErrExist) {
-			return nil, false, err
-		}
-		file, err = os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
-		if err == nil {
-			return file, false, nil
-		}
-		if !errors.Is(err, os.ErrNotExist) {
-			return nil, false, err
-		}
-	}
 }
 
 func syncRecorderDirectory(path string) error {
@@ -279,7 +255,7 @@ func (r *FileRecorder) Record(e Event) {
 // AppendBatch strictly appends a complete event batch under one mutex and one
 // cross-process file lock. It assigns contiguous sequence numbers, prepares the
 // complete JSONL payload before writing, performs exactly one write, and
-// syncs the active file (and its parent directory after first creation), and
+// syncs the active file and its parent directory for every acknowledgment, and
 // returns every lock, marshal, write, durability-barrier, or unlock failure to
 // the caller.
 //
@@ -335,11 +311,8 @@ func (r *FileRecorder) AppendBatch(batch []Event) (resultErr error) {
 	if err := r.syncFileFn(r.file); err != nil {
 		return fmt.Errorf("sync active log: %w", err)
 	}
-	if r.directorySyncPending {
-		if err := r.syncDirFn(filepath.Dir(r.path)); err != nil {
-			return fmt.Errorf("sync event log directory: %w", err)
-		}
-		r.directorySyncPending = false
+	if err := r.syncDirFn(filepath.Dir(r.path)); err != nil {
+		return fmt.Errorf("sync event log directory: %w", err)
 	}
 	r.seq = lastSeq
 	r.recordCount += uint64(len(batch))
@@ -520,12 +493,11 @@ func (r *FileRecorder) rotateLocked() (RotationResult, error) {
 		return RotationResult{}, fmt.Errorf("renaming active log: %w", err)
 	}
 
-	newFile, created, err := openAppendRecorderFile(r.path)
+	newFile, err := os.OpenFile(r.path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
 		return RotationResult{}, fmt.Errorf("opening new active log: %w", err)
 	}
 	r.file = newFile
-	r.directorySyncPending = created
 	r.recordCount = 0
 	r.lastSizeCheck = time.Now()
 

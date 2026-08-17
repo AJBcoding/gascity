@@ -135,7 +135,58 @@ func TestWarnOnlyAcknowledgmentFailsClosedOnFileSyncFailure(t *testing.T) {
 	}
 }
 
-func TestFileRecorderAppendBatchSyncsParentForNewJournal(t *testing.T) {
+func TestWarnOnlyAcknowledgmentNonCreatorRequiresOwnDirectorySync(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	creator, err := NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = creator.Close() })
+	nonCreator, err := NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = nonCreator.Close() })
+
+	injected := errors.New("injected non-creator directory sync failure")
+	var creatorSyncCalls, nonCreatorSyncCalls int
+	creator.syncDirFn = func(string) error {
+		creatorSyncCalls++
+		return nil
+	}
+	nonCreator.syncDirFn = func(string) error {
+		nonCreatorSyncCalls++
+		sibling, openErr := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		if openErr != nil {
+			t.Errorf("open sibling during directory sync: %v", openErr)
+			return injected
+		}
+		defer sibling.Close() //nolint:errcheck // test-only probe
+		lockErr := syscall.Flock(int(sibling.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if lockErr == nil {
+			_ = syscall.Flock(int(sibling.Fd()), syscall.LOCK_UN)
+			t.Error("non-creator directory barrier ran after the append flock was released")
+		} else if !errors.Is(lockErr, syscall.EWOULDBLOCK) && !errors.Is(lockErr, syscall.EAGAIN) {
+			t.Errorf("probe append flock during non-creator directory sync: %v", lockErr)
+		}
+		return injected
+	}
+
+	_, err = RecordWorkCloseWarnOnlyUse(nonCreator, WorkCloseWarnOnlyUsedPayload{
+		Route: "gc.bd", StoreRef: "city:test", BeadID: "ga-non-creator-sync-fail",
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("non-creator warn-only acknowledgment error = %v, want injected directory sync failure", err)
+	}
+	if creatorSyncCalls != 0 {
+		t.Fatalf("creator directory sync calls = %d, want 0 before non-creator append", creatorSyncCalls)
+	}
+	if nonCreatorSyncCalls != 1 {
+		t.Fatalf("non-creator directory sync calls = %d, want 1", nonCreatorSyncCalls)
+	}
+}
+
+func TestFileRecorderAppendBatchRequiresParentSyncForEveryAcknowledgment(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "events.jsonl")
 	recorder, err := NewFileRecorder(path, io.Discard)
 	if err != nil {
@@ -152,12 +203,12 @@ func TestFileRecorderAppendBatchSyncsParentForNewJournal(t *testing.T) {
 	recorder.syncDirFn = func(string) error {
 		syncDirCalls++
 		barriers = append(barriers, "directory")
-		return injected
+		return nil
 	}
 
 	err = recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}})
-	if !errors.Is(err, injected) {
-		t.Fatalf("first AppendBatch error = %v, want directory sync failure", err)
+	if err != nil {
+		t.Fatalf("first AppendBatch: %v", err)
 	}
 	if syncDirCalls != 1 {
 		t.Fatalf("directory sync calls = %d, want 1", syncDirCalls)
@@ -169,19 +220,24 @@ func TestFileRecorderAppendBatchSyncsParentForNewJournal(t *testing.T) {
 	recorder.syncDirFn = func(string) error {
 		syncDirCalls++
 		barriers = append(barriers, "directory")
+		return injected
+	}
+	if err := recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}}); !errors.Is(err, injected) {
+		t.Fatalf("second AppendBatch error = %v, want directory sync failure", err)
+	}
+	recorder.syncDirFn = func(string) error {
+		syncDirCalls++
+		barriers = append(barriers, "directory")
 		return nil
 	}
 	if err := recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}}); err != nil {
-		t.Fatalf("retry AppendBatch: %v", err)
+		t.Fatalf("third AppendBatch: %v", err)
 	}
-	if err := recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}}); err != nil {
-		t.Fatalf("settled AppendBatch: %v", err)
+	if syncDirCalls != 3 {
+		t.Fatalf("directory sync calls = %d, want one barrier per append", syncDirCalls)
 	}
-	if syncDirCalls != 2 {
-		t.Fatalf("directory sync calls = %d, want one failed and one successful barrier", syncDirCalls)
-	}
-	if got := strings.Join(barriers, ","); got != "file,directory,file,directory,file" {
-		t.Fatalf("barrier sequence = %q, want directory sync retired after its first success", got)
+	if got := strings.Join(barriers, ","); got != "file,directory,file,directory,file,directory" {
+		t.Fatalf("barrier sequence = %q, want file then directory for every append", got)
 	}
 }
 
