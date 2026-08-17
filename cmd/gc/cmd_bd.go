@@ -287,7 +287,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// from a store the operator did not name. Auto-detected scope (GC_RIG, -C,
 	// cwd) is resolved inside resolveBdScopeTarget and deliberately does not
 	// travel — see refuseRigScopedClassOwnedTarget.
-	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr); handled {
+	if code, handled := maybeRouteBdByID(cityPath, rigName, bdArgs, stdout, stderr, cfg); handled {
 		return code
 	}
 	if id, expectedAssignee, ok, err := parseBdReleaseIfCurrentArgs(bdArgs); ok || err != nil {

@@ -114,9 +114,8 @@ type agentScriptExecutor struct {
 	resolveBeadStore func(beadID string) (dir string, env []string, ok bool)
 }
 
-// runBDForBead runs a bd subprocess against beadID, redirecting it to the bead's
-// owning store when the runner is cross-store-eligible (vp-kvp stage iii write
-// half). Falls back to the default environment otherwise.
+// runBDForBead runs a raw bd subprocess against beadID. Claims remain on this
+// pre-existing seam; migrating raw-bd claims is a separate compatibility task.
 func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
 	if e.resolveBeadStore != nil && e.runCommandInStore != nil {
 		if dir, env, ok := e.resolveBeadStore(strings.TrimSpace(beadID)); ok {
@@ -124,6 +123,18 @@ func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
 		}
 	}
 	return e.runCommand("bd", args...)
+}
+
+// runManagedBDForBead keeps agent-script update/close mutations on gc bd, the
+// managed policy boundary, while preserving the selected store environment.
+func (e agentScriptExecutor) runManagedBDForBead(beadID string, args ...string) error {
+	managedArgs := append([]string{"bd"}, args...)
+	if e.resolveBeadStore != nil && e.runCommandInStore != nil {
+		if dir, env, ok := e.resolveBeadStore(strings.TrimSpace(beadID)); ok {
+			return e.runCommandInStore(dir, env, "gc", managedArgs...)
+		}
+	}
+	return e.runCommand("gc", managedArgs...)
 }
 
 func runAgentScript(scriptPath string, stdout, stderr io.Writer) int {
@@ -312,6 +323,9 @@ func (e agentScriptExecutor) runAction(action agentScriptAction, ctx agentScript
 			beadID := ""
 			if len(args) >= 2 {
 				beadID = args[1]
+			}
+			if bdUpdateClosesStatus(args) {
+				return nil, e.runManagedBDForBead(beadID, args...)
 			}
 			return nil, e.runBDForBead(beadID, args...)
 		case "exit":

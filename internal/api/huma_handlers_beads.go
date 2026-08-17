@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/workclose"
 )
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
@@ -751,8 +753,11 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 // humaHandleBeadClose is the Huma-typed handler for POST /v0/bead/{id}/close.
 func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, ref, current, err := s.resolveBeadOwnerRef(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceResolvedWorkClose(current, workclose.ProjectClose(current), ref); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {
@@ -845,7 +850,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		opts.ParentID = &parent
 	}
 
-	store, current, err := s.resolveBeadOwner(id)
+	store, ref, current, err := s.resolveBeadOwnerRef(id)
 	if err != nil {
 		return nil, err
 	}
@@ -855,6 +860,11 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 			return nil, apierr.InvalidRequest.Msg(err.Error())
 		}
 		opts.Assignee = &assignee
+	}
+	if opts.Status != nil && strings.EqualFold(strings.TrimSpace(*opts.Status), "closed") {
+		if err := s.enforceResolvedWorkClose(current, workclose.ProjectUpdate(current, opts), ref); err != nil {
+			return nil, err
+		}
 	}
 	waitStatus := current.Status
 	if opts.Status != nil {
@@ -891,8 +901,11 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // exposed through the API.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, ref, current, err := s.resolveBeadOwnerRef(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.enforceResolvedWorkClose(current, workclose.ProjectClose(current), ref); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {

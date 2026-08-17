@@ -90,9 +90,8 @@ package main
 // Every such open bead was a permanent ready-frontier polluter with no
 // supported drain path.
 //
-// A close this door serves does NOT reach the ADR-0009 work-record close gate,
-// which doBd runs later. The coverage boundary and why it is sound are recorded
-// where the gate defines itself, in work_record_gate.go's header.
+// A close this door serves is evaluated after residence resolution and before
+// the write, using the class row and class store ref the door actually selected.
 //
 // # Ownership is decided before servability
 //
@@ -168,7 +167,10 @@ import (
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/workclose"
 )
 
 // bdByIDVerb names a recognized by-ID gc bd invocation.
@@ -583,8 +585,9 @@ func (r bdByIDResolution) Owned() bool { return r.Reserved || r.Found }
 // reads one database rather than two, and a routed read cannot close a handle
 // another call site is still using.
 type bdByIDClassDoor struct {
-	Graph   storebinding.GraphStore
-	Binding string
+	Graph    storebinding.GraphStore
+	Binding  string
+	StoreRef string
 }
 
 // bindingName names the binding in operator-facing text.
@@ -635,7 +638,11 @@ func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 	if err != nil {
 		return bdByIDClassDoor{}, false, fmt.Errorf("projecting the class front door of binding %q: %w", routes.binding, err)
 	}
-	return bdByIDClassDoor{Graph: graph, Binding: routes.binding}, true, nil
+	classes := make([]coordclass.Class, 0, len(routes.stores))
+	for class := range routes.stores {
+		classes = append(classes, class)
+	}
+	return bdByIDClassDoor{Graph: graph, Binding: routes.binding, StoreRef: string(storeref.ClassRef(classes))}, true, nil
 }
 
 // resolve asks the open front door whether it owns id.
@@ -733,7 +740,7 @@ func bdIDIsClassReserved(id string) bool {
 // invocation, so treating that as a deliberate scope would refuse the
 // step-completion write the core pack renders on every worked bead. See
 // refuseRigScopedClassOwnedTarget.
-func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer) (int, bool) {
+func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr io.Writer, cfgOpt ...*config.City) (int, bool) {
 	op, served := parseBdByIDOp(bdArgs)
 	named, namesClassBead := bdArgsNameClassOwnedBead(bdArgs)
 	mutationIDs := bdByIDMutationSubjects(bdArgs)
@@ -809,6 +816,23 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		// honoring it sends the read to a ledger that does not hold the bead.
 		// So neither is taken. See refuseRigScopedClassOwnedTarget.
 		return refuseRigScopedClassOwnedTarget(door, op.ID, rig, stderr)
+	}
+	var cfg *config.City
+	if len(cfgOpt) > 0 {
+		cfg = cfgOpt[0]
+	}
+	prospective := resolution.Bead
+	closing := false
+	switch op.Verb {
+	case bdByIDClose:
+		prospective = workclose.ProjectClose(resolution.Bead)
+		closing = true
+	case bdByIDUpdate:
+		prospective = workclose.ProjectUpdate(resolution.Bead, op.Update)
+		closing = op.Update.Status != nil && strings.EqualFold(strings.TrimSpace(*op.Update.Status), "closed")
+	}
+	if closing && evaluateResolvedWorkClose(resolution.Bead, prospective, cityPath, door.StoreRef, cityPath, cfg, stderr) {
+		return 1, true
 	}
 	switch op.Verb {
 	case bdByIDShow:

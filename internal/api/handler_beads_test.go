@@ -14,11 +14,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workclose"
 )
 
 type prefixedAliasStore struct {
@@ -430,6 +432,32 @@ func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("rig status = %q, want closed", got.Status)
+	}
+}
+
+func TestHTTPBeadCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	created, err := store.Create(beads.Bead{Title: "shipped without landing evidence", Type: "task", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+	}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Setenv(workclose.EnforceEnvVar, "1")
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+created.ID+"/close", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("close status = %d, want %d, body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.Status == "closed" {
+		t.Fatal("HTTP close mutated shipped work after policy refusal")
 	}
 }
 

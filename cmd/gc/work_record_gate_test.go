@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -222,6 +223,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"no-op close passes", []string{"close", "wr-noop"}, true, false, ""},
 		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
+		{"multi-ID close applies the same verdict", []string{"close", "wr-noop", "wr-shipped-nocommit"}, true, true, "close of wr-shipped-nocommit"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
 		{"update --status=closed is gated", []string{"update", "wr-shipped-nocommit", "--status=closed"}, true, true, "close of wr-shipped-nocommit"},
 		{
@@ -495,6 +497,23 @@ type panicOnGetStore struct{ beads.Store }
 
 func (panicOnGetStore) Get(id string) (beads.Bead, error) {
 	panic("store.Get called for id " + id + ": preFetched bead should have been used")
+}
+
+type unreadableWorkRecordStore struct{ beads.Store }
+
+func (unreadableWorkRecordStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("authoritative store unavailable")
+}
+
+func TestEvaluateWorkRecordCloseGateFailsClosedWhenAuthoritativeReadCannotClassifyOutcome(t *testing.T) {
+	args := []string{"close", "wr-unreadable"}
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, unreadableWorkRecordStore{}, nil, t.TempDir(), "city:test", nil, true, &stderr); !block {
+		t.Fatalf("close failed open when authoritative read could not classify its outcome; stderr=%q", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "authoritative store unavailable") {
+		t.Fatalf("read refusal was not diagnosed: %q", stderr.String())
+	}
 }
 
 func TestEvaluateWorkRecordCloseGateUsesPreFetchedBead(t *testing.T) {

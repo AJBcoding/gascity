@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/workclose"
 	"github.com/gastownhall/gascity/internal/workstamp"
 )
 
@@ -28,73 +29,24 @@ import (
 // proceeds — so existing open beads migrate without breakage. Set
 // GC_WORK_RECORD_ENFORCE to a truthy value to make violations block the close.
 //
-// # What the gate does NOT see: a close the by-ID class door served
-//
-// doBd runs the by-ID class door (cmd_bd_by_id.go maybeRouteBdByID) BEFORE this
-// gate, and a routed close returns from doBd without reaching it. So on a city
-// that relocates a coordination class, `gc bd close <id>` and `gc bd update
-// <id> --status closed` are gated only when they fall through to the bd
-// subprocess. This is a coverage boundary, and it is recorded here rather than
-// closed because closing it would mean re-deriving the gate against a store
-// this file does not resolve.
-//
-// It is narrower than it sounds, in three steps:
-//
-//   - This gate reads the PREFIX store (the caller's resolved work scope). A
-//     bead resident only in the class binding was never visible to it: the Get
-//     missed and the loop skipped the id. Routing those closes through the door
-//     removed nothing, because there was nothing to remove.
-//   - The canonical worker spelling was already outside. graph-worker.md renders
-//     `gc bd update <id> --set-metadata gc.outcome=pass --status closed`, and a
-//     served update on a class-owned bead has been answered by the door since
-//     that verb landed — well before close joined it.
-//   - What the door's close DOES take from the gate is the DUAL-RESIDENT case,
-//     and that population is real rather than hypothetical. `gc storage migrate`
-//     copies every non-work bead with its id preserved and keeps the source
-//     (readInfraSnapshot / infra_class_migrate.go), and coordclass.Classify
-//     routes ANY bead carrying gc.root_bead_id to ClassGraph
-//     (isWorkflowMetadata) — including a plain task-typed molecule work step
-//     with no gc.kind, which is exactly isWorkRecordGatedBead's population. On a
-//     migrated city those steps exist in both stores, and before the door served
-//     close, this gate evaluated them against the work store's RETAINED copy —
-//     the one frozen at migration time, not the one the close now writes. So the
-//     gate's pre-door verdict on a dual resident was already a verdict about a
-//     stale row.
-//
-// The drain path for that population is the sweep, not this gate. Both the CLI
-// door and the HTTP by-id lane now resolve a dual resident to the CLASS copy —
-// the door by its own residence probe, internal/api through the residency
-// resolver's ByID plan, which leads with the binding for exactly this reason —
-// so the two surfaces agree, and both write the row the controller reads. The
-// retained work copy stays reachable through raw bd against the work scope, and
-// it still has to be drained; that is the sweep's job, not this gate's.
+// Every managed close adapter resolves its mutation target first and supplies
+// that exact row and physical store ref to internal/workclose.WorkClosePolicy.
 
 // workRecordEnforceEnvVar gates whether work-record violations block the close
 // (enforce) or are logged only (warn-only, the default).
-const workRecordEnforceEnvVar = "GC_WORK_RECORD_ENFORCE"
+const workRecordEnforceEnvVar = workclose.EnforceEnvVar
 
 // workRecordEnforceEnabled reports whether the close gate should block closes
 // that violate the work-record contract, rather than only warning.
 func workRecordEnforceEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(workRecordEnforceEnvVar))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
+	return workclose.Enforced(os.Getenv(workRecordEnforceEnvVar))
 }
 
 // validWorkOutcome reports whether v is one of the four typed work-record close
 // dispositions. The vocabulary is owned here (the consumer), not in beadmeta,
 // per that package's data-only convention.
 func validWorkOutcome(v string) bool {
-	switch v {
-	case beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeNoOp,
-		beadmeta.WorkOutcomeBlocked, beadmeta.WorkOutcomeAbandoned:
-		return true
-	default:
-		return false
-	}
+	return workclose.ValidOutcome(v)
 }
 
 // isWorkRecordGatedBead reports whether the work-record close contract applies
@@ -104,13 +56,7 @@ func validWorkOutcome(v string) bool {
 // message). Those use the disjoint control-plane gc.outcome vocabulary and are
 // closed by the dispatch engine, not by a worker reporting a work outcome.
 func isWorkRecordGatedBead(bead beads.Bead) bool {
-	if t := strings.TrimSpace(bead.Type); t != "" && t != "task" {
-		return false
-	}
-	if strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]) != "" {
-		return false
-	}
-	return true
+	return workclose.AppliesTo(bead)
 }
 
 // validateWorkRecordOnClose checks bead against the typed work-record contract
@@ -119,31 +65,7 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 // an ancestor of a branch; it is injected so the rule is unit-testable without
 // a real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
 func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool) []string {
-	outcome := bead.Metadata[beadmeta.WorkOutcomeMetadataKey]
-	if outcome == "" {
-		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
-	}
-	if !validWorkOutcome(outcome) {
-		return []string{fmt.Sprintf("invalid %s=%q (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey, outcome)}
-	}
-	if outcome != beadmeta.WorkOutcomeShipped {
-		// no-op / blocked / abandoned carry their reason in the close-reason; no
-		// commit artifact is required.
-		return nil
-	}
-	commit := strings.TrimSpace(bead.Metadata[beadmeta.WorkCommitMetadataKey])
-	branch := strings.TrimSpace(bead.Metadata[beadmeta.WorkBranchMetadataKey])
-	var violations []string
-	if commit == "" {
-		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the commit that satisfied the bead)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey))
-	}
-	if branch == "" {
-		violations = append(violations, fmt.Sprintf("%s=shipped requires %s (the branch the commit lives on)", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkBranchMetadataKey))
-	}
-	if commit != "" && branch != "" && !commitReachable(commit, branch) {
-		violations = append(violations, fmt.Sprintf("%s %s is not reachable on %s %s", beadmeta.WorkCommitMetadataKey, commit, beadmeta.WorkBranchMetadataKey, branch))
-	}
-	return violations
+	return workclose.ValidateRecord(bead, commitReachable)
 }
 
 // gitCommitReachableOnBranch reports whether commit is an ancestor of branch in
@@ -226,7 +148,8 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 
 // runWorkRecordCloseGate validates every bead a `gc bd close` (or
 // `gc bd update --status=closed`) invocation closes against the work-record
-// contract. Best-effort: it never blocks on its own read failure. Returns
+// contract. Under enforcement, an authoritative read failure blocks because
+// the adapter cannot safely classify the close as exempt/non-shipped. Returns
 // whether the close should be blocked (only when enforcement is enabled).
 //
 // preOpened and preFetched let a caller that already opened the store and
@@ -244,7 +167,10 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 		var err error
 		store, err = openStoreAtForCityWithConfig(scopeRoot, cityPath, cfg)
 		if err != nil {
-			// Cannot verify — never block a close on our own read failure.
+			if workRecordEnforceEnabled() {
+				fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close refused: authoritative store is unreadable and the work outcome cannot be classified: %v\n", err) //nolint:errcheck // best-effort stderr
+				return true
+			}
 			return false
 		}
 	}
@@ -308,14 +234,20 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 			var getErr error
 			bead, getErr = store.Get(id)
 			if getErr != nil {
+				if enforce {
+					fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close of %s: authoritative bead is unreadable and the work outcome cannot be classified: %v\n", id, getErr) //nolint:errcheck // best-effort stderr
+					block = true
+				}
 				continue
 			}
 		}
 		if !isWorkRecordGatedBead(bead) {
 			continue
 		}
+		current := bead
 		var projectionErr error
 		bead, projectionErr = applyWorkRecordUpdateMetadata(bead, bdArgs)
+		bead.Status = "closed"
 		repoDir := strings.TrimSpace(bead.Metadata[beadmeta.WorkDirMetadataKey])
 		if repoDir == "" {
 			repoDir = scopeRoot
@@ -324,12 +256,15 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		if projectionErr != nil {
 			violations = []string{projectionErr.Error()}
 		} else {
-			violations = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
+			policy := workclose.WorkClosePolicy{Evidence: evidence, CommitReachable: func(commit, branch string) bool {
 				return gitCommitReachableOnBranch(repoDir, commit, branch)
+			}}
+			violations = policy.Evaluate(workclose.Request{
+				Current:             current,
+				ProspectiveStatus:   bead.Status,
+				ProspectiveMetadata: bead.Metadata,
+				StoreRef:            storeRef,
 			})
-			if bead.Metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeShipped {
-				violations = append(violations, workstamp.ValidateLandingEvidence(evidence, storeRef, bead)...)
-			}
 		}
 		for _, v := range violations {
 			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, v) //nolint:errcheck // best-effort stderr
@@ -339,6 +274,36 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 		}
 	}
 	return block
+}
+
+// evaluateResolvedWorkClose applies the shared policy to the exact row and
+// physical store selected by an in-process mutation route.
+func evaluateResolvedWorkClose(current, prospective beads.Bead, repoFallback, storeRef, cityPath string, cfg *config.City, stderr io.Writer) bool {
+	evidence, closeEvidence, err := openWorkRecordEvidenceJournal(cityPath, cfg)
+	if err == nil {
+		defer closeEvidence()
+	}
+	repoDir := strings.TrimSpace(prospective.Metadata[beadmeta.WorkDirMetadataKey])
+	if repoDir == "" {
+		repoDir = repoFallback
+	}
+	policy := workclose.WorkClosePolicy{Evidence: evidence, CommitReachable: func(commit, branch string) bool {
+		return gitCommitReachableOnBranch(repoDir, commit, branch)
+	}}
+	violations := policy.Evaluate(workclose.Request{
+		Current:             current,
+		ProspectiveStatus:   prospective.Status,
+		ProspectiveMetadata: prospective.Metadata,
+		StoreRef:            storeRef,
+	})
+	mode := "warn-only"
+	if workRecordEnforceEnabled() {
+		mode = "enforced"
+	}
+	for _, violation := range violations {
+		fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, prospective.ID, violation) //nolint:errcheck // best-effort stderr
+	}
+	return workRecordEnforceEnabled() && len(violations) > 0
 }
 
 // workRecordMetadataEdits is the parsed metadata mutation of a `bd update` arg

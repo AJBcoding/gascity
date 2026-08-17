@@ -7,9 +7,11 @@ import (
 	"testing"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
+	"github.com/gastownhall/gascity/internal/workclose"
 )
 
 // beadStoresForID renders the by-id PLAN as the ordered store list this
@@ -449,6 +451,57 @@ func TestBeadDualResidentAnswersFromTheBinding(t *testing.T) {
 	}
 	if control.Body.Title != "a work bead the binding never held" {
 		t.Fatalf("control GET served %q, want the work copy", control.Body.Title)
+	}
+}
+
+func TestManagedAPICloseRoutesEvaluateAuthoritativeDualResident(t *testing.T) {
+	for _, route := range []string{"close", "update", "delete"} {
+		t.Run(route, func(t *testing.T) {
+			st, graph, city, _ := relocatedGraphRouteState(t)
+			st.cfg.Workspace.Prefix = "mc"
+			id := classResidentWorkShapedID(t, graph, "mc-policy1")
+			seedWithPinnedID(t, city, id, "retained work copy")
+			if err := graph.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+			}}); err != nil {
+				t.Fatalf("stamping class resident: %v", err)
+			}
+			if err := city.Update(id, beads.UpdateOpts{Metadata: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+			}}); err != nil {
+				t.Fatalf("stamping retained work copy: %v", err)
+			}
+			t.Setenv(workclose.EnforceEnvVar, "1")
+
+			s := New(st)
+			var err error
+			switch route {
+			case "close":
+				_, err = s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: id})
+			case "update":
+				closed := "closed"
+				_, err = s.humaHandleBeadUpdate(context.Background(), &BeadUpdateInput{ID: id, Body: beadUpdateBody{Status: &closed}})
+			case "delete":
+				_, err = s.humaHandleBeadDelete(context.Background(), &BeadDeleteInput{ID: id})
+			}
+			if err == nil {
+				t.Fatalf("%s accepted the class resident's shipped close without landing evidence", route)
+			}
+			classCopy, getErr := graph.Get(id)
+			if getErr != nil {
+				t.Fatalf("re-reading class copy: %v", getErr)
+			}
+			if classCopy.Status == "closed" {
+				t.Fatalf("%s closed the authoritative class copy", route)
+			}
+			workCopy, getErr := city.Get(id)
+			if getErr != nil {
+				t.Fatalf("re-reading retained work copy: %v", getErr)
+			}
+			if workCopy.Status == "closed" {
+				t.Fatalf("%s mutated the retained work copy", route)
+			}
+		})
 	}
 }
 

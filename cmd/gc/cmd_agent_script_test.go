@@ -495,7 +495,7 @@ func TestAgentScriptRunActionBuildsBDUpdateArgs(t *testing.T) {
 		t.Fatalf("runAction: %v", err)
 	}
 	want := []string{
-		"bd", "update", "ga-123",
+		"gc", "bd", "update", "ga-123",
 		"--assignee", "demo/lifecycle.refinery",
 		"--status", "closed",
 		"--notes", "merged polecat/ga-123",
@@ -785,7 +785,7 @@ turns:
 	}
 	wantCommands := [][]string{
 		{"bd", "update", "ga-123", "--claim", "--actor", "demo/worker"},
-		{"bd", "update", "ga-123", "--status", "closed", "--set-metadata", "branch=polecat/ga-123"},
+		{"gc", "bd", "update", "ga-123", "--status", "closed", "--set-metadata", "branch=polecat/ga-123"},
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
 		t.Fatalf("commands = %#v, want %#v", commands, wantCommands)
@@ -941,7 +941,7 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 
 	wantCommands := [][]string{
 		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGING: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery is merging polecat/ga-123."},
-		{"bd", "update", "ga-123", "--status", "closed", "--notes", "scripted refinery: merged polecat/ga-123 into main", "--set-metadata", "merge_result=merged"},
+		{"gc", "bd", "update", "ga-123", "--status", "closed", "--notes", "scripted refinery: merged polecat/ga-123 into main", "--set-metadata", "merge_result=merged"},
 		{"gc", "mail", "send", "--to", "demo/lifecycle.polecat", "-s", "MERGED: polecat/ga-123 (ga-123)", "-m", "scripted refinery demo/lifecycle.refinery merged polecat/ga-123 into main."},
 	}
 	if !reflect.DeepEqual(commands, wantCommands) {
@@ -962,7 +962,7 @@ func TestAgentScriptRunsShippedLifecycleRefineryScript(t *testing.T) {
 		"cmd:mail_send",
 		"shell:merge",
 		"shell:push",
-		"cmd:bd_update",
+		"cmd:gc",
 		"shell:cleanup",
 		"cmd:mail_send",
 	}

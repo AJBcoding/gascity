@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -978,6 +979,41 @@ func TestBdCloseServesClassResidentWorkPrefixedBead(t *testing.T) {
 	// the bead, and a routed close must not have minted one there either.
 	if _, err := workStoreFor(t, cityPath).Get(relic.ID); err == nil {
 		t.Errorf("the work store holds %s after a routed close; the write reached the ledger the bead was never in", relic.ID)
+	}
+}
+
+// TestBdByIDCloseRejectsShippedWorkWithoutLandingEvidence is the routed-door
+// regression: the class binding is the mutation's authoritative resident, so
+// its work record must be evaluated before maybeRouteBdByID returns handled.
+func TestBdByIDCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	relic := classResidentWorkShapedBead(t, classStore, "gc-shipped1", "shipped without a landing stamp")
+	if err := classStore.Update(relic.ID, beads.UpdateOpts{Metadata: map[string]string{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkCommitMetadataKey:  strings.Repeat("a", 40),
+		beadmeta.WorkBranchMetadataKey:  "main",
+	}}); err != nil {
+		t.Fatalf("stamping shipped outcome: %v", err)
+	}
+	t.Setenv(workRecordEnforceEnvVar, "1")
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{"close", relic.ID}, &stdout, &stderr)
+	if !handled {
+		t.Fatalf("a class-resident work record fell through to bd: %q", stderr.String())
+	}
+	if code == 0 {
+		t.Fatalf("shipped close without landing evidence exited 0: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	after, err := classStore.Get(relic.ID)
+	if err != nil {
+		t.Fatalf("re-reading refused close: %v", err)
+	}
+	if after.Status == "closed" {
+		t.Fatal("routed-by-ID bypass closed shipped work without landing evidence")
+	}
+	if !strings.Contains(stderr.String(), beadmeta.DeliveryStateMetadataKey) {
+		t.Fatalf("refusal did not diagnose landing evidence: %q", stderr.String())
 	}
 }
 
