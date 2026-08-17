@@ -97,7 +97,11 @@ func (c *shippedCloseBoundaryCheck) scopeHasConfiguredOrEffectiveBDPath(scopeRoo
 	if scopeUsesBdStoreContract(scopeRoot) {
 		return true
 	}
-	if scopeUsesFileStoreContract(scopeRoot) {
+	// A scope-local file marker is authoritative for a distinct rig, so do not
+	// apply the city's configured provider to that rig. At the city root the
+	// configured provider is independent policy evidence: a stale file marker
+	// and a transient GC_BEADS=file override must not erase configured bd reachability.
+	if !samePath(scopeRoot, c.cityPath) && scopeUsesFileStoreContract(scopeRoot) {
 		return false
 	}
 	provider := strings.TrimSpace(c.cfg.Beads.Provider)

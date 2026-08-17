@@ -89,6 +89,44 @@ func TestShippedCloseBoundaryCannotBeMaskedByAmbientFileOverride(t *testing.T) {
 	}
 }
 
+func TestShippedCloseBoundaryCannotBeMaskedByFileMarkerAndAmbientFileOverride(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	writeShippedCloseBoundaryCityConfig(t, cityPath, "bd")
+	if err := os.MkdirAll(filepath.Join(cityPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cityPath, ".gc", "beads.json"), []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GC_BEADS", "file")
+	cfg := &config.City{Beads: config.BeadsConfig{Provider: "bd", DirectRawBDWrites: true}}
+
+	res := newShippedCloseBoundaryCheck(cityPath, cfg).Run(&doctor.CheckContext{CityPath: cityPath})
+
+	if res.Status != doctor.StatusError || res.Severity != doctor.SeverityBlocking {
+		t.Fatalf("file marker plus ambient GC_BEADS=file masked configured raw bd entrypoint: %+v", res)
+	}
+}
+
+func TestShippedCloseBoundaryDoesNotApplyCityBDDefaultToExplicitFileRig(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "file-rig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".gc", "beads.json"), []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeShippedCloseBoundaryCityConfig(t, cityPath, "bd")
+	cfg := &config.City{Beads: config.BeadsConfig{Provider: "bd", DirectRawBDWrites: true}}
+
+	if newShippedCloseBoundaryCheck(cityPath, cfg).scopeHasConfiguredOrEffectiveBDPath(rigPath) {
+		t.Fatal("explicitly file-backed rig inherited city bd default")
+	}
+}
+
 func TestShippedCloseBoundaryIncludesAmbientBDOverride(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()
