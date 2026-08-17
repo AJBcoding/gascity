@@ -6,19 +6,23 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/workstamp"
 )
 
 // Work-record close gate (ADR-0009). Closing a work bead through the SDK close
 // seam (`gc bd close`) is validated against the typed work-record contract: the
-// bead must carry a typed gc.work_outcome, and a "shipped" outcome must point at
-// a commit that is reachable on the stamped gc.work_branch. This turns the
-// recurring "drain-without-commit" close (a close that leaves no artifact at
-// all) into a machine-checkable violation.
+// bead must carry a typed gc.work_outcome, and a "shipped" outcome must carry
+// journal-backed landing evidence for its exact store, bead, and source commit.
+// Branch reachability remains a provenance diagnostic, but cannot alone close
+// shipped work. This turns the recurring "drain-without-commit" close (a close
+// that leaves no artifact at all) into a machine-checkable violation.
 //
 // The gate ships warn-only by default — violations are logged but the close
 // proceeds — so existing open beads migrate without breakage. Set
@@ -244,7 +248,44 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 			return false
 		}
 	}
-	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, scopeRoot, workRecordEnforceEnabled(), stderr)
+	storeRef := workRecordCanonicalStoreRef(scopeRoot, cityPath, cfg)
+	journal, closeJournal, err := openWorkRecordEvidenceJournal(cityPath, cfg)
+	if err == nil {
+		defer closeJournal()
+	}
+	return evaluateWorkRecordCloseGate(bdArgs, store, preFetched, scopeRoot, storeRef, journal, workRecordEnforceEnabled(), stderr)
+}
+
+// openWorkRecordEvidenceJournal opens the configured city event journal for
+// read-only delivery-evidence validation.
+func openWorkRecordEvidenceJournal(cityPath string, cfg *config.City) (events.Provider, func(), error) {
+	if cfg == nil || strings.TrimSpace(cityPath) == "" {
+		return nil, func() {}, fmt.Errorf("city event journal configuration is unavailable")
+	}
+	providerName := cfg.Events.Provider
+	if override := strings.TrimSpace(os.Getenv("GC_EVENTS")); override != "" {
+		providerName = override
+	}
+	provider, err := newEventsProviderForNameWithConfig(
+		providerName,
+		filepath.Join(cityPath, ".gc", "events.jsonl"),
+		io.Discard,
+		cfg.Events,
+	)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	return provider, func() { _ = provider.Close() }, nil
+}
+
+// workRecordCanonicalStoreRef identifies the scope the bd subprocess will
+// mutate. It deliberately lives outside workstamp: evidence validation accepts
+// this resolved canonical reference rather than inferring it from a scope.
+func workRecordCanonicalStoreRef(scopeRoot, cityPath string, cfg *config.City) string {
+	if cfg == nil {
+		return ""
+	}
+	return workflowStoreRefForDir(scopeRoot, cityPath, loadedCityName(cfg, cityPath), cfg)
 }
 
 // evaluateWorkRecordCloseGate is the store-driven core of the close gate, split
@@ -252,7 +293,7 @@ func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *co
 // each violation and reports whether the close should be blocked. preFetched
 // (optional) supplies beads already read by an earlier guard in this same
 // invocation, avoiding a duplicate store.Get for the same ID.
-func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot string, enforce bool, stderr io.Writer) (block bool) {
+func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched map[string]beads.Bead, scopeRoot, storeRef string, evidence workstamp.EvidenceReader, enforce bool, stderr io.Writer) (block bool) {
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
@@ -286,6 +327,9 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 			violations = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
 				return gitCommitReachableOnBranch(repoDir, commit, branch)
 			})
+			if strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey]) == beadmeta.WorkOutcomeShipped {
+				violations = append(violations, workstamp.ValidateLandingEvidence(evidence, storeRef, bead)...)
+			}
 		}
 		for _, v := range violations {
 			fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, id, v) //nolint:errcheck // best-effort stderr

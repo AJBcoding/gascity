@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -278,4 +279,127 @@ func TestStampStaleRevisionRaceLeavesNoFalseLandedMetadata(t *testing.T) {
 	if alpha.Metadata["concurrent"] != "write" || hasDeliveryMetadata(alpha.Metadata) {
 		t.Fatalf("stale race left false delivery metadata: %#v", alpha.Metadata)
 	}
+}
+
+func TestValidateLandingEvidence(t *testing.T) {
+	baseMetadata := beads.StringMap{
+		"gc.work_outcome":           "shipped",
+		"gc.work_commit":            testWorkCommitA,
+		"gc.delivery_state":         "landed",
+		"gc.delivery_event_id":      testLandingEventID,
+		"gc.delivery_source_commit": testWorkCommitA,
+		"gc.delivery_landed_sha":    testLandedSHA,
+	}
+	matchingRecord := events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA}
+	tests := []struct {
+		name       string
+		mutate     func(beads.StringMap)
+		journal    func(t *testing.T) EvidenceReader
+		wantDetail string
+	}{
+		{
+			name:       "missing event ID",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_event_id"] = "" },
+			journal:    func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantDetail: "gc.delivery_event_id=gcl-<64 lowercase hex>",
+		},
+		{
+			name:       "malformed event ID",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_event_id"] = "gcl-not-hex" },
+			journal:    func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantDetail: "gc.delivery_event_id=gcl-<64 lowercase hex>",
+		},
+		{
+			name:       "missing delivery state",
+			mutate:     func(metadata beads.StringMap) { delete(metadata, "gc.delivery_state") },
+			journal:    func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantDetail: "gc.delivery_state=landed",
+		},
+		{
+			name:       "missing source commit",
+			mutate:     func(metadata beads.StringMap) { delete(metadata, "gc.delivery_source_commit") },
+			journal:    func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantDetail: "gc.delivery_source_commit must equal gc.work_commit",
+		},
+		{
+			name:       "missing landed SHA",
+			mutate:     func(metadata beads.StringMap) { delete(metadata, "gc.delivery_landed_sha") },
+			journal:    func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantDetail: "gc.delivery_landed_sha",
+		},
+		{
+			name:       "source commit mismatch",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_source_commit"] = testWorkCommitB },
+			journal:    func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantDetail: "gc.delivery_source_commit must equal gc.work_commit",
+		},
+		{
+			name:       "landed SHA mismatch",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_landed_sha"] = testWorkCommitB },
+			journal:    func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantDetail: "gc.delivery_landed_sha does not match",
+		},
+		{
+			name:       "unreadable event",
+			mutate:     func(beads.StringMap) {},
+			journal:    func(*testing.T) EvidenceReader { return events.NewFailFake() },
+			wantDetail: "is unreadable",
+		},
+		{
+			name:   "event bound to another bead",
+			mutate: func(beads.StringMap) {},
+			journal: func(t *testing.T) EvidenceReader {
+				return landingEvidenceJournal(t, events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "other", WorkCommit: testWorkCommitA})
+			},
+			wantDetail: "is not bound to store \"rig:alpha\" bead \"gc-same\"",
+		},
+		{
+			name:   "event bound to another store",
+			mutate: func(beads.StringMap) {},
+			journal: func(t *testing.T) EvidenceReader {
+				return landingEvidenceJournal(t, events.DeliveryWorkRecordRef{StoreRef: "rig:beta", BeadID: "gc-same", WorkCommit: testWorkCommitA})
+			},
+			wantDetail: "is not bound to store \"rig:alpha\" bead \"gc-same\"",
+		},
+		{
+			name:       "valid replay",
+			mutate:     func(beads.StringMap) {},
+			journal:    func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantDetail: "",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := make(beads.StringMap, len(baseMetadata))
+			for key, value := range baseMetadata {
+				metadata[key] = value
+			}
+			tc.mutate(metadata)
+			violations := ValidateLandingEvidence(tc.journal(t), "rig:alpha", beads.Bead{ID: "gc-same", Metadata: metadata})
+			if tc.wantDetail == "" {
+				if len(violations) != 0 {
+					t.Fatalf("violations = %v, want none", violations)
+				}
+				return
+			}
+			if len(violations) != 1 || !strings.Contains(violations[0], tc.wantDetail) {
+				t.Fatalf("violations = %v, want detail %q", violations, tc.wantDetail)
+			}
+		})
+	}
+}
+
+func landingEvidenceJournal(t *testing.T, record events.DeliveryWorkRecordRef) *events.Fake {
+	t.Helper()
+	payload, err := json.Marshal(events.DeliveryLandedPayload{
+		EventID:           testLandingEventID,
+		ObservedLandedSHA: testLandedSHA,
+		WorkRecords:       []events.DeliveryWorkRecordRef{record},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := events.NewFake()
+	journal.Record(events.Event{Type: events.DeliveryLanded, Subject: testLandingEventID, Payload: payload})
+	return journal
 }

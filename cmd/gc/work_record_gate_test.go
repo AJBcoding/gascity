@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // alwaysReachable / neverReachable are injected commit-reachability oracles so
@@ -321,7 +323,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var stderr strings.Builder
-			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, t.TempDir(), tc.enforce, &stderr)
+			block := evaluateWorkRecordCloseGate(tc.args, newStore(), nil, t.TempDir(), "", nil, tc.enforce, &stderr)
 			if block != tc.wantBlock {
 				t.Fatalf("block = %v, want %v; stderr=%s", block, tc.wantBlock, stderr.String())
 			}
@@ -339,7 +341,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 	}
 }
 
-func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
+func TestEvaluateWorkRecordCloseGateRejectsBranchReachableShippedUpdateWithoutLandingEvidence(t *testing.T) {
 	repoDir := t.TempDir()
 	runGit(t, repoDir, "init", "--initial-branch=main")
 	runGit(t, repoDir, "config", "user.name", "Gas City Test")
@@ -368,7 +370,56 @@ func TestEvaluateWorkRecordCloseGateAtomicShippedUpdate(t *testing.T) {
 		"--status=closed",
 	}
 	var stderr strings.Builder
-	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, true, &stderr); block {
+	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, "city:test", nil, true, &stderr); !block {
+		t.Fatalf("branch-reachable shipped close without landing evidence was allowed; stderr=%s", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, beadmeta.DeliveryStateMetadataKey) {
+		t.Fatalf("close rejection did not diagnose missing landing evidence: %q", got)
+	}
+}
+
+func TestEvaluateWorkRecordCloseGateAllowsAtomicShippedUpdateWithLandingEvidence(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	if err := os.WriteFile(filepath.Join(repoDir, "artifact.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	runGit(t, repoDir, "add", "artifact.txt")
+	runGit(t, repoDir, "commit", "-m", "test: integrate artifact")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	const eventID = "gcl-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	landedSHA := strings.Repeat("f", 40)
+	payload, err := json.Marshal(events.DeliveryLandedPayload{
+		EventID:           eventID,
+		ObservedLandedSHA: landedSHA,
+		WorkRecords: []events.DeliveryWorkRecordRef{{
+			StoreRef: "city:test", BeadID: "wr-atomic-shipped", WorkCommit: commit,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := events.NewFake()
+	journal.Record(events.Event{Type: events.DeliveryLanded, Subject: eventID, Payload: payload})
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: "wr-atomic-shipped", Type: "task", Status: "in_progress",
+		Metadata: map[string]string{beadmeta.WorkDirMetadataKey: repoDir},
+	}}, nil)
+	args := []string{
+		"update", "wr-atomic-shipped",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=main",
+		"--set-metadata", beadmeta.DeliveryStateMetadataKey + "=landed",
+		"--set-metadata", beadmeta.DeliveryEventIDMetadataKey + "=" + eventID,
+		"--set-metadata", beadmeta.DeliverySourceCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.DeliveryLandedSHAMetadataKey + "=" + landedSHA,
+		"--status=closed",
+	}
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, "city:test", journal, true, &stderr); block {
 		t.Fatalf("valid atomic shipped close blocked; stderr=%s", stderr.String())
 	}
 	if got := stderr.String(); got != "" {
@@ -392,7 +443,7 @@ func TestEvaluateWorkRecordCloseGateUsesPreFetchedBead(t *testing.T) {
 		"wr-shipped-nocommit": {ID: "wr-shipped-nocommit", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped}},
 	}
 	var stderr strings.Builder
-	block := evaluateWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, panicOnGetStore{}, preFetched, t.TempDir(), true, &stderr)
+	block := evaluateWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, panicOnGetStore{}, preFetched, t.TempDir(), "", nil, true, &stderr)
 	if !block {
 		t.Fatalf("expected block=true for shipped-without-commit, got false; stderr=%s", stderr.String())
 	}
