@@ -120,6 +120,21 @@ func TestResolvePrecedence(t *testing.T) {
 			t.Errorf("expected an error for nil config")
 		}
 	})
+
+	t.Run("explicit shipped close compatibility mode is observable", func(t *testing.T) {
+		t.Parallel()
+		on := true
+		cfg := cityWith("", nil)
+		cfg.Beads.ShippedCloseWarnOnly = &on
+		f, err := Resolve(cfg, env(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !f.ShippedCloseWarnOnly() || f.OriginOf(keyBeadsShippedCloseWarnOnly) != OriginConfig {
+			t.Fatalf("warn-only = %v/%q, want true/config", f.ShippedCloseWarnOnly(), f.OriginOf(keyBeadsShippedCloseWarnOnly))
+		}
+		assertOneNotice(t, f, NoticeCompatibilityModeActive)
+	})
 }
 
 func assertOneNotice(t *testing.T, f Flags, kind NoticeKind) {

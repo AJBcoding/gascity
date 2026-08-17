@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 )
 
@@ -222,7 +223,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{"non-close subcommand is ignored", []string{"show", "wr-shipped-nocommit"}, true, false, ""},
 		{"control bead is exempt", []string{"close", "wr-control"}, true, false, ""},
 		{"no-op close passes", []string{"close", "wr-noop"}, true, false, ""},
-		{"shipped-no-commit warns only by default", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
+		{"shipped-no-commit warns only in compatibility mode", []string{"close", "wr-shipped-nocommit"}, false, false, "work-record gate (warn-only)"},
 		{"shipped-no-commit blocks when enforced", []string{"close", "wr-shipped-nocommit"}, true, true, "work-record gate (enforced)"},
 		{"multi-ID close applies the same verdict", []string{"close", "wr-noop", "wr-shipped-nocommit"}, true, true, "close of wr-shipped-nocommit"},
 		{"missing outcome blocks when enforced", []string{"close", "wr-missing"}, true, true, "missing " + beadmeta.WorkOutcomeMetadataKey},
@@ -538,6 +539,25 @@ func TestEvaluateWorkRecordCloseGateUsesPreFetchedBead(t *testing.T) {
 	}
 }
 
+func TestWarnOnlyCloseEmitsTypedUsageTelemetry(t *testing.T) {
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: "wr-warn", Type: "task", Status: "open",
+		Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped},
+	}}, nil)
+	journal := events.NewFake()
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate([]string{"close", "wr-warn"}, store, nil, t.TempDir(), "city:test", journal, false, &stderr); block {
+		t.Fatal("warn-only compatibility close blocked")
+	}
+	got, err := journal.List(events.Filter{Type: "work.close.warn_only.used", Subject: "wr-warn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("warn-only telemetry events = %d, want exactly one", len(got))
+	}
+}
+
 // TestRunWorkRecordCloseGateReusesPreOpenedStore proves runWorkRecordCloseGate
 // never calls openStoreAtForCity when handed a preOpened store — it's the IO
 // wrapper's half of the dedup (evaluateWorkRecordCloseGate proves the
@@ -552,7 +572,6 @@ func TestRunWorkRecordCloseGateReusesPreOpenedStore(t *testing.T) {
 	}
 	var stderr strings.Builder
 	const bogusCityPath = "/nonexistent/does-not-exist"
-	t.Setenv(workRecordEnforceEnvVar, "1")
 	block := runWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, t.TempDir(), bogusCityPath, nil, panicOnGetStore{}, preFetched, &stderr)
 	if !block {
 		t.Fatalf("expected block=true for shipped-without-commit, got false (fallback store open may have silently swallowed the preOpened store); stderr=%s", stderr.String())
@@ -563,16 +582,12 @@ func TestRunWorkRecordCloseGateReusesPreOpenedStore(t *testing.T) {
 }
 
 func TestWorkRecordEnforceEnabled(t *testing.T) {
-	for _, v := range []string{"1", "true", "TRUE", "yes", "on"} {
-		t.Setenv(workRecordEnforceEnvVar, v)
-		if !workRecordEnforceEnabled() {
-			t.Errorf("workRecordEnforceEnabled(%q) = false, want true", v)
-		}
+	t.Setenv("GC_WORK_RECORD_ENFORCE", "0")
+	if !workRecordEnforceEnabled(&config.City{}) {
+		t.Fatal("absent migration setting must default to enforced mode; legacy env must not disable it")
 	}
-	for _, v := range []string{"", "0", "false", "off", "nope"} {
-		t.Setenv(workRecordEnforceEnvVar, v)
-		if workRecordEnforceEnabled() {
-			t.Errorf("workRecordEnforceEnabled(%q) = true, want false", v)
-		}
+	warnOnly := true
+	if workRecordEnforceEnabled(&config.City{Beads: config.BeadsConfig{ShippedCloseWarnOnly: &warnOnly}}) {
+		t.Fatal("explicit shipped_close_warn_only=true must select warn-only mode")
 	}
 }

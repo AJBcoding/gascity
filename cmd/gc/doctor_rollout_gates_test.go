@@ -111,6 +111,25 @@ func TestRolloutGateChecksResolveError(t *testing.T) {
 	}
 }
 
+func TestRolloutDoctorWarnsWithShippedCloseRemovalMarker(t *testing.T) {
+	on := true
+	f, err := rollout.Resolve(&config.City{Beads: config.BeadsConfig{ShippedCloseWarnOnly: &on}}, rollout.ResolveOptions{LookupEnv: func(string) (string, bool) { return "", false }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range rollout.Specs() {
+		if spec.Key != rollout.KeyBeadsShippedCloseWarnOnly {
+			continue
+		}
+		res := rolloutGateCheck{spec: spec, flags: f}.Run(&doctor.CheckContext{})
+		if res.Status != doctor.StatusWarning || !strings.Contains(strings.Join(res.Details, " "), rollout.ShippedCloseWarnOnlyRemovalVersion) {
+			t.Fatalf("doctor result = %+v, want warning naming %s", res, rollout.ShippedCloseWarnOnlyRemovalVersion)
+		}
+		return
+	}
+	t.Fatal("shipped close compatibility gate not registered")
+}
+
 // hasRolloutCheck reports whether any registered check is a rollout gate line.
 func hasRolloutCheck(checks []doctor.Check, name string) bool {
 	for _, c := range checks {

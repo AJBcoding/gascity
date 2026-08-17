@@ -1216,6 +1216,7 @@ path = ".gc/store"
 func TestGcBdOnARefusedCitySeparatesWorkFromClassOwnedIDs(t *testing.T) {
 	t.Run("work id still reaches bd", func(t *testing.T) {
 		capture := bdSQLRefusalCity(t, bdUnservableStorage)
+		t.Setenv("BD_STUB_STDOUT", `[{"id":"demo-abc123","title":"work","status":"open","issue_type":"task","metadata":{"gc.work_outcome":"no-op"}}]`)
 		resetCLIStorageRoutes(t)
 		captureCLIStorageStderr(t)
 

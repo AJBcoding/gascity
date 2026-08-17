@@ -191,4 +191,16 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 	if !(config.DaemonConfig{}).FormulaV2Enabled() {
 		t.Errorf("config accessor formula_v2 default = false, want true")
 	}
+
+	// beads.shipped_close_warn_only: bool migration gate, default false.
+	warnOnly := byKey[keyBeadsShippedCloseWarnOnly]
+	if warnOnly.Default.Bool == nil || *warnOnly.Default.Bool {
+		t.Fatalf("shipped_close_warn_only Spec.Default = %v, want false", warnOnly.Default.Bool)
+	}
+	if def.ShippedCloseWarnOnly() {
+		t.Error("defaultFlags shipped_close_warn_only = true, want false")
+	}
+	if (config.BeadsConfig{}).ShippedCloseWarnOnlyEnabled() {
+		t.Error("config accessor shipped_close_warn_only default = true, want false")
+	}
 }

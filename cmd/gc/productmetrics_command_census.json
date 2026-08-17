@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 205,
+  "next_id": 206,
   "permanent_ids": [
     {
       "name": "help",
@@ -220,6 +220,23 @@
       "resolver": "group-dispatch",
       "deferred_default": "unknown",
       "id": 3
+    },
+    {
+      "path": "gc beads audit-shipped",
+      "aliases": [],
+      "conditional_modes": [
+        "beads-machine-output"
+      ],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "beads-audit-shipped",
+      "owner": "immediate",
+      "id": 205
     },
     {
       "path": "gc beads city",

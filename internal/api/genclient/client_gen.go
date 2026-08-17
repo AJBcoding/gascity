@@ -6774,6 +6774,22 @@ type TypedEventStreamEnvelopeWebhookRejected struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed defines model for TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed.
+type TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed struct {
+	Actor            string                       `json:"actor"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          WorkCloseWarnOnlyUsedPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
 type TypedEventStreamEnvelopeWorkerOperation struct {
 	Actor            string                      `json:"actor"`
@@ -8342,6 +8358,23 @@ type TypedTaggedEventStreamEnvelopeWebhookRejected struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed defines model for TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed.
+type TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed struct {
+	Actor            string                       `json:"actor"`
+	City             string                       `json:"city"`
+	DependsOnStepIds *[]string                    `json:"depends_on_step_ids,omitempty"`
+	Message          *string                      `json:"message,omitempty"`
+	Payload          WorkCloseWarnOnlyUsedPayload `json:"payload"`
+	RunId            *string                      `json:"run_id,omitempty"`
+	Seq              int64                        `json:"seq"`
+	SessionId        *string                      `json:"session_id,omitempty"`
+	StepId           *string                      `json:"step_id,omitempty"`
+	Subject          *string                      `json:"subject,omitempty"`
+	Ts               time.Time                    `json:"ts"`
+	Type             string                       `json:"type"`
+	Workflow         *WorkflowEventProjection     `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
 type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 	Actor            string                      `json:"actor"`
@@ -8585,6 +8618,15 @@ type WebhookRejectedPayload struct {
 
 	// Webhook Configured webhook name (empty only for unresolved routes, which are not evented).
 	Webhook string `json:"webhook"`
+}
+
+// WorkCloseWarnOnlyUsedPayload defines model for WorkCloseWarnOnlyUsedPayload.
+type WorkCloseWarnOnlyUsedPayload struct {
+	BeadId         string `json:"bead_id"`
+	RemovalVersion string `json:"removal_version"`
+	Route          string `json:"route"`
+	StoreRef       string `json:"store_ref"`
+	ViolationCount int64  `json:"violation_count"`
 }
 
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
@@ -11253,6 +11295,32 @@ func (t *EventPayload) FromWebhookRejectedPayload(v WebhookRejectedPayload) erro
 
 // MergeWebhookRejectedPayload performs a merge with any union data inside the EventPayload, using the provided WebhookRejectedPayload
 func (t *EventPayload) MergeWebhookRejectedPayload(v WebhookRejectedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsWorkCloseWarnOnlyUsedPayload returns the union data inside the EventPayload as a WorkCloseWarnOnlyUsedPayload
+func (t EventPayload) AsWorkCloseWarnOnlyUsedPayload() (WorkCloseWarnOnlyUsedPayload, error) {
+	var body WorkCloseWarnOnlyUsedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromWorkCloseWarnOnlyUsedPayload overwrites any union data inside the EventPayload as the provided WorkCloseWarnOnlyUsedPayload
+func (t *EventPayload) FromWorkCloseWarnOnlyUsedPayload(v WorkCloseWarnOnlyUsedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeWorkCloseWarnOnlyUsedPayload performs a merge with any union data inside the EventPayload, using the provided WorkCloseWarnOnlyUsedPayload
+func (t *EventPayload) MergeWorkCloseWarnOnlyUsedPayload(v WorkCloseWarnOnlyUsedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15484,6 +15552,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWebhookRejected(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed() (TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed, error) {
+	var body TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed(v TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed) error {
+	v.Type = "work.close.warn_only.used"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed(v TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed) error {
+	v.Type = "work.close.warn_only.used"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedEventStreamEnvelopeWorkerOperation
@@ -15736,6 +15832,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeWebhookReceived()
 	case "webhook.rejected":
 		return t.AsTypedEventStreamEnvelopeWebhookRejected()
+	case "work.close.warn_only.used":
+		return t.AsTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -18273,6 +18371,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWebh
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed() (TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed(v TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed) error {
+	v.Type = "work.close.warn_only.used"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed(v TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed) error {
+	v.Type = "work.close.warn_only.used"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkerOperation
@@ -18525,6 +18651,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeWebhookReceived()
 	case "webhook.rejected":
 		return t.AsTypedTaggedEventStreamEnvelopeWebhookRejected()
+	case "work.close.warn_only.used":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:

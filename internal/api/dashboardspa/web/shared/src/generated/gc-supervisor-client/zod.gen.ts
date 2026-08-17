@@ -3242,6 +3242,14 @@ export const zWebhookRejectedPayload = z.object({
     webhook: z.string()
 });
 
+export const zWorkCloseWarnOnlyUsedPayload = z.object({
+    bead_id: z.string(),
+    removal_version: z.string(),
+    route: z.string(),
+    store_ref: z.string(),
+    violation_count: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
+});
+
 export const zWorkerOperationEventPayload = z.object({
     agent_name: z.string().optional(),
     bead_id: z.string().optional(),
@@ -3324,6 +3332,7 @@ export const zEventPayload = z.union([
     zUnboundEventPayload,
     zWebhookReceivedPayload,
     zWebhookRejectedPayload,
+    zWorkCloseWarnOnlyUsedPayload,
     zWorkerOperationEventPayload
 ]);
 
@@ -5056,6 +5065,24 @@ export const zTypedEventStreamEnvelopeWebhookRejected = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope work.close.warn_only.used
+ */
+export const zTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zWorkCloseWarnOnlyUsedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('work.close.warn_only.used'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export const zTypedEventStreamEnvelopeWorkerOperation = z.object({
@@ -5169,6 +5196,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeSupervisorStarted.extend({ type: z.literal('supervisor.started') }),
     zTypedEventStreamEnvelopeWebhookReceived.extend({ type: z.literal('webhook.received') }),
     zTypedEventStreamEnvelopeWebhookRejected.extend({ type: z.literal('webhook.rejected') }),
+    zTypedEventStreamEnvelopeWorkCloseWarnOnlyUsed.extend({ type: z.literal('work.close.warn_only.used') }),
     zTypedEventStreamEnvelopeWorkerOperation.extend({ type: z.literal('worker.operation') }),
     zTypedEventStreamEnvelopeCustom.extend({ type: z.literal('TypedEventStreamEnvelopeCustom') })
 ]);
@@ -6911,6 +6939,25 @@ export const zTypedTaggedEventStreamEnvelopeWebhookRejected = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope work.close.warn_only.used
+ */
+export const zTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zWorkCloseWarnOnlyUsedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('work.close.warn_only.used'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope worker.operation
  */
 export const zTypedTaggedEventStreamEnvelopeWorkerOperation = z.object({
@@ -7025,6 +7072,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeSupervisorStarted.extend({ type: z.literal('supervisor.started') }),
     zTypedTaggedEventStreamEnvelopeWebhookReceived.extend({ type: z.literal('webhook.received') }),
     zTypedTaggedEventStreamEnvelopeWebhookRejected.extend({ type: z.literal('webhook.rejected') }),
+    zTypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed.extend({ type: z.literal('work.close.warn_only.used') }),
     zTypedTaggedEventStreamEnvelopeWorkerOperation.extend({ type: z.literal('worker.operation') }),
     zTypedTaggedEventStreamEnvelopeCustom.extend({ type: z.literal('TypedTaggedEventStreamEnvelopeCustom') })
 ]);

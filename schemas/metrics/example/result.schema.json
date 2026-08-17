@@ -214,7 +214,8 @@
               "storage-recover-stranded",
               "beads-metadata-cas",
               "landing-record",
-              "landing-stamp"
+              "landing-stamp",
+              "beads-audit-shipped"
             ]
           },
           "event_id": {

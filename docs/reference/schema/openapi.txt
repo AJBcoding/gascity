@@ -2705,6 +2705,9 @@
             "$ref": "#/components/schemas/WebhookRejectedPayload"
           },
           {
+            "$ref": "#/components/schemas/WorkCloseWarnOnlyUsedPayload"
+          },
+          {
             "$ref": "#/components/schemas/WorkerOperationEventPayload"
           }
         ]
@@ -12266,6 +12269,7 @@
             "supervisor.started": "#/components/schemas/TypedEventStreamEnvelopeSupervisorStarted",
             "webhook.received": "#/components/schemas/TypedEventStreamEnvelopeWebhookReceived",
             "webhook.rejected": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected",
+            "work.close.warn_only.used": "#/components/schemas/TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -12540,6 +12544,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -13763,7 +13770,8 @@
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
-                "storage.binding.uncheckable"
+                "storage.binding.uncheckable",
+                "work.close.warn_only.used"
               ]
             },
             "type": "string"
@@ -17829,6 +17837,63 @@
         "title": "TypedEventStreamEnvelope webhook.rejected",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeWorkCloseWarnOnlyUsed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkCloseWarnOnlyUsedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.close.warn_only.used",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.close.warn_only.used",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -17980,6 +18045,7 @@
             "supervisor.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorStarted",
             "webhook.received": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookReceived",
             "webhook.rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected",
+            "work.close.warn_only.used": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -18254,6 +18320,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -19556,7 +19625,8 @@
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
-                "storage.binding.uncheckable"
+                "storage.binding.uncheckable",
+                "work.close.warn_only.used"
               ]
             },
             "type": "string"
@@ -23907,6 +23977,67 @@
         "title": "TypedTaggedEventStreamEnvelope webhook.rejected",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeWorkCloseWarnOnlyUsed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkCloseWarnOnlyUsedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.close.warn_only.used",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.close.warn_only.used",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -24408,6 +24539,35 @@
         "required": [
           "webhook",
           "reason"
+        ],
+        "type": "object"
+      },
+      "WorkCloseWarnOnlyUsedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "removal_version": {
+            "type": "string"
+          },
+          "route": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "violation_count": {
+            "format": "int64",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "route",
+          "store_ref",
+          "bead_id",
+          "violation_count",
+          "removal_version"
         ],
         "type": "object"
       },

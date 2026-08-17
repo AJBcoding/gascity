@@ -80,8 +80,8 @@ func relocatedBeadClasses(cfg *config.City) []beads.RelocatedClass {
 // builtin < config < env — so registering this knob means minting a city.toml
 // field whose presence disarms the guard for every operator and every later
 // invocation. What makes the override safe is that it is per-invocation and
-// persists nowhere. GC_WORK_RECORD_ENFORCE is the in-tree precedent for the
-// shape: same CLI seam, same truthy switch, same operator-facing scope.
+// persists nowhere. This override is therefore deliberately narrower than a
+// registered city-wide compatibility gate.
 const bdRelocatedClassOverrideEnvVar = "GC_BD_ALLOW_RELOCATED_CLASS_READ"
 
 // bdRelocatedClassOverrideEnabled reports whether the operator has explicitly

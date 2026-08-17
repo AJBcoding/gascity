@@ -1,14 +1,16 @@
 package api
 
 import (
+	"encoding/json"
 	"log"
-	"os"
 	"os/exec"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/workclose"
 )
@@ -31,12 +33,19 @@ func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref s
 		ProspectiveMetadata: prospective.Metadata,
 		StoreRef:            s.canonicalWorkCloseStoreRef(ref),
 	})
+	mode := "enforced"
+	if s.bootFlags.ShippedCloseWarnOnly() {
+		mode = "warn-only"
+	}
+	if mode == "warn-only" {
+		payload, _ := json.Marshal(events.WorkCloseWarnOnlyUsedPayload{
+			Route: "api", StoreRef: s.canonicalWorkCloseStoreRef(ref), BeadID: prospective.ID,
+			ViolationCount: len(violations), RemovalVersion: rollout.ShippedCloseWarnOnlyRemovalVersion,
+		})
+		s.state.EventProvider().Record(events.Event{Type: events.WorkCloseWarnOnlyUsed, Actor: "gc.workclose", Subject: prospective.ID, Payload: payload})
+	}
 	if len(violations) == 0 {
 		return nil
-	}
-	mode := "warn-only"
-	if workclose.Enforced(os.Getenv(workclose.EnforceEnvVar)) {
-		mode = "enforced"
 	}
 	message := strings.Join(violations, "; ")
 	log.Printf("api: work-record gate (%s): close of %s: %s", mode, prospective.ID, message)

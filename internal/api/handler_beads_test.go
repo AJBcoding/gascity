@@ -20,10 +20,10 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/importsvc"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/workclose"
 )
 
 type policyWriteRaceStore struct {
@@ -454,7 +454,7 @@ func TestResolveStoreByPrefixDoesNotCaptureForeignRoute(t *testing.T) {
 
 func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
 	rigStore := beads.NewMemStore()
-	created, err := rigStore.Create(beads.Bead{Title: "close me"})
+	created, err := rigStore.Create(beads.Bead{Title: "close me", Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -539,7 +539,6 @@ func TestHTTPBeadCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	t.Setenv(workclose.EnforceEnvVar, "1")
 	h := newTestCityHandler(t, state)
 
 	rec := httptest.NewRecorder()
@@ -556,6 +555,29 @@ func TestHTTPBeadCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
 	}
 }
 
+func TestHTTPWarnOnlyCloseEmitsUsageTelemetryEvenWithoutViolation(t *testing.T) {
+	state := newFakeState(t)
+	warnOnly := true
+	state.cfg.Beads.ShippedCloseWarnOnly = &warnOnly
+	store := state.stores["myrig"]
+	created, err := store.Create(beads.Bead{Title: "valid no-op", Type: "task", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+created.ID+"/close", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("close status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	eventsFound, err := state.eventProv.List(events.Filter{Type: events.WorkCloseWarnOnlyUsed, Subject: created.ID})
+	if err != nil || len(eventsFound) != 1 {
+		t.Fatalf("warn-only events = %d err=%v, want exactly one", len(eventsFound), err)
+	}
+}
+
 func TestBeadUpdateCannotAtomicallyManufactureUngatedShippedTask(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -563,7 +585,6 @@ func TestBeadUpdateCannotAtomicallyManufactureUngatedShippedTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(workclose.EnforceEnvVar, "1")
 	closed, task := "closed", "task"
 	_, err = New(state).humaHandleBeadUpdate(context.Background(), &BeadUpdateInput{
 		ID: created.ID,
@@ -634,7 +655,7 @@ func TestBeadCRUD(t *testing.T) {
 	h := newTestCityHandler(t, state)
 
 	// Create a bead.
-	body := `{"rig":"myrig","title":"Fix login bug","type":"task"}`
+	body := `{"rig":"myrig","title":"Fix login bug","type":"task","metadata":{"gc.work_outcome":"no-op"}}`
 	req := newPostRequest(cityURL(state, "/beads"), bytes.NewBufferString(body))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -1571,7 +1592,7 @@ func TestBeadUpdateSkipsParentProjectionWaitForClosedBead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create(parent): %v", err)
 	}
-	child, err := store.Create(beads.Bead{Title: "Child"})
+	child, err := store.Create(beads.Bead{Title: "Child", Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}})
 	if err != nil {
 		t.Fatalf("Create(child): %v", err)
 	}
@@ -2371,7 +2392,7 @@ func createPhase2APISessionBead(t *testing.T, store beads.Store) beads.Bead {
 func TestBeadDelete(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
-	b, _ := store.Create(beads.Bead{Title: "To delete"})
+	b, _ := store.Create(beads.Bead{Title: "To delete", Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}})
 	h := newTestCityHandler(t, state)
 
 	req := httptest.NewRequest("DELETE", cityURL(state, "/bead/")+b.ID, nil)

@@ -10,10 +10,6 @@ import (
 	"github.com/gastownhall/gascity/internal/workstamp"
 )
 
-// EnforceEnvVar selects enforced rather than warn-only close validation.
-// Warn-only remains the default until the separately planned migration flips it.
-const EnforceEnvVar = "GC_WORK_RECORD_ENFORCE"
-
 // WorkClosePolicy validates a prospective, already-resolved bead state. Store
 // resolution and metadata projection belong to the mutation adapter; this type
 // deliberately receives the exact row and canonical physical store identity.
@@ -123,16 +119,6 @@ func ValidOutcome(v string) bool {
 	switch v {
 	case beadmeta.WorkOutcomeShipped, beadmeta.WorkOutcomeNoOp,
 		beadmeta.WorkOutcomeBlocked, beadmeta.WorkOutcomeAbandoned:
-		return true
-	default:
-		return false
-	}
-}
-
-// Enforced parses the explicit migration flag without reading process state.
-func Enforced(raw string) bool {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
-	case "1", "true", "yes", "on":
 		return true
 	default:
 		return false

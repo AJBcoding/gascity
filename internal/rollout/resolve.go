@@ -55,6 +55,8 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 		f.formulaV2 = resolved[bool]{value: value, origin: OriginConfig}
 	}
 
+	resolveBeadsShippedCloseWarnOnly(cfg, &f)
+
 	return f, nil
 }
 

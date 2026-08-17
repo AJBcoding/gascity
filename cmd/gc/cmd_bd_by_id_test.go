@@ -1042,7 +1042,6 @@ func TestBdByIDCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
 	}}); err != nil {
 		t.Fatalf("stamping shipped outcome: %v", err)
 	}
-	t.Setenv(workRecordEnforceEnvVar, "1")
 
 	var stdout, stderr bytes.Buffer
 	code, handled := maybeRouteBdByID(cityPath, "", []string{"close", relic.ID}, &stdout, &stderr)
@@ -1070,7 +1069,6 @@ func TestBdByIDUpdateCannotAtomicallyManufactureUngatedShippedTask(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv(workRecordEnforceEnvVar, "1")
 
 	var stdout, stderr bytes.Buffer
 	code, handled := maybeRouteBdByID(cityPath, "", []string{

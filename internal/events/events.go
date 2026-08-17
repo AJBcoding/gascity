@@ -310,6 +310,10 @@ const (
 	StorageBindingGenesis     = "storage.binding.genesis"
 	StorageBindingUnconverged = "storage.binding.unconverged"
 	StorageBindingUncheckable = "storage.binding.uncheckable"
+
+	// WorkCloseWarnOnlyUsed fires for every managed close evaluated while the
+	// bounded beads.shipped_close_warn_only compatibility mode is active.
+	WorkCloseWarnOnlyUsed = "work.close.warn_only.used"
 )
 
 // KnownEventTypes lists every event-type constant this package defines.
@@ -361,6 +365,7 @@ var KnownEventTypes = []string{
 	BeadsConditionalWritesDegraded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
+	WorkCloseWarnOnlyUsed,
 	// ProviderHealthGateAlert is intentionally omitted from KnownEventTypes.
 	// The event is emitted by the reconciler but its typed SSE payload is not
 	// yet registered in internal/api (the payload registration lives in a

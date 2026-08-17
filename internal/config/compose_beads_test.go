@@ -6,6 +6,19 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
+func TestLoadWithIncludesPreservesShippedCloseWarnOnlyIndependently(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte("includes = [\"fragment.toml\"]\n[workspace]\nname = \"test\"\n[beads]\nshipped_close_warn_only = true\n")
+	fs.Files["/city/fragment.toml"] = []byte("[beads]\nprovider = \"file\"\n")
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Beads.ShippedCloseWarnOnlyEnabled() {
+		t.Fatal("[beads] fragment erased root shipped_close_warn_only=true")
+	}
+}
+
 // TestLoadWithIncludesDefaultsConditionalWrites: omitted → default "off".
 func TestLoadWithIncludesDefaultsConditionalWrites(t *testing.T) {
 	fs := fsys.NewFake()

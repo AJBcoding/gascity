@@ -1061,6 +1061,11 @@
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
         },
+        "shipped_close_warn_only": {
+          "type": "boolean",
+          "description": "ShippedCloseWarnOnly temporarily permits managed closes that violate the\nshipped work-record contract after emitting warnings and telemetry. It is\nfalse by default, so managed closes enforce the contract. This setting\nexists for one compatibility release and must be removed at v1.5.0 after\ngc beads audit-shipped reports complete=true clean=true and no\nwork.close.warn_only.used event has occurred since controller restart.",
+          "default": false
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"

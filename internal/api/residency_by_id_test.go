@@ -11,7 +11,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/storeref"
-	"github.com/gastownhall/gascity/internal/workclose"
 )
 
 // beadStoresForID renders the by-id PLAN as the ordered store list this
@@ -63,7 +62,7 @@ func seedWithPinnedID(t *testing.T, store beads.Store, id, title string) string 
 		t.Fatalf("fixture store is %T, want *beads.MemStore so the test can pin the seeded id", store)
 	}
 	mem.HonorExplicitIDs = true
-	created, err := mem.Create(beads.Bead{ID: id, Title: title})
+	created, err := mem.Create(beads.Bead{ID: id, Title: title, Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp}})
 	if err != nil {
 		t.Fatalf("seeding %s: %v", id, err)
 	}
@@ -471,7 +470,6 @@ func TestManagedAPICloseRoutesEvaluateAuthoritativeDualResident(t *testing.T) {
 			}}); err != nil {
 				t.Fatalf("stamping retained work copy: %v", err)
 			}
-			t.Setenv(workclose.EnforceEnvVar, "1")
 
 			s := New(st)
 			var err error

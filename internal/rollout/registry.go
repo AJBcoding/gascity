@@ -50,6 +50,17 @@ var specs = []Spec{
 			"while the guarded-verb bd pin is untagged.",
 	},
 	{
+		Key:            keyBeadsShippedCloseWarnOnly,
+		Category:       InfraMigration,
+		ConfigPath:     "beads.shipped_close_warn_only",
+		Default:        Default{Bool: ptr(false)},
+		Owner:          Owner{Bead: "gas-ftv4", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2026-12-31",
+		VersionAnchor:  ShippedCloseWarnOnlyRemovalVersion,
+		SelectsBetween: [2]string{"refuse invalid managed shipped close", "warn and permit invalid managed shipped close"},
+		Justification:  "Provide one bounded compatibility release for repairing legacy shipped records while enforcement becomes the managed-close default; deletion readiness requires a complete+clean shipped audit and zero warn-only-use events since controller restart.",
+	},
+	{
 		Key:            keyDaemonFormulaV2,
 		Category:       InfraMigration,
 		ConfigPath:     "daemon.formula_v2",

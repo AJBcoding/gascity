@@ -333,11 +333,26 @@ gc beads
 
 | Subcommand | Description |
 |------------|-------------|
+| [gc beads audit-shipped](#gc-beads-audit-shipped) | Audit shipped work records for durable landing evidence |
 | [gc beads city](#gc-beads-city) | Manage canonical city endpoint topology |
 | [gc beads health](#gc-beads-health) | Check beads provider health |
 | [gc beads list](#gc-beads-list) | List beads (API-routed with bd fallback) |
 | [gc beads metadata-cas](#gc-beads-metadata-cas) | Atomically compare and set one metadata key in an exact local store |
 | [gc beads show](#gc-beads-show) | Show a single bead (API-routed with bd fallback) |
+
+## gc beads audit-shipped
+
+Read every authoritative city, rig, and relocated-class store and report
+task-like records (including active and closed rows) whose exact gc.work_outcome is shipped but
+whose landing stamp cannot be verified. This command never rewrites records.
+
+```
+gc beads audit-shipped [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--format` | string | `text` | output format: text or json |
 
 ## gc beads city
 

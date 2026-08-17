@@ -30,6 +30,9 @@ const (
 	// boot-latched value. The type ships now; the reload wiring that emits it
 	// lands with the composition-root wiring (PR-1c).
 	NoticePendingRestart NoticeKind = "pending_restart"
+	// NoticeCompatibilityModeActive records that a bounded migration escape
+	// hatch is active and names its removal floor.
+	NoticeCompatibilityModeActive NoticeKind = "compatibility_mode_active"
 )
 
 // Notice is one typed, structured resolution fact. Notices are retained ON the
