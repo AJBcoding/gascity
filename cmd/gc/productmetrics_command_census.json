@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 204,
+  "next_id": 205,
   "permanent_ids": [
     {
       "name": "help",
@@ -2138,6 +2138,21 @@
       "classification": "landing-record",
       "owner": "immediate",
       "id": 203
+    },
+    {
+      "path": "gc landing stamp",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "landing-stamp",
+      "owner": "immediate",
+      "id": 204
     },
     {
       "path": "gc lint",

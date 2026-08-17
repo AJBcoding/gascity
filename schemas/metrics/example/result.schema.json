@@ -213,7 +213,8 @@
               "ready",
               "storage-recover-stranded",
               "beads-metadata-cas",
-              "landing-record"
+              "landing-record",
+              "landing-stamp"
             ]
           },
           "event_id": {

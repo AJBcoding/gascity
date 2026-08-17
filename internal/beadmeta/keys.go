@@ -76,6 +76,14 @@ const (
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
 	DeferredTypeMetadataKey              = "gc.deferred_type"
+	DeliveryEventIDMetadataKey           = "gc.delivery_event_id"
+	DeliveryLandedSHAMetadataKey         = "gc.delivery_landed_sha"
+	DeliveryMetadataPrefix               = Namespace + "delivery_"
+	DeliveryRepositoryMetadataKey        = "gc.delivery_repository"
+	DeliverySourceCommitMetadataKey      = "gc.delivery_source_commit"
+	DeliveryStateMetadataKey             = "gc.delivery_state"
+	DeliveryTargetRefMetadataKey         = "gc.delivery_target_ref"
+	DeliveryVerifiedAtMetadataKey        = "gc.delivery_verified_at"
 	DetachedMetadataKey                  = "gc.detached"
 	DrainContextMetadataKey              = "gc.drain_context"
 	DrainContinuationGroupMetadataKey    = "gc.drain_continuation_group"
@@ -207,6 +215,7 @@ const (
 	InfraMigratedFromMetadataKey   = "gc.infra_migrated_from"
 	TriggerBeadStoreRefMetadataKey = "gc.trigger_bead_store_ref"
 	TruncatedMetadataKey           = "gc.truncated"
+	WorkBaseCommitMetadataKey      = "gc.work_base_commit"
 	WorkBranchMetadataKey          = "gc.work_branch"
 	WorkCommitMetadataKey          = "gc.work_commit"
 	WorkDirMetadataKey             = "gc.work_dir"
@@ -335,6 +344,13 @@ var KnownMetadataKeys = []string{
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
 	DeferredTypeMetadataKey,
+	DeliveryEventIDMetadataKey,
+	DeliveryLandedSHAMetadataKey,
+	DeliveryRepositoryMetadataKey,
+	DeliverySourceCommitMetadataKey,
+	DeliveryStateMetadataKey,
+	DeliveryTargetRefMetadataKey,
+	DeliveryVerifiedAtMetadataKey,
 	DetachedMetadataKey,
 	DrainContextMetadataKey,
 	DrainContinuationGroupMetadataKey,
@@ -450,6 +466,7 @@ var KnownMetadataKeys = []string{
 	InfraMigratedFromMetadataKey,
 	TriggerBeadStoreRefMetadataKey,
 	TruncatedMetadataKey,
+	WorkBaseCommitMetadataKey,
 	WorkBranchMetadataKey,
 	WorkCommitMetadataKey,
 	WorkDirMetadataKey,

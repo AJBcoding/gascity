@@ -9,7 +9,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"reflect"
+	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 )
@@ -86,7 +88,7 @@ func (s Service) Stamp(ctx context.Context, eventID string) (Result, error) {
 			result.Conflicts = append(result.Conflicts, conflict(record, "bead_unreadable", getErr.Error()))
 			continue
 		}
-		if bead.Metadata["gc.work_commit"] != record.WorkCommit {
+		if bead.Metadata[beadmeta.WorkCommitMetadataKey] != record.WorkCommit {
 			result.Conflicts = append(result.Conflicts, conflict(record, "work_commit_mismatch", "current gc.work_commit differs from landing evidence"))
 			continue
 		}
@@ -96,13 +98,13 @@ func (s Service) Stamp(ctx context.Context, eventID string) (Result, error) {
 			continue
 		}
 		patch := beads.StringMap{
-			"gc.delivery_state":         "landed",
-			"gc.delivery_event_id":      landing.EventID,
-			"gc.delivery_repository":    landing.Repository,
-			"gc.delivery_target_ref":    landing.TargetRef,
-			"gc.delivery_landed_sha":    landing.ObservedLandedSHA,
-			"gc.delivery_verified_at":   landing.VerifiedAt,
-			"gc.delivery_source_commit": record.WorkCommit,
+			beadmeta.DeliveryStateMetadataKey:        "landed",
+			beadmeta.DeliveryEventIDMetadataKey:      landing.EventID,
+			beadmeta.DeliveryRepositoryMetadataKey:   landing.Repository,
+			beadmeta.DeliveryTargetRefMetadataKey:    landing.TargetRef,
+			beadmeta.DeliveryLandedSHAMetadataKey:    landing.ObservedLandedSHA,
+			beadmeta.DeliveryVerifiedAtMetadataKey:   landing.VerifiedAt,
+			beadmeta.DeliverySourceCommitMetadataKey: record.WorkCommit,
 		}
 		stampPayload, payloadErr := newStampPayload(landing.EventID, record)
 		if payloadErr != nil {
@@ -121,7 +123,7 @@ func (s Service) Stamp(ctx context.Context, eventID string) (Result, error) {
 			continue
 		}
 		beforeStatus := bead.Status
-		beforeBase := bead.Metadata["gc.work_base_commit"]
+		beforeBase := bead.Metadata[beadmeta.WorkBaseCommitMetadataKey]
 		if !metadataContains(bead.Metadata, patch) {
 			if updateErr := writer.UpdateIfMatch(record.BeadID, bead.Revision, beads.UpdateOpts{Metadata: patch}); updateErr != nil {
 				result.Conflicts = append(result.Conflicts, conflict(record, "conditional_write_failed", updateErr.Error()))
@@ -133,8 +135,8 @@ func (s Service) Stamp(ctx context.Context, eventID string) (Result, error) {
 			result.Conflicts = append(result.Conflicts, conflict(record, "readback_failed", readErr.Error()))
 			continue
 		}
-		if updated.Status != beforeStatus || updated.Metadata["gc.work_commit"] != record.WorkCommit ||
-			updated.Metadata["gc.work_base_commit"] != beforeBase || !metadataContains(updated.Metadata, patch) {
+		if updated.Status != beforeStatus || updated.Metadata[beadmeta.WorkCommitMetadataKey] != record.WorkCommit ||
+			updated.Metadata[beadmeta.WorkBaseCommitMetadataKey] != beforeBase || !metadataContains(updated.Metadata, patch) {
 			result.Conflicts = append(result.Conflicts, conflict(record, "readback_mismatch", "stamped metadata or source provenance did not read back exactly"))
 			continue
 		}
@@ -242,7 +244,7 @@ func metadataContains(metadata beads.StringMap, want beads.StringMap) bool {
 
 func hasDeliveryMetadata(metadata beads.StringMap) bool {
 	for key := range metadata {
-		if len(key) >= len("gc.delivery_") && key[:len("gc.delivery_")] == "gc.delivery_" {
+		if strings.HasPrefix(key, beadmeta.DeliveryMetadataPrefix) {
 			return true
 		}
 	}
