@@ -1676,6 +1676,15 @@ type DeliveryWorkRecordRef struct {
 	WorkCommit string `json:"work_commit"`
 }
 
+// DeliveryWorkStampedPayload defines model for DeliveryWorkStampedPayload.
+type DeliveryWorkStampedPayload struct {
+	BeadId         string `json:"bead_id"`
+	EventId        string `json:"event_id"`
+	LandingEventId string `json:"landing_event_id"`
+	StoreRef       string `json:"store_ref"`
+	WorkCommit     string `json:"work_commit"`
+}
+
 // Dep defines model for Dep.
 type Dep struct {
 	DependsOnId string `json:"depends_on_id"`
@@ -5645,6 +5654,22 @@ type TypedEventStreamEnvelopeDeliveryLanded struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeDeliveryWorkStamped defines model for TypedEventStreamEnvelopeDeliveryWorkStamped.
+type TypedEventStreamEnvelopeDeliveryWorkStamped struct {
+	Actor            string                     `json:"actor"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          DeliveryWorkStampedPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeEmergencyAcked defines model for TypedEventStreamEnvelopeEmergencyAcked.
 type TypedEventStreamEnvelopeEmergencyAcked struct {
 	Actor            string                   `json:"actor"`
@@ -7125,6 +7150,23 @@ type TypedTaggedEventStreamEnvelopeDeliveryLanded struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeDeliveryWorkStamped defines model for TypedTaggedEventStreamEnvelopeDeliveryWorkStamped.
+type TypedTaggedEventStreamEnvelopeDeliveryWorkStamped struct {
+	Actor            string                     `json:"actor"`
+	City             string                     `json:"city"`
+	DependsOnStepIds *[]string                  `json:"depends_on_step_ids,omitempty"`
+	Message          *string                    `json:"message,omitempty"`
+	Payload          DeliveryWorkStampedPayload `json:"payload"`
+	RunId            *string                    `json:"run_id,omitempty"`
+	Seq              int64                      `json:"seq"`
+	SessionId        *string                    `json:"session_id,omitempty"`
+	StepId           *string                    `json:"step_id,omitempty"`
+	Subject          *string                    `json:"subject,omitempty"`
+	Ts               time.Time                  `json:"ts"`
+	Type             string                     `json:"type"`
+	Workflow         *WorkflowEventProjection   `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeEmergencyAcked defines model for TypedTaggedEventStreamEnvelopeEmergencyAcked.
@@ -10249,6 +10291,32 @@ func (t *EventPayload) FromDeliveryLandedPayload(v DeliveryLandedPayload) error 
 
 // MergeDeliveryLandedPayload performs a merge with any union data inside the EventPayload, using the provided DeliveryLandedPayload
 func (t *EventPayload) MergeDeliveryLandedPayload(v DeliveryLandedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsDeliveryWorkStampedPayload returns the union data inside the EventPayload as a DeliveryWorkStampedPayload
+func (t EventPayload) AsDeliveryWorkStampedPayload() (DeliveryWorkStampedPayload, error) {
+	var body DeliveryWorkStampedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromDeliveryWorkStampedPayload overwrites any union data inside the EventPayload as the provided DeliveryWorkStampedPayload
+func (t *EventPayload) FromDeliveryWorkStampedPayload(v DeliveryWorkStampedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeDeliveryWorkStampedPayload performs a merge with any union data inside the EventPayload, using the provided DeliveryWorkStampedPayload
+func (t *EventPayload) MergeDeliveryWorkStampedPayload(v DeliveryWorkStampedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -13456,6 +13524,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeDeliveryLanded(v
 	return err
 }
 
+// AsTypedEventStreamEnvelopeDeliveryWorkStamped returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeDeliveryWorkStamped
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeDeliveryWorkStamped() (TypedEventStreamEnvelopeDeliveryWorkStamped, error) {
+	var body TypedEventStreamEnvelopeDeliveryWorkStamped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeDeliveryWorkStamped overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeDeliveryWorkStamped
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeDeliveryWorkStamped(v TypedEventStreamEnvelopeDeliveryWorkStamped) error {
+	v.Type = "delivery.work_stamped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeDeliveryWorkStamped performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeDeliveryWorkStamped
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeDeliveryWorkStamped(v TypedEventStreamEnvelopeDeliveryWorkStamped) error {
+	v.Type = "delivery.work_stamped"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeEmergencyAcked returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeEmergencyAcked
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeEmergencyAcked() (TypedEventStreamEnvelopeEmergencyAcked, error) {
 	var body TypedEventStreamEnvelopeEmergencyAcked
@@ -15500,6 +15596,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeConvoyCreated()
 	case "delivery.landed":
 		return t.AsTypedEventStreamEnvelopeDeliveryLanded()
+	case "delivery.work_stamped":
+		return t.AsTypedEventStreamEnvelopeDeliveryWorkStamped()
 	case "emergency.acked":
 		return t.AsTypedEventStreamEnvelopeEmergencyAcked()
 	case "emergency.signaled":
@@ -16205,6 +16303,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeDeliv
 // MergeTypedTaggedEventStreamEnvelopeDeliveryLanded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeDeliveryLanded
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeDeliveryLanded(v TypedTaggedEventStreamEnvelopeDeliveryLanded) error {
 	v.Type = "delivery.landed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeDeliveryWorkStamped returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeDeliveryWorkStamped
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeDeliveryWorkStamped() (TypedTaggedEventStreamEnvelopeDeliveryWorkStamped, error) {
+	var body TypedTaggedEventStreamEnvelopeDeliveryWorkStamped
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeDeliveryWorkStamped overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeDeliveryWorkStamped
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeDeliveryWorkStamped(v TypedTaggedEventStreamEnvelopeDeliveryWorkStamped) error {
+	v.Type = "delivery.work_stamped"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeDeliveryWorkStamped performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeDeliveryWorkStamped
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeDeliveryWorkStamped(v TypedTaggedEventStreamEnvelopeDeliveryWorkStamped) error {
+	v.Type = "delivery.work_stamped"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18259,6 +18385,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeConvoyCreated()
 	case "delivery.landed":
 		return t.AsTypedTaggedEventStreamEnvelopeDeliveryLanded()
+	case "delivery.work_stamped":
+		return t.AsTypedTaggedEventStreamEnvelopeDeliveryWorkStamped()
 	case "emergency.acked":
 		return t.AsTypedTaggedEventStreamEnvelopeEmergencyAcked()
 	case "emergency.signaled":

@@ -378,6 +378,14 @@ export const zDeliveryLandedPayload = z.object({
     workflow_id: z.string()
 });
 
+export const zDeliveryWorkStampedPayload = z.object({
+    bead_id: z.string(),
+    event_id: z.string(),
+    landing_event_id: z.string(),
+    store_ref: z.string(),
+    work_commit: z.string()
+});
+
 export const zDep = z.object({
     depends_on_id: z.string(),
     issue_id: z.string(),
@@ -3279,6 +3287,7 @@ export const zEventPayload = z.union([
     zCityUnregisterSucceededPayload,
     zConditionalWritesDegradedPayload,
     zDeliveryLandedPayload,
+    zDeliveryWorkStampedPayload,
     zExecutionClaimWindowExpiredPayload,
     zExecutionStepStalledPayload,
     zGroupCreatedEventPayload,
@@ -3783,6 +3792,24 @@ export const zTypedEventStreamEnvelopeDeliveryLanded = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('delivery.landed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope delivery.work_stamped
+ */
+export const zTypedEventStreamEnvelopeDeliveryWorkStamped = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zDeliveryWorkStampedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('delivery.work_stamped'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5072,6 +5099,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeConvoyClosed.extend({ type: z.literal('convoy.closed') }),
     zTypedEventStreamEnvelopeConvoyCreated.extend({ type: z.literal('convoy.created') }),
     zTypedEventStreamEnvelopeDeliveryLanded.extend({ type: z.literal('delivery.landed') }),
+    zTypedEventStreamEnvelopeDeliveryWorkStamped.extend({ type: z.literal('delivery.work_stamped') }),
     zTypedEventStreamEnvelopeEmergencyAcked.extend({ type: z.literal('emergency.acked') }),
     zTypedEventStreamEnvelopeEmergencySignaled.extend({ type: z.literal('emergency.signaled') }),
     zTypedEventStreamEnvelopeEventsRotated.extend({ type: z.literal('events.rotated') }),
@@ -5549,6 +5577,25 @@ export const zTypedTaggedEventStreamEnvelopeDeliveryLanded = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('delivery.landed'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope delivery.work_stamped
+ */
+export const zTypedTaggedEventStreamEnvelopeDeliveryWorkStamped = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zDeliveryWorkStampedPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('delivery.work_stamped'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -6908,6 +6955,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeConvoyClosed.extend({ type: z.literal('convoy.closed') }),
     zTypedTaggedEventStreamEnvelopeConvoyCreated.extend({ type: z.literal('convoy.created') }),
     zTypedTaggedEventStreamEnvelopeDeliveryLanded.extend({ type: z.literal('delivery.landed') }),
+    zTypedTaggedEventStreamEnvelopeDeliveryWorkStamped.extend({ type: z.literal('delivery.work_stamped') }),
     zTypedTaggedEventStreamEnvelopeEmergencyAcked.extend({ type: z.literal('emergency.acked') }),
     zTypedTaggedEventStreamEnvelopeEmergencySignaled.extend({ type: z.literal('emergency.signaled') }),
     zTypedTaggedEventStreamEnvelopeEventsRotated.extend({ type: z.literal('events.rotated') }),

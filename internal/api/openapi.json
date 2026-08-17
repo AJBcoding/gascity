@@ -2291,6 +2291,34 @@
         ],
         "type": "object"
       },
+      "DeliveryWorkStampedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "event_id": {
+            "type": "string"
+          },
+          "landing_event_id": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "work_commit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "event_id",
+          "landing_event_id",
+          "store_ref",
+          "bead_id",
+          "work_commit"
+        ],
+        "type": "object"
+      },
       "Dep": {
         "additionalProperties": false,
         "properties": {
@@ -2564,6 +2592,9 @@
           },
           {
             "$ref": "#/components/schemas/DeliveryLandedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/DeliveryWorkStampedPayload"
           },
           {
             "$ref": "#/components/schemas/ExecutionClaimWindowExpiredPayload"
@@ -12165,6 +12196,7 @@
             "convoy.closed": "#/components/schemas/TypedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedEventStreamEnvelopeConvoyCreated",
             "delivery.landed": "#/components/schemas/TypedEventStreamEnvelopeDeliveryLanded",
+            "delivery.work_stamped": "#/components/schemas/TypedEventStreamEnvelopeDeliveryWorkStamped",
             "emergency.acked": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedEventStreamEnvelopeEventsRotated",
@@ -12298,6 +12330,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeDeliveryLanded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeDeliveryWorkStamped"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeEmergencyAcked"
@@ -13700,6 +13735,7 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "delivery.landed",
+                "delivery.work_stamped",
                 "supervisor.fs_pressure.skipped_tick",
                 "molecule.resolved",
                 "supervisor.started",
@@ -13801,6 +13837,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope delivery.landed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeDeliveryWorkStamped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/DeliveryWorkStampedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "delivery.work_stamped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope delivery.work_stamped",
         "type": "object"
       },
       "TypedEventStreamEnvelopeEmergencyAcked": {
@@ -17817,6 +17910,7 @@
             "convoy.closed": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyClosed",
             "convoy.created": "#/components/schemas/TypedTaggedEventStreamEnvelopeConvoyCreated",
             "delivery.landed": "#/components/schemas/TypedTaggedEventStreamEnvelopeDeliveryLanded",
+            "delivery.work_stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeDeliveryWorkStamped",
             "emergency.acked": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked",
             "emergency.signaled": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencySignaled",
             "events.rotated": "#/components/schemas/TypedTaggedEventStreamEnvelopeEventsRotated",
@@ -17950,6 +18044,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeDeliveryLanded"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeDeliveryWorkStamped"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeEmergencyAcked"
@@ -19431,6 +19528,7 @@
                 "worker.operation",
                 "project.identity.stamped",
                 "delivery.landed",
+                "delivery.work_stamped",
                 "supervisor.fs_pressure.skipped_tick",
                 "molecule.resolved",
                 "supervisor.started",
@@ -19537,6 +19635,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope delivery.landed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeDeliveryWorkStamped": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/DeliveryWorkStampedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "delivery.work_stamped",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope delivery.work_stamped",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeEmergencyAcked": {
