@@ -57,6 +57,39 @@ func TestResolveTemplatePrependsGCBinDirToPATH(t *testing.T) {
 	}
 }
 
+func TestResolveTemplatePublishesManagedBeadsMutationFrontdoor(t *testing.T) {
+	cityPath := t.TempDir()
+	writeTemplateResolveCityConfig(t, cityPath, "file")
+
+	params := &agentBuildParams{
+		cityName:   "city",
+		cityPath:   cityPath,
+		workspace:  &config.Workspace{Provider: "test"},
+		providers:  map[string]config.ProviderSpec{"test": {Command: "echo", PromptMode: "none"}},
+		lookPath:   func(string) (string, error) { return "/bin/echo", nil },
+		fs:         fsys.OSFS{},
+		beaconTime: time.Unix(0, 0),
+		beadNames:  make(map[string]string),
+		stderr:     io.Discard,
+	}
+
+	tp, err := resolveTemplate(params, &config.Agent{Name: "runner"}, "runner", nil)
+	if err != nil {
+		t.Fatalf("resolveTemplate: %v", err)
+	}
+
+	frontdoor := tp.Env["GC_BEADS_MUTATION_FRONTDOOR"]
+	if frontdoor == "" {
+		t.Fatal("GC_BEADS_MUTATION_FRONTDOOR is empty")
+	}
+	if frontdoor != tp.Env["GC_BIN"] {
+		t.Fatalf("GC_BEADS_MUTATION_FRONTDOOR = %q, want exact gc binary %q", frontdoor, tp.Env["GC_BIN"])
+	}
+	if filepath.Base(frontdoor) == "bd" {
+		t.Fatalf("managed mutation frontdoor points at raw bd: %q", frontdoor)
+	}
+}
+
 func TestResolveTemplatePrependsGCBinDirToConfiguredAgentPATH(t *testing.T) {
 	cityPath := t.TempDir()
 	writeTemplateResolveCityConfig(t, cityPath, "file")

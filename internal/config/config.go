@@ -1415,6 +1415,13 @@ type BeadsConfig struct {
 	// journal confirms zero acknowledged warn-only-use events throughout the
 	// declared observation window. Warn-only closes fail if readback fails.
 	ShippedCloseWarnOnly *bool `toml:"shipped_close_warn_only,omitempty" jsonschema:"default=false"`
+	// DirectRawBDWrites declares that separately invoked upstream bd writes are
+	// an enabled deployment entrypoint. It does not grant access or route a
+	// command; it makes an otherwise out-of-band path explicit so doctor can
+	// refuse production shipped-close qualification. Omitted/false means direct
+	// raw bd mutation is unsupported, not that Gas City can detect arbitrary
+	// external processes that ignore the managed boundary.
+	DirectRawBDWrites bool `toml:"direct_raw_bd_writes,omitempty" jsonschema:"default=false"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.

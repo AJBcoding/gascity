@@ -9,6 +9,16 @@ Kiro hooks should already run these commands for you at the appropriate
 lifecycle points. If hooks are unavailable or stale, follow the protocols
 below manually.
 
+## Managed mutation boundary
+
+All closing mutations in a managed city must use `gc bd`. Managed sessions
+also receive `GC_BEADS_MUTATION_FRONTDOOR`, which names the exact `gc`
+executable; `"$GC_BEADS_MUTATION_FRONTDOOR" bd ...` is the equivalent explicit
+form. This is the supported managed mutation front door. Invoking the upstream
+`bd` binary directly for a close or closed-status update is unsupported and
+bypasses Gas City's policy. The environment variable is routing guidance, not
+a sandbox around the provider.
+
 ## Startup
 
 Run `gc prime` at the start of every session to load your context

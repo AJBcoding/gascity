@@ -1066,6 +1066,11 @@
           "description": "ShippedCloseWarnOnly temporarily permits managed closes that violate the\nshipped work-record contract after emitting warnings and durably confirmed\ntelemetry. It is false by default, so managed closes enforce the contract.\nThis setting\nexists for one compatibility release and must be removed at v1.6.0 after\ngc beads audit-shipped reports complete=true clean=true and the durable\njournal confirms zero acknowledged warn-only-use events throughout the\ndeclared observation window. Warn-only closes fail if readback fails.",
           "default": false
         },
+        "direct_raw_bd_writes": {
+          "type": "boolean",
+          "description": "DirectRawBDWrites declares that separately invoked upstream bd writes are\nan enabled deployment entrypoint. It does not grant access or route a\ncommand; it makes an otherwise out-of-band path explicit so doctor can\nrefuse production shipped-close qualification. Omitted/false means direct\nraw bd mutation is unsupported, not that Gas City can detect arbitrary\nexternal processes that ignore the managed boundary.",
+          "default": false
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"

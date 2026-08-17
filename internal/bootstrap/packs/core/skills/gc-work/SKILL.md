@@ -8,6 +8,16 @@ description: Finding, creating, claiming, and closing work items (beads)
 Everything in Gas City is a bead — tasks, messages, molecules, convoys.
 The `gc bd` CLI is the primary interface for bead CRUD.
 
+## Managed mutation boundary
+
+All closing mutations in a managed city must use `gc bd`. Managed sessions
+also receive `GC_BEADS_MUTATION_FRONTDOOR`, which names the exact `gc`
+executable; `"$GC_BEADS_MUTATION_FRONTDOOR" bd ...` is the equivalent explicit
+form. This is the supported managed mutation front door. Invoking the upstream
+`bd` binary directly for a close or closed-status update is unsupported and
+bypasses Gas City's policy. The environment variable and this guidance do not
+sandbox the provider.
+
 ## Rig-scoped beads
 
 Each rig has its own `.beads/` database with its own ID prefix (e.g.

@@ -1090,6 +1090,7 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
 		shippedCloseWarnOnly := base.Beads.ShippedCloseWarnOnly
+		directRawBDWrites := base.Beads.DirectRawBDWrites
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
@@ -1099,6 +1100,9 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		}
 		if !fragMeta.IsDefined("beads", "shipped_close_warn_only") {
 			base.Beads.ShippedCloseWarnOnly = shippedCloseWarnOnly
+		}
+		if !fragMeta.IsDefined("beads", "direct_raw_bd_writes") {
+			base.Beads.DirectRawBDWrites = directRawBDWrites
 		}
 	}
 	if fragMeta.IsDefined("dolt") {

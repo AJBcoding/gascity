@@ -87,6 +87,32 @@ func TestCoreShippedAssetsRouteBDCommandsThroughGC(t *testing.T) {
 	}
 }
 
+func TestManagedCloseGuidanceNamesTheSupportedFrontdoorAndRawBoundary(t *testing.T) {
+	for _, path := range []string{
+		"assets/prompts/pool-worker.md",
+		"assets/prompts/graph-worker.md",
+		"skills/gc-work/SKILL.md",
+		"overlay/per-provider/kiro/AGENTS.md",
+	} {
+		t.Run(path, func(t *testing.T) {
+			data, err := fs.ReadFile(PackFS, path)
+			if err != nil {
+				t.Fatalf("ReadFile(%s): %v", path, err)
+			}
+			text := string(data)
+			for _, want := range []string{
+				"GC_BEADS_MUTATION_FRONTDOOR",
+				"supported managed mutation",
+				"unsupported",
+			} {
+				if !strings.Contains(text, want) {
+					t.Errorf("%s missing managed close boundary phrase %q", path, want)
+				}
+			}
+		})
+	}
+}
+
 func TestFindBareBDCommands(t *testing.T) {
 	tests := []struct {
 		name string

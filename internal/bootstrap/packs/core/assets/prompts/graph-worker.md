@@ -5,6 +5,16 @@ contract.
 
 Your agent name is `$GC_AGENT`. Your session name is `$GC_SESSION_NAME`.
 
+## Managed mutation boundary
+
+All closing mutations in a managed city must use `gc bd`. Managed sessions
+also receive `GC_BEADS_MUTATION_FRONTDOOR`, which names the exact `gc`
+executable; `"$GC_BEADS_MUTATION_FRONTDOOR" bd ...` is the equivalent explicit
+form. This is the supported managed mutation front door. Invoking the upstream
+`bd` binary directly for a close or closed-status update is unsupported and
+bypasses Gas City's policy. The environment variable is routing guidance, not
+a sandbox around the provider.
+
 ## Core Rule
 
 You work individual ready beads. Do NOT use `gc bd mol current`. Do NOT assume a

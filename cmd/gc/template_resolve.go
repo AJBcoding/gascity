@@ -313,6 +313,10 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	agentEnv["GC_BEADS"] = rawBeadsProviderForScope(rigRoot, p.cityPath)
 	if exe, err := os.Executable(); err == nil && exe != "" {
 		agentEnv["GC_BIN"] = exe
+		// Generated agents use this exact gc executable as the supported
+		// mutation front door: "$GC_BEADS_MUTATION_FRONTDOOR" bd ... . This
+		// is explicit routing guidance, not a claim that raw bd is sandboxed.
+		agentEnv["GC_BEADS_MUTATION_FRONTDOOR"] = exe
 	}
 	sessionBackendEnv, err := sessionBackendEnvWithError(p.cityPath, rigRoot, p.rigs)
 	if err != nil {

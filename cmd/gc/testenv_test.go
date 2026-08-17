@@ -73,6 +73,7 @@ var inheritedCityRoutingEnvVars = []string{
 	"GC_BEADS_SCOPE_ROOT",
 	"GC_DIR",
 	"GC_BIN",
+	"GC_BEADS_MUTATION_FRONTDOOR",
 	"GC_RIG",
 	"GC_RIG_ROOT",
 	"GC_CONTINUATION_EPOCH",

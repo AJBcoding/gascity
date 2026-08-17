@@ -57,6 +57,32 @@ Around the primitives, the supporting config gets a home too: **commands**,
 style becomes orchestrator-driven instead of hand-driven, and the method itself
 becomes reproducible, legible, shareable, and version-controlled.
 
+## Keep managed work mutations inside the city boundary
+
+Route work-record closes and updates to `status=closed` through `gc bd`.
+Gas City's supported managed mutation surfaces—the CLI, routed by-ID writes,
+HTTP API close/update/delete handlers, core worker and formula instructions,
+and deterministic agent-script close actions—converge on the same
+shipped-close policy before calling the selected store.
+
+Generated sessions set `GC_BEADS_MUTATION_FRONTDOOR` to the exact `gc`
+executable, so a script that must avoid ambient command lookup can invoke
+`"$GC_BEADS_MUTATION_FRONTDOOR" bd ...`. That variable and the generated prompt
+language are routing guidance, not a security sandbox. Invoking a provider CLI
+directly, including the upstream `bd` binary, or writing the backing database
+directly is outside Gas City's policy and unsupported for managed mutations.
+
+The stock Beads v1.1.0 provider has no atomic pre-close policy hook; its close
+hooks run after the mutation. A deployment that deliberately treats direct raw
+`bd` writes as an enabled entrypoint must declare
+`beads.direct_raw_bd_writes = true`; `gc doctor`'s
+`shipped-close-boundary` check then blocks production qualification for any
+`bd`-backed scope. The declaration does not grant access—it makes the unsafe
+operational path visible to qualification. When it is omitted/false, arbitrary
+out-of-band execution remains unsupported and cannot be detected by config
+validation. Explicit `beads.shipped_close_warn_only = true` is advisory because
+it opts out of production enforcement rather than making a raw path safe.
+
 ## Everything sorts into three layers
 
 The City is the local root pack; it imports shared packs. A pack and a city

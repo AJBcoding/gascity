@@ -19,6 +19,32 @@ func TestLoadWithIncludesPreservesShippedCloseWarnOnlyIndependently(t *testing.T
 	}
 }
 
+func TestLoadWithIncludesPreservesDirectRawBDWritesDeclaration(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte("include = [\"fragment.toml\"]\n[workspace]\nname = \"test\"\n[beads]\ndirect_raw_bd_writes = true\n")
+	fs.Files["/city/fragment.toml"] = []byte("[beads]\nprovider = \"bd\"\n")
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !cfg.Beads.DirectRawBDWrites {
+		t.Fatal("[beads] fragment erased root direct_raw_bd_writes=true")
+	}
+}
+
+func TestLoadWithIncludesCanDisableDirectRawBDWritesDeclaration(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte("include = [\"fragment.toml\"]\n[workspace]\nname = \"test\"\n[beads]\ndirect_raw_bd_writes = true\n")
+	fs.Files["/city/fragment.toml"] = []byte("[beads]\ndirect_raw_bd_writes = false\n")
+	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Beads.DirectRawBDWrites {
+		t.Fatal("fragment direct_raw_bd_writes=false did not override root true")
+	}
+}
+
 // TestLoadWithIncludesDefaultsConditionalWrites: omitted → default "off".
 func TestLoadWithIncludesDefaultsConditionalWrites(t *testing.T) {
 	fs := fsys.NewFake()

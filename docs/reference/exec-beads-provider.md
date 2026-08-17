@@ -43,6 +43,33 @@ export GC_BEADS=exec:gc-beads-br
 
 Resolution order is `GC_BEADS` → `[beads] provider` → `bd` (the default).
 
+## Managed mutation boundary
+
+Gas City applies its shipped-close policy to every supported managed mutation
+surface before the provider write: `gc bd` close and closed-status updates,
+routed by-ID writes, HTTP API close/update/delete handlers, generated core
+worker and formula actions, and deterministic agent-script close actions.
+Generated agent sessions expose `GC_BEADS_MUTATION_FRONTDOOR` as the exact
+`gc` executable for callers that should not rely on ambient command lookup.
+
+That routing is not a provider sandbox. Direct invocation of an exec-provider
+script, a backend's own CLI, the upstream `bd` binary, or the backing database
+bypasses Gas City's policy and is unsupported for managed mutations unless the
+provider independently supplies an atomic pre-close authorization hook.
+Gas City's exec protocol does not currently define such a hook.
+
+The bundled default provider pins Beads v1.1.0. Its event hooks run after a
+successful mutation (and proxied update hooks run after commit), so they cannot
+authorize or refuse a close atomically. Set
+`beads.direct_raw_bd_writes = true` only to declare that separately invoked raw
+`bd` writes are an enabled deployment entrypoint; the declaration does not
+grant that access. The `shipped-close-boundary` doctor check blocks production
+qualification when that declaration applies to a `bd`-backed city or rig
+scope. When it is omitted/false, arbitrary out-of-band raw execution remains
+unsupported and is not something config validation can detect. This limitation
+is why the achieved guarantee is “all supported Gas City managed mutation
+surfaces,” not “universal enforcement.”
+
 ## Calling Convention
 
 The script receives the operation name as its first argument:

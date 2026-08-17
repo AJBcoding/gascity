@@ -43,7 +43,9 @@ bead stores, Dolt server health, event log integrity, formula compiler
 requirements (deprecated contract = "graph.v2" opt-ins, missing
 [requires] formula_compiler = ">=2.0.0" declarations, and requirements
 the host's [daemon] formula_v2 setting cannot satisfy), v2 config
-deprecations such as legacy [formulas].dir, and per-rig health. Use
+deprecations such as legacy [formulas].dir, and per-rig health. Production
+shipped-close qualification covers managed gc bd writes and fails when
+beads.direct_raw_bd_writes declares an unguarded raw close entrypoint. Use
 --fix for the canonical remediation path, including any safe mechanical
 legacy-to-current pack rewrites that are available on this branch.`,
 		Example: `  gc doctor
@@ -189,6 +191,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// fails, the core config check above reports the parse error.
 	if cfgErr == nil && cfg != nil {
 		resolveRigPaths(cityPath, cfg.Rigs)
+		register(newShippedCloseBoundaryCheck(cityPath, cfg))
 		if workspaceUsesManagedBdStoreContract(cityPath, cfg.Rigs) {
 			register(newDoltTopologyCheck(cityPath, cfg))
 			register(newDoltDriftCheck(cityPath, cfg))

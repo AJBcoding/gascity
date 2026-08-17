@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Shipped-close enforcement now covers every supported Gas City managed
+  mutation surface, with the raw-provider boundary reported honestly.**
+  `gc bd` close and closed-status updates, routed by-ID writes, HTTP API
+  close/update/delete handlers, generated core worker and formula actions, and
+  deterministic agent-script closes converge on the same pre-write policy.
+  Generated sessions publish `GC_BEADS_MUTATION_FRONTDOOR` as their exact `gc`
+  front door. Because pinned Beads v1.1.0 has no atomic pre-close policy hook,
+  `gc doctor` blocks production qualification when a `bd`-backed deployment
+  declares `beads.direct_raw_bd_writes = true`. Separately invoked raw `bd`,
+  provider CLI, and direct database writes remain unsupported and outside this
+  guarantee; arbitrary out-of-band execution is not detectable from config,
+  and the enforcement is not universal.
+
 ### Fixed
 
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
