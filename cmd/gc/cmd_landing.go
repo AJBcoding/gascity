@@ -59,6 +59,7 @@ func newLandingCmd(stdout, stderr io.Writer) *cobra.Command {
 		Args:  cobra.NoArgs,
 	}
 	cmd.AddCommand(newLandingRecordCmd(stdout, stderr))
+	cmd.AddCommand(newLandingStampCmd(stdout, stderr))
 	return cmd
 }
 

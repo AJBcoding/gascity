@@ -2259,6 +2259,7 @@ gc landing
 | Subcommand | Description |
 |------------|-------------|
 | [gc landing record](#gc-landing-record) | Observe an exact remote ref and record typed landing evidence |
+| [gc landing stamp](#gc-landing-stamp) | Stamp exact source work records from durable landing evidence |
 
 ## gc landing record
 
@@ -2272,6 +2273,19 @@ gc landing record --receipt <absolute-json-path> [flags]
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSON summary |
 | `--receipt` | string |  | absolute path to a landing receipt JSON file |
+
+## gc landing stamp
+
+Stamp exact source work records from durable landing evidence
+
+```
+gc landing stamp --event <gcl-id> [flags]
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--event` | string |  | exact delivery.landed event ID |
+| `--json` | bool |  | emit one JSON result |
 
 ## gc lint
 

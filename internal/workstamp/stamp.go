@@ -90,7 +90,7 @@ func (s Service) Stamp(ctx context.Context, eventID string) (Result, error) {
 			result.Conflicts = append(result.Conflicts, conflict(record, "work_commit_mismatch", "current gc.work_commit differs from landing evidence"))
 			continue
 		}
-		writer, ok := store.(beads.ConditionalWriter)
+		writer, ok := exactConditionalWriter(store)
 		if !ok {
 			result.Conflicts = append(result.Conflicts, conflict(record, "conditional_write_unsupported", "store does not support revision-fenced updates"))
 			continue
@@ -161,6 +161,27 @@ func (s Service) Stamp(ctx context.Context, eventID string) (Result, error) {
 		result.Stamped++
 	}
 	return result, nil
+}
+
+// exactConditionalWriter follows only wrapper-declared resolution targets.
+// Stamping is intrinsically revision-fenced, so it checks the store's actual
+// capability independent of the optional conditional-writes rollout mode.
+func exactConditionalWriter(store beads.Store) (beads.ConditionalWriter, bool) {
+	for range 16 {
+		if writer, ok := beads.ConditionalWriterFor(store); ok {
+			return writer, true
+		}
+		targeter, ok := store.(beads.ConditionalWritesResolveTargeter)
+		if !ok {
+			return nil, false
+		}
+		next := targeter.ConditionalWritesResolveTarget()
+		if next == nil {
+			return nil, false
+		}
+		store = next
+	}
+	return nil, false
 }
 
 func newStampPayload(landingEventID string, record events.DeliveryWorkRecordRef) (events.DeliveryWorkStampedPayload, error) {
