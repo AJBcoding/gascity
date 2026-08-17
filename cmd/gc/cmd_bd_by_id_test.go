@@ -199,6 +199,53 @@ func TestBdByIDServesAClassBeadFromANonBuiltInProviderBinding(t *testing.T) {
 	}
 }
 
+func TestBdByIDManagedCloseAndUpdateRejectStaleEvaluatedRevision(t *testing.T) {
+	for name, run := range map[string]func(storebinding.GraphStore, int64, bdByIDOp, io.Writer, io.Writer) int{
+		"close": func(graph storebinding.GraphStore, revision int64, op bdByIDOp, stdout, stderr io.Writer) int {
+			return doBdByIDClose(graph, revision, op, "test binding", stdout, stderr)
+		},
+		"update": func(graph storebinding.GraphStore, revision int64, op bdByIDOp, stdout, stderr io.Writer) int {
+			return doBdByIDUpdate(graph, revision, op, "test binding", stdout, stderr)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			created, err := store.Create(beads.Bead{Title: "evaluated", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			stale, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			changed := "changed concurrently"
+			if err := store.Update(created.ID, beads.UpdateOpts{Title: &changed}); err != nil {
+				t.Fatal(err)
+			}
+			graph, err := storebinding.NewBeadsGraphStore(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			closed := "closed"
+			op := bdByIDOp{ID: created.ID, Update: beads.UpdateOpts{Status: &closed}}
+			var stdout, stderr bytes.Buffer
+			if code := run(graph, stale.Revision, op, &stdout, &stderr); code == 0 {
+				t.Fatalf("stale %s succeeded; stdout=%q stderr=%q", name, stdout.String(), stderr.String())
+			}
+			if !strings.Contains(stderr.String(), "changed concurrently") {
+				t.Fatalf("stale %s diagnostic = %q, want concurrent modification", name, stderr.String())
+			}
+			live, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if live.Status == "closed" {
+				t.Fatalf("stale %s closed the row", name)
+			}
+		})
+	}
+}
+
 // TestBdByIDServesClaimReleaseAndDepListFromTheClassBinding covers the other
 // three verbs on the same foreign-provider city. They are the cascade-nudge
 // order's reads and the orphan-recovery scripts' writes, and every one of them
@@ -1014,6 +1061,31 @@ func TestBdByIDCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), beadmeta.DeliveryStateMetadataKey) {
 		t.Fatalf("refusal did not diagnose landing evidence: %q", stderr.String())
+	}
+}
+
+func TestBdByIDUpdateCannotAtomicallyManufactureUngatedShippedTask(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	created, err := classStore.Create(beads.Bead{ID: "gc-becomestask", Title: "becomes work", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workRecordEnforceEnvVar, "1")
+
+	var stdout, stderr bytes.Buffer
+	code, handled := maybeRouteBdByID(cityPath, "", []string{
+		"update", created.ID, "--type", "task", "--status", "closed",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped,
+	}, &stdout, &stderr)
+	if !handled || code == 0 {
+		t.Fatalf("atomic non-task to shipped task update was allowed: handled=%v code=%d stderr=%q", handled, code, stderr.String())
+	}
+	after, err := classStore.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Type != "convoy" || after.Status == "closed" {
+		t.Fatalf("refused atomic update mutated class row: type=%q status=%q", after.Type, after.Status)
 	}
 }
 

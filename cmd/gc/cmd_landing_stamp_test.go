@@ -249,12 +249,56 @@ path = "beta"
 			t.Fatalf("%s delivery metadata = %#v", dir, bead.Metadata)
 		}
 	}
+}
 
-	resolver, err := newCityLandingStampResolver(io.Discard)
+func TestCityLandingStampResolverStampsAuthoritativeClassRow(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	commit := strings.Repeat("a", 40)
+	bead := classResidentWorkShapedBead(t, classStore, "gc-classstamp", "class work")
+	if err := classStore.Update(bead.ID, beads.UpdateOpts{
+		Metadata: beads.StringMap{"gc.work_commit": commit},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	chdirProviderAwareTest(t, cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+
+	payload, err := json.Marshal(events.DeliveryLandedPayload{
+		EventID:           landingStampEventID,
+		Repository:        "https://example.invalid/repo.git",
+		TargetRef:         "refs/heads/main",
+		ObservedLandedSHA: strings.Repeat("c", 40),
+		VerifiedAt:        "2026-08-16T22:00:00Z",
+		WorkRecords: []events.DeliveryWorkRecordRef{{
+			StoreRef: "class:gmnos", BeadID: bead.ID, WorkCommit: commit,
+		}},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := resolver.Resolve(context.Background(), "class:graph"); err == nil {
-		t.Fatal("class store ref was accepted")
+	provider := events.NewFake()
+	provider.Record(events.Event{Type: events.DeliveryLanded, Subject: landingStampEventID, Payload: payload})
+	previousProvider := landingOpenEventsProvider
+	previousResolver := landingNewStampResolver
+	landingOpenEventsProvider = func(io.Writer, string) (events.Provider, int) { return provider, 0 }
+	landingNewStampResolver = newCityLandingStampResolver
+	t.Cleanup(func() {
+		landingOpenEventsProvider = previousProvider
+		landingNewStampResolver = previousResolver
+	})
+
+	stdout, stderr, err := runLandingCLI(t, "landing", "stamp", "--event", landingStampEventID, "--json")
+	if err != nil {
+		t.Fatalf("Execute: %v stdout=%q stderr=%q", err, stdout, stderr)
+	}
+	after, err := classStore.Get(bead.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := after.Metadata["gc.delivery_event_id"]; got != landingStampEventID {
+		t.Fatalf("authoritative class delivery event = %q, want %q", got, landingStampEventID)
+	}
+	if violations := workstamp.ValidateLandingEvidence(provider, "class:gmnos", after); len(violations) != 0 {
+		t.Fatalf("class landing evidence violations = %v", violations)
 	}
 }

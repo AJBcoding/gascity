@@ -760,7 +760,14 @@ func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (
 	if err := s.enforceResolvedWorkClose(current, workclose.ProjectClose(current), ref); err != nil {
 		return nil, err
 	}
-	if err := store.Close(id); err != nil {
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		return nil, apierr.Internal.Msg("resolved bead store does not support revision-fenced close")
+	}
+	if err := writer.CloseIfMatch(id, current.Revision); err != nil {
+		if beads.IsPreconditionFailed(err) {
+			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed concurrently")
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}
@@ -861,7 +868,8 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		}
 		opts.Assignee = &assignee
 	}
-	if opts.Status != nil && strings.EqualFold(strings.TrimSpace(*opts.Status), "closed") {
+	closing := opts.Status != nil && strings.EqualFold(strings.TrimSpace(*opts.Status), "closed")
+	if closing {
 		if err := s.enforceResolvedWorkClose(current, workclose.ProjectUpdate(current, opts), ref); err != nil {
 			return nil, err
 		}
@@ -874,7 +882,21 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	// concurrent-delete race (409) rather than resolving again — otherwise a
 	// delete racing with update silently applies the mutation to a different
 	// store that happens to share the ID.
-	if err := store.Update(id, opts); err != nil {
+	var writeErr error
+	if closing {
+		writer, ok := beads.ConditionalWriterFor(store)
+		if !ok {
+			return nil, apierr.Internal.Msg("resolved bead store does not support revision-fenced close update")
+		}
+		writeErr = writer.UpdateIfMatch(id, current.Revision, opts)
+	} else {
+		writeErr = store.Update(id, opts)
+	}
+	if writeErr != nil {
+		err := writeErr
+		if beads.IsPreconditionFailed(err) {
+			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed concurrently")
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}
@@ -908,7 +930,14 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 	if err := s.enforceResolvedWorkClose(current, workclose.ProjectClose(current), ref); err != nil {
 		return nil, err
 	}
-	if err := store.Close(id); err != nil {
+	writer, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		return nil, apierr.Internal.Msg("resolved bead store does not support revision-fenced close")
+	}
+	if err := writer.CloseIfMatch(id, current.Revision); err != nil {
+		if beads.IsPreconditionFailed(err) {
+			return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " changed concurrently")
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}

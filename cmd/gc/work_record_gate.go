@@ -241,9 +241,6 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 				continue
 			}
 		}
-		if !isWorkRecordGatedBead(bead) {
-			continue
-		}
 		current := bead
 		var projectionErr error
 		bead, projectionErr = applyWorkRecordUpdateMetadata(bead, bdArgs)
@@ -261,6 +258,7 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 			}}
 			violations = policy.Evaluate(workclose.Request{
 				Current:             current,
+				ProspectiveType:     bead.Type,
 				ProspectiveStatus:   bead.Status,
 				ProspectiveMetadata: bead.Metadata,
 				StoreRef:            storeRef,
@@ -292,6 +290,7 @@ func evaluateResolvedWorkClose(current, prospective beads.Bead, repoFallback, st
 	}}
 	violations := policy.Evaluate(workclose.Request{
 		Current:             current,
+		ProspectiveType:     prospective.Type,
 		ProspectiveStatus:   prospective.Status,
 		ProspectiveMetadata: prospective.Metadata,
 		StoreRef:            storeRef,
@@ -334,6 +333,11 @@ func applyWorkRecordUpdateMetadata(bead beads.Bead, bdArgs []string) (beads.Bead
 		metadata[key] = value
 	}
 	bead.Metadata = metadata
+	if issueType, ok, err := parseWorkRecordUpdateType(bdArgs); err != nil {
+		return bead, err
+	} else if ok {
+		bead.Type = issueType
+	}
 	edits, err := parseWorkRecordMetadataEdits(bdArgs)
 	if err != nil {
 		return bead, err
@@ -342,6 +346,32 @@ func applyWorkRecordUpdateMetadata(bead beads.Bead, bdArgs []string) (beads.Bead
 		return bead, err
 	}
 	return bead, nil
+}
+
+func parseWorkRecordUpdateType(bdArgs []string) (string, bool, error) {
+	valueFlags := bdSubcmdValueFlags("update")
+	var issueType string
+	var seen bool
+	for i := 1; i < len(bdArgs); i++ {
+		arg := bdArgs[i]
+		switch {
+		case arg == "--":
+			return issueType, seen, nil
+		case arg == "--type" || arg == "-t":
+			if i+1 >= len(bdArgs) {
+				return "", false, fmt.Errorf("cannot project %s: missing value", arg)
+			}
+			i++
+			issueType, seen = bdArgs[i], true
+		case strings.HasPrefix(arg, "--type="):
+			issueType, seen = strings.TrimPrefix(arg, "--type="), true
+		case strings.HasPrefix(arg, "-t="):
+			issueType, seen = strings.TrimPrefix(arg, "-t="), true
+		case !strings.Contains(arg, "=") && valueFlags[arg] && i+1 < len(bdArgs):
+			i++
+		}
+	}
+	return issueType, seen, nil
 }
 
 // parseWorkRecordMetadataEdits extracts the metadata mutations from a `bd update`

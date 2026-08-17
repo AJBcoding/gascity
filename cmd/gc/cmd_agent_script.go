@@ -112,6 +112,10 @@ type agentScriptExecutor struct {
 	// (ok=true) when the current runner must claim/update across stores; ok=false
 	// runs the write in the default (inherited) environment.
 	resolveBeadStore func(beadID string) (dir string, env []string, ok bool)
+	// resolveManagedBeadStore preserves a legitimate no-redirect result apart
+	// from resolution failure. Managed closes refuse on error instead of falling
+	// back to a store that may hold a duplicate ID.
+	resolveManagedBeadStore func(beadID string) (dir string, env []string, redirect bool, err error)
 }
 
 // runBDForBead runs a raw bd subprocess against beadID. Claims remain on this
@@ -129,8 +133,15 @@ func (e agentScriptExecutor) runBDForBead(beadID string, args ...string) error {
 // managed policy boundary, while preserving the selected store environment.
 func (e agentScriptExecutor) runManagedBDForBead(beadID string, args ...string) error {
 	managedArgs := append([]string{"bd"}, args...)
-	if e.resolveBeadStore != nil && e.runCommandInStore != nil {
-		if dir, env, ok := e.resolveBeadStore(strings.TrimSpace(beadID)); ok {
+	if e.resolveManagedBeadStore != nil {
+		dir, env, redirect, err := e.resolveManagedBeadStore(strings.TrimSpace(beadID))
+		if err != nil {
+			return fmt.Errorf("resolving authoritative store for managed close of %s: %w", strings.TrimSpace(beadID), err)
+		}
+		if redirect {
+			if e.runCommandInStore == nil {
+				return fmt.Errorf("managed close of %s requires a store-scoped command runner", strings.TrimSpace(beadID))
+			}
 			return e.runCommandInStore(dir, env, "gc", managedArgs...)
 		}
 	}
@@ -147,7 +158,8 @@ func runAgentScript(scriptPath string, stdout, stderr io.Writer) int {
 		runCommandInStore: func(dir string, env []string, name string, args ...string) error {
 			return runAgentScriptCommandInStore(stdout, stderr, dir, env, name, args...)
 		},
-		resolveBeadStore: agentScriptCrossStoreBeadEnv,
+		resolveBeadStore:        agentScriptCrossStoreBeadEnv,
+		resolveManagedBeadStore: agentScriptManagedCloseBeadEnv,
 	}
 	executor.runShell = executor.runShellCommand
 	return runAgentScriptWithRuntime(scriptPath, stdout, stderr, executor, agentScriptHookBead)

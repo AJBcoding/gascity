@@ -26,6 +26,7 @@ func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref s
 	}
 	violations := policy.Evaluate(workclose.Request{
 		Current:             current,
+		ProspectiveType:     prospective.Type,
 		ProspectiveStatus:   prospective.Status,
 		ProspectiveMetadata: prospective.Metadata,
 		StoreRef:            s.canonicalWorkCloseStoreRef(ref),

@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 const (
@@ -314,8 +315,9 @@ func validateWorkRecords(workRecords []WorkRecordRef) error {
 
 func validateStoreRef(storeRef string) error {
 	kind, name, ok := strings.Cut(storeRef, ":")
-	if !ok || (kind != "city" && kind != "rig") || len(name) > maxStoreNameBytes || !workTokenPattern.MatchString(name) {
-		return fmt.Errorf("must be canonical city:<name> or rig:<name>")
+	validKind := kind == "city" || kind == "rig" || (kind == "class" && storeref.IsClassRef(storeRef))
+	if !ok || !validKind || len(name) > maxStoreNameBytes || !workTokenPattern.MatchString(name) {
+		return fmt.Errorf("must be canonical city:<name>, rig:<name>, or class:<binding>")
 	}
 	return nil
 }

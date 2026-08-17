@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -39,17 +40,29 @@ func crossStoreClaimDir(cfg *config.City, agentCfg *config.Agent, beadID string)
 // Best-effort — any resolution failure returns ok=false so the write falls back
 // to the default (inherited) environment, preserving rig-agent behavior.
 func agentScriptCrossStoreBeadEnv(beadID string) (string, []string, bool) {
+	dir, env, redirect, err := agentScriptManagedCloseBeadEnv(beadID)
+	if err != nil {
+		return "", nil, false
+	}
+	return dir, env, redirect
+}
+
+// agentScriptManagedCloseBeadEnv preserves the difference between a legitimate
+// inherited-store target and an inability to resolve the target. Managed close
+// callers must refuse the latter rather than guessing at a possibly duplicate
+// row in the inherited store.
+func agentScriptManagedCloseBeadEnv(beadID string) (string, []string, bool, error) {
 	beadID = strings.TrimSpace(beadID)
 	if beadID == "" {
-		return "", nil, false
+		return "", nil, false, fmt.Errorf("bead ID is required")
 	}
 	cityPath, err := resolveCity()
 	if err != nil {
-		return "", nil, false
+		return "", nil, false, fmt.Errorf("resolving city: %w", err)
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
 	if err != nil {
-		return "", nil, false
+		return "", nil, false, fmt.Errorf("loading city config: %w", err)
 	}
 	// Normalize relative rig paths to absolute so RigDirForBead returns a usable
 	// command dir, matching cmd_hook's resolveRigPaths call after loadCityConfig.
@@ -60,19 +73,19 @@ func agentScriptCrossStoreBeadEnv(beadID string) (string, []string, bool) {
 		agentName = strings.TrimSpace(os.Getenv("GC_AGENT"))
 	}
 	if agentName == "" {
-		return "", nil, false
+		return "", nil, false, fmt.Errorf("agent identity is unavailable")
 	}
 	a, ok := resolveAgentIdentity(cfg, agentName, currentRigContext(cfg))
 	if !ok {
-		return "", nil, false
+		return "", nil, false, fmt.Errorf("agent identity %q is not configured", agentName)
 	}
 	rigDir, ok := crossStoreClaimDir(cfg, &a, beadID)
 	if !ok {
-		return "", nil, false
+		return "", nil, false, nil
 	}
 	overrides, err := bdRuntimeEnvForRigWithError(cityPath, cfg, rigDir)
 	if err != nil {
-		return "", nil, false
+		return "", nil, false, fmt.Errorf("resolving bead store environment: %w", err)
 	}
-	return rigDir, mergeRuntimeEnv(os.Environ(), overrides), true
+	return rigDir, mergeRuntimeEnv(os.Environ(), overrides), true, nil
 }

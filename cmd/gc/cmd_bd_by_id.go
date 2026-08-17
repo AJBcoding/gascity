@@ -844,9 +844,9 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 	case bdByIDDepList:
 		return doBdByIDDepList(resolution.Graph, op, stdout, stderr), true
 	case bdByIDUpdate:
-		return doBdByIDUpdate(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+		return doBdByIDUpdate(resolution.Graph, resolution.Bead.Revision, op, door.bindingName(), stdout, stderr), true
 	case bdByIDClose:
-		return doBdByIDClose(resolution.Graph, op, door.bindingName(), stdout, stderr), true
+		return doBdByIDClose(resolution.Graph, resolution.Bead.Revision, op, door.bindingName(), stdout, stderr), true
 	case bdByIDReopen:
 		return doBdByIDReopen(resolution.Graph, op, door.bindingName(), stdout, stderr), true
 	}
@@ -1357,8 +1357,12 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 // The re-read is deliberate. bd prints the row after a mutation and callers
 // have learned to trust that output; rendering the UpdateOpts back would report
 // what was asked for rather than what the store now holds.
-func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
-	if err := graph.Update(op.ID, op.Update); err != nil {
+func doBdByIDUpdate(graph storebinding.GraphStore, expectedRevision int64, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	if err := graph.UpdateIfMatch(op.ID, expectedRevision, op.Update); err != nil {
+		if beads.IsPreconditionFailed(err) {
+			fmt.Fprintf(stderr, "gc bd update: %s changed concurrently; retry the command\n", op.ID) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1375,8 +1379,9 @@ func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 // The already-closed answer is the STORE's: the contract's Close carries the
 // canonical no-op semantics, and a "is it closed yet" check here would be a
 // second implementation of a rule the store already has, free to drift from it.
-func doBdByIDClose(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
-	return doBdByIDLifecycleWrite(graph, op, "close", graph.Close, binding, stdout, stderr)
+func doBdByIDClose(graph storebinding.GraphStore, expectedRevision int64, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	write := func(id string) error { return graph.CloseIfMatch(id, expectedRevision) }
+	return doBdByIDLifecycleWrite(graph, op, "close", write, binding, stdout, stderr)
 }
 
 // doBdByIDReopen is doBdByIDClose's undo, and exists for the same reason: a
@@ -1397,6 +1402,10 @@ func doBdByIDReopen(graph storebinding.GraphStore, op bdByIDOp, binding string, 
 // verb.
 func doBdByIDLifecycleWrite(graph storebinding.GraphStore, op bdByIDOp, verb string, write func(string) error, binding string, stdout, stderr io.Writer) int {
 	if err := write(op.ID); err != nil {
+		if beads.IsPreconditionFailed(err) {
+			fmt.Fprintf(stderr, "gc bd %s: %s changed concurrently; retry the command\n", verb, op.ID) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}

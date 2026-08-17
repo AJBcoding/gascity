@@ -9,6 +9,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/workstamp"
 	"github.com/spf13/cobra"
 )
@@ -127,8 +129,8 @@ func (r *cityLandingStampResolver) Resolve(ctx context.Context, storeRef string)
 		return nil, err
 	}
 	kind, name, ok := strings.Cut(storeRef, ":")
-	if !ok || !landingStoreNamePattern.MatchString(name) || (kind != "city" && kind != "rig") {
-		return nil, fmt.Errorf("store ref %q is not a canonical local city or rig ref", storeRef)
+	if !ok || !landingStoreNamePattern.MatchString(name) || (kind != "city" && kind != "rig" && kind != "class") {
+		return nil, fmt.Errorf("store ref %q is not a canonical local city, rig, or class ref", storeRef)
 	}
 	if store, exists := r.stores[storeRef]; exists {
 		return store, nil
@@ -146,6 +148,21 @@ func (r *cityLandingStampResolver) Resolve(ctx context.Context, storeRef string)
 			return nil, fmt.Errorf("rig store ref %q is not configured with a local path", storeRef)
 		}
 		storePath = resolveStoreScopeRoot(r.cityPath, rig.Path)
+	case "class":
+		routes := cliStorageRoutes(r.cityPath)
+		store, relocated := graphClassBinding(routes)
+		if !relocated {
+			return nil, fmt.Errorf("class store ref %q is not served by a local class binding", storeRef)
+		}
+		classes := make([]coordclass.Class, 0, len(routes.stores))
+		for class := range routes.stores {
+			classes = append(classes, class)
+		}
+		if want := string(storeref.ClassRef(classes)); storeRef != want {
+			return nil, fmt.Errorf("class store ref %q does not name current class binding %q", storeRef, want)
+		}
+		r.stores[storeRef] = store
+		return store, nil
 	}
 	store, err := openStoreAtForCityWithConfig(storePath, r.cityPath, r.cfg)
 	if err != nil {

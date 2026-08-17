@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,9 +12,11 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -22,6 +25,52 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workclose"
 )
+
+type policyWriteRaceStore struct {
+	beads.Store
+	base *beads.MemStore
+	once sync.Once
+}
+
+func (s *policyWriteRaceStore) race(id string) {
+	s.once.Do(func() {
+		value := "changed concurrently"
+		_ = s.base.Update(id, beads.UpdateOpts{Title: &value})
+	})
+}
+
+func (s *policyWriteRaceStore) Update(id string, opts beads.UpdateOpts) error {
+	s.race(id)
+	return s.base.Update(id, opts)
+}
+
+func (s *policyWriteRaceStore) Close(id string) error {
+	s.race(id)
+	return s.base.Close(id)
+}
+
+func (s *policyWriteRaceStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	s.race(id)
+	writer, _ := beads.ConditionalWriterFor(s.base)
+	return writer.UpdateIfMatch(id, revision, opts)
+}
+
+func (s *policyWriteRaceStore) CloseIfMatch(id string, revision int64) error {
+	s.race(id)
+	writer, _ := beads.ConditionalWriterFor(s.base)
+	return writer.CloseIfMatch(id, revision)
+}
+
+func (s *policyWriteRaceStore) DeleteIfMatch(id string, revision int64) error {
+	s.race(id)
+	writer, _ := beads.ConditionalWriterFor(s.base)
+	return writer.DeleteIfMatch(id, revision)
+}
+
+func (s *policyWriteRaceStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	writer, _ := beads.ConditionalWriterFor(s.base)
+	return writer.CompareAndSetMetadataKey(id, key, expected, next)
+}
 
 type prefixedAliasStore struct {
 	prefix        string
@@ -435,6 +484,52 @@ func TestBeadCloseVerifiesStoreContainsBeadBeforeClosing(t *testing.T) {
 	}
 }
 
+func TestManagedWorkCloseWritesFenceTheEvaluatedRevision(t *testing.T) {
+	for name, mutate := range map[string]func(*Server, string) error{
+		"close": func(s *Server, id string) error {
+			_, err := s.humaHandleBeadClose(context.Background(), &BeadCloseInput{ID: id})
+			return err
+		},
+		"delete": func(s *Server, id string) error {
+			_, err := s.humaHandleBeadDelete(context.Background(), &BeadDeleteInput{ID: id})
+			return err
+		},
+		"update close": func(s *Server, id string) error {
+			closed := "closed"
+			_, err := s.humaHandleBeadUpdate(context.Background(), &BeadUpdateInput{
+				ID: id, Body: beadUpdateBody{Status: &closed},
+			})
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			state := newFakeState(t)
+			base := beads.NewMemStore()
+			created, err := base.Create(beads.Bead{
+				Title: "evaluated row", Type: "task",
+				Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			state.stores = map[string]beads.Store{"myrig": &policyWriteRaceStore{Store: base, base: base}}
+			err = mutate(New(state), created.ID)
+			model := &apierr.ErrorModel{}
+			ok := errors.As(err, &model)
+			if !ok || model.Code != apierr.ConflictConcurrentModify.Code {
+				t.Fatalf("mutation error = %T %v, want %s", err, err, apierr.ConflictConcurrentModify.Code)
+			}
+			live, err := base.Get(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if live.Status == "closed" {
+				t.Fatal("stale evaluated revision was closed")
+			}
+		})
+	}
+}
+
 func TestHTTPBeadCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
 	state := newFakeState(t)
 	store := state.stores["myrig"]
@@ -458,6 +553,37 @@ func TestHTTPBeadCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
 	}
 	if after.Status == "closed" {
 		t.Fatal("HTTP close mutated shipped work after policy refusal")
+	}
+}
+
+func TestBeadUpdateCannotAtomicallyManufactureUngatedShippedTask(t *testing.T) {
+	state := newFakeState(t)
+	store := state.stores["myrig"]
+	created, err := store.Create(beads.Bead{Title: "becomes work", Type: "convoy"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(workclose.EnforceEnvVar, "1")
+	closed, task := "closed", "task"
+	_, err = New(state).humaHandleBeadUpdate(context.Background(), &BeadUpdateInput{
+		ID: created.ID,
+		Body: beadUpdateBody{
+			Status: &closed,
+			Type:   &task,
+			Metadata: beads.StringMap{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeShipped,
+			},
+		},
+	})
+	if err == nil {
+		t.Fatal("atomic non-task to shipped task close was allowed")
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Type != "convoy" || after.Status == "closed" {
+		t.Fatalf("refused atomic update mutated row: type=%q status=%q", after.Type, after.Status)
 	}
 }
 
@@ -575,6 +701,14 @@ func newLaggyParentProjectionStore() *laggyParentProjectionStore {
 }
 
 func (s *laggyParentProjectionStore) Update(id string, opts beads.UpdateOpts) error {
+	return s.update(id, opts, nil)
+}
+
+func (s *laggyParentProjectionStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
+	return s.update(id, opts, &revision)
+}
+
+func (s *laggyParentProjectionStore) update(id string, opts beads.UpdateOpts, revision *int64) error {
 	parentChanged := false
 	newParentID := ""
 	if opts.ParentID != nil {
@@ -585,13 +719,35 @@ func (s *laggyParentProjectionStore) Update(id string, opts beads.UpdateOpts) er
 		parentChanged = current.ParentID != *opts.ParentID
 		newParentID = *opts.ParentID
 	}
-	if err := s.Store.Update(id, opts); err != nil {
+	var err error
+	if revision == nil {
+		err = s.Store.Update(id, opts)
+	} else {
+		writer, _ := beads.ConditionalWriterFor(s.Store)
+		err = writer.UpdateIfMatch(id, *revision, opts)
+	}
+	if err != nil {
 		return err
 	}
 	if parentChanged && newParentID != "" {
 		s.pendingChildren[id] = newParentID
 	}
 	return nil
+}
+
+func (s *laggyParentProjectionStore) CloseIfMatch(id string, revision int64) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CloseIfMatch(id, revision)
+}
+
+func (s *laggyParentProjectionStore) DeleteIfMatch(id string, revision int64) error {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.DeleteIfMatch(id, revision)
+}
+
+func (s *laggyParentProjectionStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	writer, _ := beads.ConditionalWriterFor(s.Store)
+	return writer.CompareAndSetMetadataKey(id, key, expected, next)
 }
 
 func (s *laggyParentProjectionStore) List(query beads.ListQuery) ([]beads.Bead, error) {

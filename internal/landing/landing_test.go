@@ -172,7 +172,7 @@ func TestRecordRejectsMalformedV2WorkRecordsBeforeObservation(t *testing.T) {
 		}},
 		{name: "unsafe store ref", mutate: func(r *RecordRequest) {
 			r.ReceiptVersion, r.WorkBeadIDs = "2", nil
-			r.WorkRecords = []WorkRecordRef{{StoreRef: "class:graph", BeadID: "gc-a", WorkCommit: shaA}}
+			r.WorkRecords = []WorkRecordRef{{StoreRef: "class:", BeadID: "gc-a", WorkCommit: shaA}}
 		}},
 		{name: "unsafe bead id", mutate: func(r *RecordRequest) {
 			r.ReceiptVersion, r.WorkBeadIDs = "2", nil
@@ -208,6 +208,21 @@ func TestRecordRejectsMalformedV2WorkRecordsBeforeObservation(t *testing.T) {
 				t.Fatalf("observer calls=%d journal records=%d, want 0", observer.calls, journal.records)
 			}
 		})
+	}
+}
+
+func TestRecordAcceptsCanonicalClassWorkRecord(t *testing.T) {
+	request := validRequest(t)
+	request.ReceiptVersion, request.WorkBeadIDs = "2", nil
+	request.WorkRecords = []WorkRecordRef{{StoreRef: "class:gmnos", BeadID: "gc-a", WorkCommit: shaA}}
+	journal := &fakeJournal{}
+	service, observer := serviceFor(request, journal)
+
+	if _, err := service.Record(context.Background(), request); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	if observer.calls != 1 || journal.records != 1 {
+		t.Fatalf("observer calls=%d journal records=%d, want 1 each", observer.calls, journal.records)
 	}
 }
 

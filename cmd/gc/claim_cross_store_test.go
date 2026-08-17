@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -24,6 +25,62 @@ func TestCrossStoreClaimDirRedirectsCityAgentToBeadOwningRig(t *testing.T) {
 	}
 	if dir != rigPath {
 		t.Fatalf("redirect dir = %q, want %q", dir, rigPath)
+	}
+}
+
+func TestRunManagedBDForBeadDistinguishesNoRedirectFromResolutionError(t *testing.T) {
+	resolverErr := errors.New("city config unavailable")
+	for _, tc := range []struct {
+		name      string
+		resolve   func(string) (string, []string, bool, error)
+		wantError bool
+		wantRun   bool
+	}{
+		{
+			name: "legitimate city-owned no redirect",
+			resolve: func(string) (string, []string, bool, error) {
+				return "", nil, false, nil
+			},
+			wantRun: true,
+		},
+		{
+			name: "resolution error refuses managed close",
+			resolve: func(string) (string, []string, bool, error) {
+				return "", nil, false, resolverErr
+			},
+			wantError: true,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runs := 0
+			exec := agentScriptExecutor{
+				resolveManagedBeadStore: tc.resolve,
+				runCommand: func(string, ...string) error {
+					runs++
+					return nil
+				},
+				runCommandInStore: func(string, []string, string, ...string) error {
+					runs++
+					return nil
+				},
+			}
+			err := exec.runManagedBDForBead("gc-1", "close", "gc-1")
+			if (err != nil) != tc.wantError {
+				t.Fatalf("runManagedBDForBead error = %v, wantError=%v", err, tc.wantError)
+			}
+			if got := runs > 0; got != tc.wantRun {
+				t.Fatalf("command ran = %v, want %v", got, tc.wantRun)
+			}
+		})
+	}
+}
+
+func TestAgentScriptManagedCloseBeadEnvReportsResolutionFailure(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	t.Setenv("GC_CITY", cityPath)
+	if _, _, _, err := agentScriptManagedCloseBeadEnv("gc-1"); err == nil {
+		t.Fatal("managed close resolver flattened unreadable city config into no redirect")
 	}
 }
 

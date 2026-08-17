@@ -208,6 +208,7 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 		{ID: "wr-atomic-noop", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-missing", Type: "task", Status: "in_progress", Metadata: map[string]string{}},
 		{ID: "wr-control", Type: "task", Status: "in_progress", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}},
+		{ID: "wr-becomes-task", Type: "convoy", Status: "in_progress", Metadata: map[string]string{}},
 	}
 	newStore := func() beads.Store { return beads.NewMemStoreFrom(1, beadsList, nil) }
 
@@ -232,6 +233,13 @@ func TestEvaluateWorkRecordCloseGate(t *testing.T) {
 			true,
 			false,
 			"",
+		},
+		{
+			"atomic type change cannot manufacture an ungated shipped task",
+			[]string{"update", "wr-becomes-task", "--type", "task", "--set-metadata", beadmeta.WorkOutcomeMetadataKey + "=" + beadmeta.WorkOutcomeShipped, "--status=closed"},
+			true,
+			true,
+			beadmeta.WorkCommitMetadataKey,
 		},
 		{
 			"metadata JSON validates submitted no-op",

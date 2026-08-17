@@ -26,6 +26,7 @@ type WorkClosePolicy struct { //nolint:revive // design term pinned by the unive
 // policy-bearing fields and already-canonical physical store identity.
 type Request struct {
 	Current             beads.Bead
+	ProspectiveType     string
 	ProspectiveStatus   string
 	ProspectiveMetadata beads.StringMap
 	StoreRef            string
@@ -37,12 +38,13 @@ func (p WorkClosePolicy) Evaluate(req Request) []string {
 	if !strings.EqualFold(strings.TrimSpace(req.ProspectiveStatus), "closed") {
 		return nil
 	}
-	if !AppliesTo(req.Current) {
-		return nil
-	}
 	prospective := req.Current
+	prospective.Type = req.ProspectiveType
 	prospective.Status = req.ProspectiveStatus
 	prospective.Metadata = req.ProspectiveMetadata
+	if !AppliesTo(req.Current) && !AppliesTo(prospective) {
+		return nil
+	}
 	violations := ValidateRecord(prospective, p.CommitReachable)
 	if prospective.Metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeShipped {
 		violations = append(violations, workstamp.ValidateLandingEvidence(p.Evidence, req.StoreRef, prospective)...)
@@ -64,6 +66,9 @@ func ProjectUpdate(current beads.Bead, opts beads.UpdateOpts) beads.Bead {
 	}
 	if opts.Status != nil {
 		prospective.Status = *opts.Status
+	}
+	if opts.Type != nil {
+		prospective.Type = *opts.Type
 	}
 	return prospective
 }
