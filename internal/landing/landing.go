@@ -24,6 +24,8 @@ const (
 	MaxReceiptBytes = 64 << 10
 	// MaxWorkBeadIDs bounds the work identifiers carried by one landing event.
 	MaxWorkBeadIDs = 256
+	// MaxWorkRecords bounds the store-scoped work identities in a v2 event.
+	MaxWorkRecords = 256
 
 	maxIDBytes         = 256
 	maxRepositoryBytes = 4096
@@ -31,17 +33,27 @@ const (
 	maxTargetRefBytes  = 512
 	maxPathBytes       = 4096
 	maxActorBytes      = 256
+	maxStoreNameBytes  = 255
 )
 
 var (
 	remoteNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	gitSHAPattern     = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	sha256Pattern     = regexp.MustCompile(`^sha256:[0-9a-f]{64}$`)
+	workTokenPattern  = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 )
+
+// WorkRecordRef binds a source commit to one exact local city or rig store.
+type WorkRecordRef struct {
+	StoreRef   string
+	BeadID     string
+	WorkCommit string
+}
 
 // RecordRequest contains the bounded caller assertions needed to verify one
 // authoritative target ref and construct its durable receipt.
 type RecordRequest struct {
+	ReceiptVersion        string
 	WorkflowID            string
 	IntegrationAttemptID  string
 	RepositoryPath        string
@@ -55,6 +67,7 @@ type RecordRequest struct {
 	IntegrationResultPath string
 	IntegrationResultHash string
 	WorkBeadIDs           []string
+	WorkRecords           []WorkRecordRef
 	Actor                 string
 }
 
@@ -136,6 +149,7 @@ func (s *Service) Record(ctx context.Context, request RecordRequest) (Result, er
 		IntegrationResultPath: request.IntegrationResultPath,
 		IntegrationResultHash: request.IntegrationResultHash,
 		WorkBeadIDs:           append([]string(nil), request.WorkBeadIDs...),
+		WorkRecords:           deliveryWorkRecords(request.WorkRecords),
 		VerifiedAt:            now().UTC().Format(time.RFC3339Nano),
 	}
 	eventID, err := deterministicEventID(payload)
@@ -227,14 +241,36 @@ func validateRequest(request RecordRequest) error {
 	if request.PublicationMode != "direct" && request.PublicationMode != "pull_request" {
 		return fmt.Errorf("landing: publication_mode must be direct or pull_request")
 	}
-	if len(request.WorkBeadIDs) == 0 {
+	if request.ReceiptVersion == "2" {
+		if len(request.WorkBeadIDs) != 0 {
+			return fmt.Errorf("landing: v2 receipt must use work_records instead of work_bead_ids")
+		}
+		if err := validateWorkRecords(request.WorkRecords); err != nil {
+			return err
+		}
+	} else {
+		if request.ReceiptVersion != "" && request.ReceiptVersion != "1" {
+			return fmt.Errorf("landing: unsupported receipt schema_version %q", request.ReceiptVersion)
+		}
+		if len(request.WorkRecords) != 0 {
+			return fmt.Errorf("landing: v1 receipt must not contain work_records")
+		}
+		if err := validateWorkBeadIDs(request.WorkBeadIDs); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateWorkBeadIDs(workBeadIDs []string) error {
+	if len(workBeadIDs) == 0 {
 		return fmt.Errorf("landing: work_bead_ids must not be empty")
 	}
-	if len(request.WorkBeadIDs) > MaxWorkBeadIDs {
+	if len(workBeadIDs) > MaxWorkBeadIDs {
 		return fmt.Errorf("landing: work_bead_ids exceeds maximum of %d", MaxWorkBeadIDs)
 	}
-	seen := make(map[string]struct{}, len(request.WorkBeadIDs))
-	for index, workID := range request.WorkBeadIDs {
+	seen := make(map[string]struct{}, len(workBeadIDs))
+	for index, workID := range workBeadIDs {
 		if err := validateScalar(fmt.Sprintf("work_bead_ids[%d]", index), workID, maxIDBytes); err != nil {
 			return err
 		}
@@ -244,6 +280,59 @@ func validateRequest(request RecordRequest) error {
 		seen[workID] = struct{}{}
 	}
 	return nil
+}
+
+func validateWorkRecords(workRecords []WorkRecordRef) error {
+	if len(workRecords) == 0 {
+		return fmt.Errorf("landing: work_records must not be empty")
+	}
+	if len(workRecords) > MaxWorkRecords {
+		return fmt.Errorf("landing: work_records exceeds maximum of %d", MaxWorkRecords)
+	}
+	seen := make(map[string]struct{}, len(workRecords))
+	for index, record := range workRecords {
+		if err := validateStoreRef(record.StoreRef); err != nil {
+			return fmt.Errorf("landing: work_records[%d].store_ref: %w", index, err)
+		}
+		if err := validateScalar(fmt.Sprintf("work_records[%d].bead_id", index), record.BeadID, maxIDBytes); err != nil {
+			return err
+		}
+		if !workTokenPattern.MatchString(record.BeadID) {
+			return fmt.Errorf("landing: work_records[%d].bead_id is not a safe bead ID", index)
+		}
+		if !gitSHAPattern.MatchString(record.WorkCommit) {
+			return fmt.Errorf("landing: work_records[%d].work_commit must be a lowercase 40-character Git SHA", index)
+		}
+		key := record.StoreRef + "\x00" + record.BeadID
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("landing: duplicate work record %q in %q", record.BeadID, record.StoreRef)
+		}
+		seen[key] = struct{}{}
+	}
+	return nil
+}
+
+func validateStoreRef(storeRef string) error {
+	kind, name, ok := strings.Cut(storeRef, ":")
+	if !ok || (kind != "city" && kind != "rig") || len(name) > maxStoreNameBytes || !workTokenPattern.MatchString(name) {
+		return fmt.Errorf("must be canonical city:<name> or rig:<name>")
+	}
+	return nil
+}
+
+func deliveryWorkRecords(records []WorkRecordRef) []events.DeliveryWorkRecordRef {
+	if len(records) == 0 {
+		return nil
+	}
+	result := make([]events.DeliveryWorkRecordRef, len(records))
+	for index, record := range records {
+		result[index] = events.DeliveryWorkRecordRef{
+			StoreRef:   record.StoreRef,
+			BeadID:     record.BeadID,
+			WorkCommit: record.WorkCommit,
+		}
+	}
+	return result
 }
 
 func validateScalar(name, value string, maxBytes int) error {
@@ -263,18 +352,19 @@ func validateScalar(name, value string, maxBytes int) error {
 }
 
 type canonicalLandingReceipt struct {
-	WorkflowID            string   `json:"workflow_id"`
-	IntegrationAttemptID  string   `json:"integration_attempt_id"`
-	Repository            string   `json:"repository"`
-	Remote                string   `json:"remote"`
-	TargetRef             string   `json:"target_ref"`
-	ExpectedTargetSHA     string   `json:"expected_target_sha"`
-	ApprovedCandidateSHA  string   `json:"approved_candidate_sha"`
-	ObservedLandedSHA     string   `json:"observed_landed_sha"`
-	PublicationMode       string   `json:"publication_mode"`
-	IntegrationResultPath string   `json:"integration_result_path"`
-	IntegrationResultHash string   `json:"integration_result_hash"`
-	WorkBeadIDs           []string `json:"work_bead_ids"`
+	WorkflowID            string                         `json:"workflow_id"`
+	IntegrationAttemptID  string                         `json:"integration_attempt_id"`
+	Repository            string                         `json:"repository"`
+	Remote                string                         `json:"remote"`
+	TargetRef             string                         `json:"target_ref"`
+	ExpectedTargetSHA     string                         `json:"expected_target_sha"`
+	ApprovedCandidateSHA  string                         `json:"approved_candidate_sha"`
+	ObservedLandedSHA     string                         `json:"observed_landed_sha"`
+	PublicationMode       string                         `json:"publication_mode"`
+	IntegrationResultPath string                         `json:"integration_result_path"`
+	IntegrationResultHash string                         `json:"integration_result_hash"`
+	WorkBeadIDs           []string                       `json:"work_bead_ids,omitempty"`
+	WorkRecords           []events.DeliveryWorkRecordRef `json:"work_records,omitempty"`
 }
 
 func deterministicEventID(payload events.DeliveryLandedPayload) (string, error) {
@@ -291,6 +381,7 @@ func deterministicEventID(payload events.DeliveryLandedPayload) (string, error) 
 		IntegrationResultPath: payload.IntegrationResultPath,
 		IntegrationResultHash: payload.IntegrationResultHash,
 		WorkBeadIDs:           payload.WorkBeadIDs,
+		WorkRecords:           payload.WorkRecords,
 	}
 	raw, err := json.Marshal(canonical)
 	if err != nil {

@@ -354,6 +354,12 @@ export const zDeliveryContextRecord = z.object({
     SourceSessionID: z.string()
 });
 
+export const zDeliveryWorkRecordRef = z.object({
+    bead_id: z.string(),
+    store_ref: z.string(),
+    work_commit: z.string()
+});
+
 export const zDeliveryLandedPayload = z.object({
     approved_candidate_sha: z.string(),
     event_id: z.string(),
@@ -367,7 +373,8 @@ export const zDeliveryLandedPayload = z.object({
     repository: z.string(),
     target_ref: z.string(),
     verified_at: z.iso.datetime(),
-    work_bead_ids: z.array(z.string()).max(256).nullable(),
+    work_bead_ids: z.array(z.string()).max(256).nullish(),
+    work_records: z.array(zDeliveryWorkRecordRef).max(256).nullish(),
     workflow_id: z.string()
 });
 

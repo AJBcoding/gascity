@@ -1658,15 +1658,23 @@ type DeliveryLandedPayload struct {
 	Remote                string                               `json:"remote"`
 
 	// Repository Credential-free authoritative remote identity.
-	Repository  string    `json:"repository"`
-	TargetRef   string    `json:"target_ref"`
-	VerifiedAt  time.Time `json:"verified_at"`
-	WorkBeadIds *[]string `json:"work_bead_ids"`
-	WorkflowId  string    `json:"workflow_id"`
+	Repository  string                   `json:"repository"`
+	TargetRef   string                   `json:"target_ref"`
+	VerifiedAt  time.Time                `json:"verified_at"`
+	WorkBeadIds *[]string                `json:"work_bead_ids,omitempty"`
+	WorkRecords *[]DeliveryWorkRecordRef `json:"work_records,omitempty"`
+	WorkflowId  string                   `json:"workflow_id"`
 }
 
 // DeliveryLandedPayloadPublicationMode defines model for DeliveryLandedPayload.PublicationMode.
 type DeliveryLandedPayloadPublicationMode string
+
+// DeliveryWorkRecordRef defines model for DeliveryWorkRecordRef.
+type DeliveryWorkRecordRef struct {
+	BeadId     string `json:"bead_id"`
+	StoreRef   string `json:"store_ref"`
+	WorkCommit string `json:"work_commit"`
+}
 
 // Dep defines model for Dep.
 type Dep struct {

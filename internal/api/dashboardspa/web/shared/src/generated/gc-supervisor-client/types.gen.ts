@@ -811,8 +811,15 @@ export type DeliveryLandedPayload = {
     repository: string;
     target_ref: string;
     verified_at: string;
-    work_bead_ids: Array<string> | null;
+    work_bead_ids?: Array<string> | null;
+    work_records?: Array<DeliveryWorkRecordRef> | null;
     workflow_id: string;
+};
+
+export type DeliveryWorkRecordRef = {
+    bead_id: string;
+    store_ref: string;
+    work_commit: string;
 };
 
 export type Dep = {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -140,6 +141,71 @@ func TestRecordRejectsMalformedOrOversizedReceiptBeforeObservation(t *testing.T)
 			}
 			if journal.records != 0 {
 				t.Fatalf("journal records = %d, want 0", journal.records)
+			}
+		})
+	}
+}
+
+func TestRecordRejectsMalformedV2WorkRecordsBeforeObservation(t *testing.T) {
+	tooMany := make([]WorkRecordRef, MaxWorkRecords+1)
+	for index := range tooMany {
+		tooMany[index] = WorkRecordRef{
+			StoreRef:   "rig:alpha",
+			BeadID:     fmt.Sprintf("gc-%d", index),
+			WorkCommit: shaA,
+		}
+	}
+	tests := []struct {
+		name   string
+		mutate func(*RecordRequest)
+	}{
+		{name: "unsupported version", mutate: func(r *RecordRequest) { r.ReceiptVersion = "3" }},
+		{name: "v1 with work records", mutate: func(r *RecordRequest) {
+			r.WorkRecords = []WorkRecordRef{{StoreRef: "rig:alpha", BeadID: "gc-a", WorkCommit: shaA}}
+		}},
+		{name: "v2 empty", mutate: func(r *RecordRequest) {
+			r.ReceiptVersion, r.WorkBeadIDs = "2", nil
+		}},
+		{name: "v2 mixed legacy ids", mutate: func(r *RecordRequest) {
+			r.ReceiptVersion = "2"
+			r.WorkRecords = []WorkRecordRef{{StoreRef: "rig:alpha", BeadID: "gc-a", WorkCommit: shaA}}
+		}},
+		{name: "unsafe store ref", mutate: func(r *RecordRequest) {
+			r.ReceiptVersion, r.WorkBeadIDs = "2", nil
+			r.WorkRecords = []WorkRecordRef{{StoreRef: "class:graph", BeadID: "gc-a", WorkCommit: shaA}}
+		}},
+		{name: "unsafe bead id", mutate: func(r *RecordRequest) {
+			r.ReceiptVersion, r.WorkBeadIDs = "2", nil
+			r.WorkRecords = []WorkRecordRef{{StoreRef: "rig:alpha", BeadID: "../gc-a", WorkCommit: shaA}}
+		}},
+		{name: "malformed work commit", mutate: func(r *RecordRequest) {
+			r.ReceiptVersion, r.WorkBeadIDs = "2", nil
+			r.WorkRecords = []WorkRecordRef{{StoreRef: "rig:alpha", BeadID: "gc-a", WorkCommit: "ABC"}}
+		}},
+		{name: "duplicate scoped record", mutate: func(r *RecordRequest) {
+			r.ReceiptVersion, r.WorkBeadIDs = "2", nil
+			r.WorkRecords = []WorkRecordRef{
+				{StoreRef: "rig:alpha", BeadID: "gc-a", WorkCommit: shaA},
+				{StoreRef: "rig:alpha", BeadID: "gc-a", WorkCommit: shaB},
+			}
+		}},
+		{name: "too many records", mutate: func(r *RecordRequest) {
+			r.ReceiptVersion, r.WorkBeadIDs, r.WorkRecords = "2", nil, tooMany
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := validRequest(t)
+			tt.mutate(&request)
+			journal := &fakeJournal{}
+			service, observer := serviceFor(request, journal)
+
+			if _, err := service.Record(context.Background(), request); err == nil {
+				t.Fatal("Record error = nil")
+			}
+			if observer.calls != 0 || journal.records != 0 {
+				t.Fatalf("observer calls=%d journal records=%d, want 0", observer.calls, journal.records)
 			}
 		})
 	}
@@ -300,6 +366,85 @@ func TestRecordEventIDIsStableAcrossActorAndClockChanges(t *testing.T) {
 	}
 	if !strings.HasPrefix(first.EventID, "gcl-") || len(first.EventID) != len("gcl-")+64 {
 		t.Fatalf("event ID = %q", first.EventID)
+	}
+}
+
+func TestLegacyEventIDRemainsByteCompatible(t *testing.T) {
+	payload := events.DeliveryLandedPayload{
+		WorkflowID:            "build-1",
+		IntegrationAttemptID:  "attempt-1",
+		Repository:            "https://example.invalid/acme/repo.git",
+		Remote:                "origin",
+		TargetRef:             "refs/heads/main",
+		ExpectedTargetSHA:     shaA,
+		ApprovedCandidateSHA:  shaB,
+		ObservedLandedSHA:     shaB,
+		PublicationMode:       "direct",
+		IntegrationResultPath: "/tmp/integration-result.md",
+		IntegrationResultHash: "sha256:" + strings.Repeat("c", 64),
+		WorkBeadIDs:           []string{"gc-a", "gc-b"},
+	}
+
+	eventID, err := deterministicEventID(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const legacyEventID = "gcl-03694c23846c8937619bd983d68413ba911d4f1db1457fed825f3f33d6656ea2"
+	if eventID != legacyEventID {
+		t.Fatalf("legacy event ID = %q, want %q", eventID, legacyEventID)
+	}
+}
+
+func TestRecordV2EventIdentityBindsStoreScopedWorkRecords(t *testing.T) {
+	request := validRequest(t)
+	request.ReceiptVersion = "2"
+	request.WorkBeadIDs = nil
+	request.WorkRecords = []WorkRecordRef{
+		{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: shaA},
+		{StoreRef: "rig:beta", BeadID: "gc-same", WorkCommit: shaC},
+	}
+	journal := &fakeJournal{}
+	service, _ := serviceFor(request, journal)
+
+	baseline, err := service.Record(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(journal.events) != 1 {
+		t.Fatalf("events = %d, want 1", len(journal.events))
+	}
+	decoded, registered, err := events.DecodePayload(journal.events[0].Type, journal.events[0].Payload)
+	if err != nil || !registered {
+		t.Fatalf("DecodePayload registered=%v err=%v", registered, err)
+	}
+	payload := decoded.(events.DeliveryLandedPayload)
+	if len(payload.WorkRecords) != 2 || payload.WorkRecords[0].StoreRef != "rig:alpha" ||
+		payload.WorkRecords[1].StoreRef != "rig:beta" || payload.WorkRecords[1].WorkCommit != shaC {
+		t.Fatalf("work records = %#v", payload.WorkRecords)
+	}
+
+	changedStore := request
+	changedStore.WorkRecords = append([]WorkRecordRef(nil), request.WorkRecords...)
+	changedStore.WorkRecords[1].StoreRef = "rig:gamma"
+	changedStoreService, _ := serviceFor(changedStore, &fakeJournal{})
+	storeResult, err := changedStoreService.Record(context.Background(), changedStore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if storeResult.EventID == baseline.EventID {
+		t.Fatal("changing a work-record store ref did not change the event ID")
+	}
+
+	changedCommit := request
+	changedCommit.WorkRecords = append([]WorkRecordRef(nil), request.WorkRecords...)
+	changedCommit.WorkRecords[1].WorkCommit = shaB
+	changedCommitService, _ := serviceFor(changedCommit, &fakeJournal{})
+	commitResult, err := changedCommitService.Record(context.Background(), changedCommit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if commitResult.EventID == baseline.EventID {
+		t.Fatal("changing a work-record source commit did not change the event ID")
 	}
 }
 

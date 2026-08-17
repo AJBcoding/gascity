@@ -32,19 +32,27 @@ func (o *landingCLIObserver) Observe(_ context.Context, _, _, _ string) (landing
 }
 
 type landingCLIReceipt struct {
-	WorkflowID            string   `json:"workflow_id"`
-	IntegrationAttemptID  string   `json:"integration_attempt_id"`
-	RepositoryPath        string   `json:"repository_path"`
-	Repository            string   `json:"repository"`
-	Remote                string   `json:"remote"`
-	TargetRef             string   `json:"target_ref"`
-	ExpectedTargetSHA     string   `json:"expected_target_sha"`
-	ApprovedCandidateSHA  string   `json:"approved_candidate_sha"`
-	ExpectedLandedSHA     string   `json:"expected_landed_sha"`
-	PublicationMode       string   `json:"publication_mode"`
-	IntegrationResultPath string   `json:"integration_result_path"`
-	IntegrationResultHash string   `json:"integration_result_hash"`
-	WorkBeadIDs           []string `json:"work_bead_ids"`
+	SchemaVersion         string                 `json:"schema_version,omitempty"`
+	WorkflowID            string                 `json:"workflow_id"`
+	IntegrationAttemptID  string                 `json:"integration_attempt_id"`
+	RepositoryPath        string                 `json:"repository_path"`
+	Repository            string                 `json:"repository"`
+	Remote                string                 `json:"remote"`
+	TargetRef             string                 `json:"target_ref"`
+	ExpectedTargetSHA     string                 `json:"expected_target_sha"`
+	ApprovedCandidateSHA  string                 `json:"approved_candidate_sha"`
+	ExpectedLandedSHA     string                 `json:"expected_landed_sha"`
+	PublicationMode       string                 `json:"publication_mode"`
+	IntegrationResultPath string                 `json:"integration_result_path"`
+	IntegrationResultHash string                 `json:"integration_result_hash"`
+	WorkBeadIDs           []string               `json:"work_bead_ids,omitempty"`
+	WorkRecords           []landingCLIWorkRecord `json:"work_records,omitempty"`
+}
+
+type landingCLIWorkRecord struct {
+	StoreRef   string `json:"store_ref"`
+	BeadID     string `json:"bead_id"`
+	WorkCommit string `json:"work_commit"`
 }
 
 func writeLandingCLIReceipt(t *testing.T) (string, landingCLIReceipt) {
@@ -124,6 +132,51 @@ func TestLandingRecordCLIRecordsVerifiedReceiptAndPrintsTypedJSON(t *testing.T) 
 	}
 	if listed[0].Actor != "landing-test-actor" {
 		t.Fatalf("event actor = %q", listed[0].Actor)
+	}
+}
+
+func TestLandingRecordCLIRecordsV2StoreScopedWorkRecords(t *testing.T) {
+	path, receipt := writeLandingCLIReceipt(t)
+	receipt.SchemaVersion = "2"
+	receipt.WorkBeadIDs = nil
+	receipt.WorkRecords = []landingCLIWorkRecord{
+		{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: landingCLIShaA},
+		{StoreRef: "rig:beta", BeadID: "gc-same", WorkCommit: landingCLIShaC},
+	}
+	raw, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	provider := events.NewFake()
+	observer := &landingCLIObserver{observation: landing.RemoteObservation{
+		Repository: receipt.Repository,
+		SHA:        receipt.ExpectedLandedSHA,
+	}}
+	installLandingCLIDependencies(t, provider, observer)
+
+	stdout, stderr, err := runLandingCLI(t, "landing", "record", "--receipt", path, "--json")
+	if err != nil {
+		t.Fatalf("Execute: %v, stderr=%q", err, stderr)
+	}
+	var result landingRecordJSONResult
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := provider.List(events.Filter{Type: events.DeliveryLanded, Subject: result.EventID})
+	if err != nil || len(listed) != 1 {
+		t.Fatalf("events=%d err=%v", len(listed), err)
+	}
+	decoded, registered, err := events.DecodePayload(listed[0].Type, listed[0].Payload)
+	if err != nil || !registered {
+		t.Fatalf("DecodePayload registered=%v err=%v", registered, err)
+	}
+	payload := decoded.(events.DeliveryLandedPayload)
+	if len(payload.WorkRecords) != 2 || payload.WorkRecords[0].StoreRef != "rig:alpha" ||
+		payload.WorkRecords[1].StoreRef != "rig:beta" || payload.WorkRecords[1].BeadID != "gc-same" {
+		t.Fatalf("work records = %#v", payload.WorkRecords)
 	}
 }
 

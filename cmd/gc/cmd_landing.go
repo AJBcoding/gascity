@@ -21,19 +21,27 @@ var (
 )
 
 type landingReceiptJSON struct {
-	WorkflowID            string   `json:"workflow_id"`
-	IntegrationAttemptID  string   `json:"integration_attempt_id"`
-	RepositoryPath        string   `json:"repository_path"`
-	Repository            string   `json:"repository"`
-	Remote                string   `json:"remote"`
-	TargetRef             string   `json:"target_ref"`
-	ExpectedTargetSHA     string   `json:"expected_target_sha"`
-	ApprovedCandidateSHA  string   `json:"approved_candidate_sha"`
-	ExpectedLandedSHA     string   `json:"expected_landed_sha"`
-	PublicationMode       string   `json:"publication_mode"`
-	IntegrationResultPath string   `json:"integration_result_path"`
-	IntegrationResultHash string   `json:"integration_result_hash"`
-	WorkBeadIDs           []string `json:"work_bead_ids"`
+	SchemaVersion         string                         `json:"schema_version,omitempty"`
+	WorkflowID            string                         `json:"workflow_id"`
+	IntegrationAttemptID  string                         `json:"integration_attempt_id"`
+	RepositoryPath        string                         `json:"repository_path"`
+	Repository            string                         `json:"repository"`
+	Remote                string                         `json:"remote"`
+	TargetRef             string                         `json:"target_ref"`
+	ExpectedTargetSHA     string                         `json:"expected_target_sha"`
+	ApprovedCandidateSHA  string                         `json:"approved_candidate_sha"`
+	ExpectedLandedSHA     string                         `json:"expected_landed_sha"`
+	PublicationMode       string                         `json:"publication_mode"`
+	IntegrationResultPath string                         `json:"integration_result_path"`
+	IntegrationResultHash string                         `json:"integration_result_hash"`
+	WorkBeadIDs           []string                       `json:"work_bead_ids,omitempty"`
+	WorkRecords           []landingReceiptWorkRecordJSON `json:"work_records,omitempty"`
+}
+
+type landingReceiptWorkRecordJSON struct {
+	StoreRef   string `json:"store_ref"`
+	BeadID     string `json:"bead_id"`
+	WorkCommit string `json:"work_commit"`
 }
 
 type landingRecordJSONResult struct {
@@ -87,6 +95,7 @@ func newLandingRecordCmd(stdout, stderr io.Writer) *cobra.Command {
 				Observer: landingNewObserver(),
 				Journal:  provider,
 			}).Record(command.Context(), landing.RecordRequest{
+				ReceiptVersion:        receipt.SchemaVersion,
 				WorkflowID:            receipt.WorkflowID,
 				IntegrationAttemptID:  receipt.IntegrationAttemptID,
 				RepositoryPath:        receipt.RepositoryPath,
@@ -100,6 +109,7 @@ func newLandingRecordCmd(stdout, stderr io.Writer) *cobra.Command {
 				IntegrationResultPath: receipt.IntegrationResultPath,
 				IntegrationResultHash: receipt.IntegrationResultHash,
 				WorkBeadIDs:           receipt.WorkBeadIDs,
+				WorkRecords:           landingReceiptWorkRecords(receipt.WorkRecords),
 				Actor:                 eventActor(),
 			})
 			if err != nil {
@@ -127,6 +137,21 @@ func newLandingRecordCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.Flags().StringVar(&receiptPath, "receipt", "", "absolute path to a landing receipt JSON file")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSON summary")
 	return cmd
+}
+
+func landingReceiptWorkRecords(records []landingReceiptWorkRecordJSON) []landing.WorkRecordRef {
+	if len(records) == 0 {
+		return nil
+	}
+	result := make([]landing.WorkRecordRef, len(records))
+	for index, record := range records {
+		result[index] = landing.WorkRecordRef{
+			StoreRef:   record.StoreRef,
+			BeadID:     record.BeadID,
+			WorkCommit: record.WorkCommit,
+		}
+	}
+	return result
 }
 
 func readLandingReceipt(path string) (landingReceiptJSON, error) {

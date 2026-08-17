@@ -2240,6 +2240,16 @@
               "null"
             ]
           },
+          "work_records": {
+            "items": {
+              "$ref": "#/components/schemas/DeliveryWorkRecordRef"
+            },
+            "maxItems": 256,
+            "type": [
+              "array",
+              "null"
+            ]
+          },
           "workflow_id": {
             "type": "string"
           }
@@ -2257,8 +2267,27 @@
           "publication_mode",
           "integration_result_path",
           "integration_result_hash",
-          "work_bead_ids",
           "verified_at"
+        ],
+        "type": "object"
+      },
+      "DeliveryWorkRecordRef": {
+        "additionalProperties": false,
+        "properties": {
+          "bead_id": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "work_commit": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "store_ref",
+          "bead_id",
+          "work_commit"
         ],
         "type": "object"
       },
