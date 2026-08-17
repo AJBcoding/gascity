@@ -35,6 +35,22 @@ type staleOnFirstUpdateStore struct {
 	raced  bool
 }
 
+type inFlightEvidenceReader struct {
+	events        []events.Event
+	listCalls     int
+	inFlightCalls int
+}
+
+func (r *inFlightEvidenceReader) List(events.Filter) ([]events.Event, error) {
+	r.listCalls++
+	return nil, nil
+}
+
+func (r *inFlightEvidenceReader) ListInFlight(filter events.Filter) ([]events.Event, error) {
+	r.inFlightCalls++
+	return events.ApplyFilter(r.events, filter), nil
+}
+
 func (s *staleOnFirstUpdateStore) UpdateIfMatch(id string, revision int64, opts beads.UpdateOpts) error {
 	if !s.raced {
 		s.raced = true
@@ -389,17 +405,152 @@ func TestValidateLandingEvidence(t *testing.T) {
 	}
 }
 
+func TestValidateLandingEvidenceRejectsNonCanonicalMetadata(t *testing.T) {
+	baseMetadata := beads.StringMap{
+		"gc.work_outcome":           "shipped",
+		"gc.work_commit":            testWorkCommitA,
+		"gc.delivery_state":         "landed",
+		"gc.delivery_event_id":      testLandingEventID,
+		"gc.delivery_source_commit": testWorkCommitA,
+		"gc.delivery_landed_sha":    testLandedSHA,
+	}
+	tests := []struct {
+		name       string
+		mutate     func(beads.StringMap)
+		record     events.DeliveryWorkRecordRef
+		landedSHA  string
+		wantDetail string
+	}{
+		{
+			name: "uppercase work commit",
+			mutate: func(metadata beads.StringMap) {
+				metadata["gc.work_commit"] = strings.ToUpper(strings.Repeat("a", 40))
+				metadata["gc.delivery_source_commit"] = strings.ToUpper(strings.Repeat("a", 40))
+			},
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: strings.ToUpper(strings.Repeat("a", 40))},
+			landedSHA:  testLandedSHA,
+			wantDetail: "gc.work_commit",
+		},
+		{
+			name: "non-hex work commit",
+			mutate: func(metadata beads.StringMap) {
+				metadata["gc.work_commit"] = strings.Repeat("g", 40)
+				metadata["gc.delivery_source_commit"] = strings.Repeat("g", 40)
+			},
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: strings.Repeat("g", 40)},
+			landedSHA:  testLandedSHA,
+			wantDetail: "gc.work_commit",
+		},
+		{
+			name: "padded work commit",
+			mutate: func(metadata beads.StringMap) {
+				metadata["gc.work_commit"] = " " + testWorkCommitA + " "
+				metadata["gc.delivery_source_commit"] = " " + testWorkCommitA + " "
+			},
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA},
+			landedSHA:  testLandedSHA,
+			wantDetail: "gc.work_commit",
+		},
+		{
+			name:       "padded delivery state",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_state"] = " landed " },
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA},
+			landedSHA:  testLandedSHA,
+			wantDetail: "gc.delivery_state",
+		},
+		{
+			name:       "padded event ID",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_event_id"] = " " + testLandingEventID + " " },
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA},
+			landedSHA:  testLandedSHA,
+			wantDetail: "gc.delivery_event_id",
+		},
+		{
+			name:       "padded source commit",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_source_commit"] = " " + testWorkCommitA + " " },
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA},
+			landedSHA:  testLandedSHA,
+			wantDetail: "gc.delivery_source_commit",
+		},
+		{
+			name: "uppercase landed SHA",
+			mutate: func(metadata beads.StringMap) {
+				metadata["gc.delivery_landed_sha"] = strings.ToUpper(strings.Repeat("a", 40))
+			},
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA},
+			landedSHA:  strings.ToUpper(strings.Repeat("a", 40)),
+			wantDetail: "gc.delivery_landed_sha",
+		},
+		{
+			name:       "non-hex landed SHA",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_landed_sha"] = strings.Repeat("g", 40) },
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA},
+			landedSHA:  strings.Repeat("g", 40),
+			wantDetail: "gc.delivery_landed_sha",
+		},
+		{
+			name:       "padded landed SHA",
+			mutate:     func(metadata beads.StringMap) { metadata["gc.delivery_landed_sha"] = " " + testLandedSHA + " " },
+			record:     events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA},
+			landedSHA:  testLandedSHA,
+			wantDetail: "gc.delivery_landed_sha",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := make(beads.StringMap, len(baseMetadata))
+			for key, value := range baseMetadata {
+				metadata[key] = value
+			}
+			tc.mutate(metadata)
+			journal := landingEvidenceJournalWith(t, testLandingEventID, tc.landedSHA, tc.record)
+			violations := ValidateLandingEvidence(journal, "rig:alpha", beads.Bead{ID: "gc-same", Metadata: metadata})
+			if len(violations) != 1 || !strings.Contains(violations[0], tc.wantDetail) {
+				t.Fatalf("violations = %v, want detail %q", violations, tc.wantDetail)
+			}
+		})
+	}
+}
+
+func TestValidateLandingEvidenceReadsInFlightLandingEvent(t *testing.T) {
+	metadata := beads.StringMap{
+		"gc.work_outcome":           "shipped",
+		"gc.work_commit":            testWorkCommitA,
+		"gc.delivery_state":         "landed",
+		"gc.delivery_event_id":      testLandingEventID,
+		"gc.delivery_source_commit": testWorkCommitA,
+		"gc.delivery_landed_sha":    testLandedSHA,
+	}
+	journal := landingEvidenceJournal(t, events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA})
+	stored, err := journal.List(events.Filter{Type: events.DeliveryLanded, Subject: testLandingEventID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := &inFlightEvidenceReader{events: stored}
+	violations := ValidateLandingEvidence(reader, "rig:alpha", beads.Bead{ID: "gc-same", Metadata: metadata})
+	if len(violations) != 0 {
+		t.Fatalf("violations = %v, want none", violations)
+	}
+	if reader.listCalls != 0 || reader.inFlightCalls != 1 {
+		t.Fatalf("reader calls = List:%d ListInFlight:%d, want List:0 ListInFlight:1", reader.listCalls, reader.inFlightCalls)
+	}
+}
+
 func landingEvidenceJournal(t *testing.T, record events.DeliveryWorkRecordRef) *events.Fake {
+	return landingEvidenceJournalWith(t, testLandingEventID, testLandedSHA, record)
+}
+
+func landingEvidenceJournalWith(t *testing.T, eventID, observedLandedSHA string, record events.DeliveryWorkRecordRef) *events.Fake {
 	t.Helper()
 	payload, err := json.Marshal(events.DeliveryLandedPayload{
-		EventID:           testLandingEventID,
-		ObservedLandedSHA: testLandedSHA,
+		EventID:           eventID,
+		ObservedLandedSHA: observedLandedSHA,
 		WorkRecords:       []events.DeliveryWorkRecordRef{record},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	journal := events.NewFake()
-	journal.Record(events.Event{Type: events.DeliveryLanded, Subject: testLandingEventID, Payload: payload})
+	journal.Record(events.Event{Type: events.DeliveryLanded, Subject: eventID, Payload: payload})
 	return journal
 }

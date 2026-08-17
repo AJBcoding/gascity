@@ -33,30 +33,33 @@ type EvidenceReader interface {
 	List(filter events.Filter) ([]events.Event, error)
 }
 
-var deliveryEventIDPattern = regexp.MustCompile(`^gcl-[0-9a-f]{64}$`)
+var (
+	deliveryEventIDPattern = regexp.MustCompile(`^gcl-[0-9a-f]{64}$`)
+	gitSHAPattern          = regexp.MustCompile(`^[0-9a-f]{40}$`)
+)
 
 // ValidateLandingEvidence verifies that a bead's landed delivery metadata is
 // corroborated by exactly one durable delivery.landed event. storeRef must be
 // the caller's already-canonical physical store identity.
 func ValidateLandingEvidence(reader EvidenceReader, storeRef string, bead beads.Bead) []string {
 	metadata := bead.Metadata
-	workCommit := strings.TrimSpace(metadata[beadmeta.WorkCommitMetadataKey])
-	if len(workCommit) != 40 {
-		return []string{fmt.Sprintf("%s=shipped requires a 40-character %s", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey)}
+	workCommit := metadata[beadmeta.WorkCommitMetadataKey]
+	if !gitSHAPattern.MatchString(workCommit) {
+		return []string{fmt.Sprintf("%s=shipped requires %s to be a lowercase 40-character Git SHA", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey)}
 	}
-	if strings.TrimSpace(metadata[beadmeta.DeliveryStateMetadataKey]) != "landed" {
+	if metadata[beadmeta.DeliveryStateMetadataKey] != "landed" {
 		return []string{fmt.Sprintf("%s=shipped requires %s=landed", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryStateMetadataKey)}
 	}
-	eventID := strings.TrimSpace(metadata[beadmeta.DeliveryEventIDMetadataKey])
+	eventID := metadata[beadmeta.DeliveryEventIDMetadataKey]
 	if !deliveryEventIDPattern.MatchString(eventID) {
 		return []string{fmt.Sprintf("%s=shipped requires %s=gcl-<64 lowercase hex>", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryEventIDMetadataKey)}
 	}
-	if strings.TrimSpace(metadata[beadmeta.DeliverySourceCommitMetadataKey]) != workCommit {
+	if metadata[beadmeta.DeliverySourceCommitMetadataKey] != workCommit {
 		return []string{fmt.Sprintf("%s must equal %s", beadmeta.DeliverySourceCommitMetadataKey, beadmeta.WorkCommitMetadataKey)}
 	}
-	landedSHA := strings.TrimSpace(metadata[beadmeta.DeliveryLandedSHAMetadataKey])
-	if len(landedSHA) != 40 {
-		return []string{fmt.Sprintf("%s=shipped requires a 40-character %s", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryLandedSHAMetadataKey)}
+	landedSHA := metadata[beadmeta.DeliveryLandedSHAMetadataKey]
+	if !gitSHAPattern.MatchString(landedSHA) {
+		return []string{fmt.Sprintf("%s=shipped requires %s to be a lowercase 40-character Git SHA", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryLandedSHAMetadataKey)}
 	}
 	if strings.TrimSpace(storeRef) == "" {
 		return []string{"landing evidence requires an explicit canonical store ref"}
@@ -64,7 +67,7 @@ func ValidateLandingEvidence(reader EvidenceReader, storeRef string, bead beads.
 	if reader == nil {
 		return []string{"landing event is unreadable: event journal is unavailable"}
 	}
-	matches, err := reader.List(events.Filter{Type: events.DeliveryLanded, Subject: eventID})
+	matches, err := listLandingEvidence(reader, events.Filter{Type: events.DeliveryLanded, Subject: eventID})
 	if err != nil {
 		return []string{fmt.Sprintf("landing event %q is unreadable: %v", eventID, err)}
 	}
@@ -91,6 +94,13 @@ func ValidateLandingEvidence(reader EvidenceReader, storeRef string, bead beads.
 		}
 	}
 	return []string{fmt.Sprintf("landing event %q is not bound to store %q bead %q commit %s", eventID, storeRef, bead.ID, workCommit)}
+}
+
+func listLandingEvidence(reader EvidenceReader, filter events.Filter) ([]events.Event, error) {
+	if inFlight, ok := reader.(events.InFlightProvider); ok {
+		return inFlight.ListInFlight(filter)
+	}
+	return reader.List(filter)
 }
 
 // Conflict is a deterministic refusal to stamp one bound source record.
