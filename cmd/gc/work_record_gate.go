@@ -119,7 +119,7 @@ func isWorkRecordGatedBead(bead beads.Bead) bool {
 // an ancestor of a branch; it is injected so the rule is unit-testable without
 // a real repo. The caller is responsible for scoping (isWorkRecordGatedBead).
 func validateWorkRecordOnClose(bead beads.Bead, commitReachable func(commit, branch string) bool) []string {
-	outcome := strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey])
+	outcome := bead.Metadata[beadmeta.WorkOutcomeMetadataKey]
 	if outcome == "" {
 		return []string{fmt.Sprintf("missing %s (want one of shipped|no-op|blocked|abandoned)", beadmeta.WorkOutcomeMetadataKey)}
 	}
@@ -327,7 +327,7 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 			violations = validateWorkRecordOnClose(bead, func(commit, branch string) bool {
 				return gitCommitReachableOnBranch(repoDir, commit, branch)
 			})
-			if strings.TrimSpace(bead.Metadata[beadmeta.WorkOutcomeMetadataKey]) == beadmeta.WorkOutcomeShipped {
+			if bead.Metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeShipped {
 				violations = append(violations, workstamp.ValidateLandingEvidence(evidence, storeRef, bead)...)
 			}
 		}

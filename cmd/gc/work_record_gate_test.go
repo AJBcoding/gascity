@@ -82,6 +82,16 @@ func TestValidateWorkRecordOnClose(t *testing.T) {
 			meta:     map[string]string{beadmeta.WorkOutcomeMetadataKey: "done"},
 			wantViol: "invalid",
 		},
+		{
+			name: "whitespace-padded shipped outcome is rejected",
+			meta: map[string]string{
+				beadmeta.WorkOutcomeMetadataKey: " shipped ",
+				beadmeta.WorkCommitMetadataKey:  "abc123",
+				beadmeta.WorkBranchMetadataKey:  "bd-x",
+			},
+			reachable: alwaysReachable,
+			wantViol:  `invalid gc.work_outcome=" shipped "`,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -424,6 +434,55 @@ func TestEvaluateWorkRecordCloseGateAllowsAtomicShippedUpdateWithLandingEvidence
 	}
 	if got := stderr.String(); got != "" {
 		t.Fatalf("valid atomic shipped close warned: %q", got)
+	}
+}
+
+func TestEvaluateWorkRecordCloseGateRejectsAtomicPaddedShippedOutcomeWithLandingEvidence(t *testing.T) {
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.name", "Gas City Test")
+	runGit(t, repoDir, "config", "user.email", "gc-test@test.local")
+	if err := os.WriteFile(filepath.Join(repoDir, "artifact.txt"), []byte("integrated\n"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	runGit(t, repoDir, "add", "artifact.txt")
+	runGit(t, repoDir, "commit", "-m", "test: integrate artifact")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	const eventID = "gcl-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+	landedSHA := strings.Repeat("f", 40)
+	payload, err := json.Marshal(events.DeliveryLandedPayload{
+		EventID:           eventID,
+		ObservedLandedSHA: landedSHA,
+		WorkRecords: []events.DeliveryWorkRecordRef{{
+			StoreRef: "city:test", BeadID: "wr-atomic-padded-shipped", WorkCommit: commit,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := events.NewFake()
+	journal.Record(events.Event{Type: events.DeliveryLanded, Subject: eventID, Payload: payload})
+	store := beads.NewMemStoreFrom(1, []beads.Bead{{
+		ID: "wr-atomic-padded-shipped", Type: "task", Status: "in_progress",
+		Metadata: map[string]string{beadmeta.WorkDirMetadataKey: repoDir},
+	}}, nil)
+	args := []string{
+		"update", "wr-atomic-padded-shipped",
+		"--set-metadata", beadmeta.WorkOutcomeMetadataKey + "= shipped ",
+		"--set-metadata", beadmeta.WorkCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.WorkBranchMetadataKey + "=main",
+		"--set-metadata", beadmeta.DeliveryStateMetadataKey + "=landed",
+		"--set-metadata", beadmeta.DeliveryEventIDMetadataKey + "=" + eventID,
+		"--set-metadata", beadmeta.DeliverySourceCommitMetadataKey + "=" + commit,
+		"--set-metadata", beadmeta.DeliveryLandedSHAMetadataKey + "=" + landedSHA,
+		"--status=closed",
+	}
+	var stderr strings.Builder
+	if block := evaluateWorkRecordCloseGate(args, store, nil, repoDir, "city:test", journal, true, &stderr); !block {
+		t.Fatalf("padded atomic shipped outcome was allowed; stderr=%s", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, `invalid gc.work_outcome=" shipped "`) {
+		t.Fatalf("padded atomic shipped outcome did not report the raw invalid value: %q", got)
 	}
 }
 
