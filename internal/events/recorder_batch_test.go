@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -98,6 +100,89 @@ func TestFileRecorderAppendBatchSurfacesClosedAndLockErrors(t *testing.T) {
 			t.Fatalf("AppendBatch error = %v, want lock error", err)
 		}
 	})
+}
+
+func TestWarnOnlyAcknowledgmentFailsClosedOnFileSyncFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	recorder, err := NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = recorder.Close() })
+	injected := errors.New("injected file sync failure")
+	recorder.syncFileFn = func(*os.File) error {
+		sibling, openErr := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o644)
+		if openErr != nil {
+			t.Errorf("open sibling during sync: %v", openErr)
+			return injected
+		}
+		defer sibling.Close() //nolint:errcheck // test-only probe
+		lockErr := syscall.Flock(int(sibling.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if lockErr == nil {
+			_ = syscall.Flock(int(sibling.Fd()), syscall.LOCK_UN)
+			t.Error("durability barrier ran after the append flock was released")
+		} else if !errors.Is(lockErr, syscall.EWOULDBLOCK) && !errors.Is(lockErr, syscall.EAGAIN) {
+			t.Errorf("probe append flock during sync: %v", lockErr)
+		}
+		return injected
+	}
+
+	_, err = RecordWorkCloseWarnOnlyUse(recorder, WorkCloseWarnOnlyUsedPayload{
+		Route: "gc.bd", StoreRef: "city:test", BeadID: "ga-sync-fail",
+	})
+	if !errors.Is(err, injected) {
+		t.Fatalf("warn-only acknowledgment error = %v, want injected sync failure", err)
+	}
+}
+
+func TestFileRecorderAppendBatchSyncsParentForNewJournal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events.jsonl")
+	recorder, err := NewFileRecorder(path, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = recorder.Close() })
+	injected := errors.New("injected directory sync failure")
+	var syncDirCalls int
+	var barriers []string
+	recorder.syncFileFn = func(*os.File) error {
+		barriers = append(barriers, "file")
+		return nil
+	}
+	recorder.syncDirFn = func(string) error {
+		syncDirCalls++
+		barriers = append(barriers, "directory")
+		return injected
+	}
+
+	err = recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}})
+	if !errors.Is(err, injected) {
+		t.Fatalf("first AppendBatch error = %v, want directory sync failure", err)
+	}
+	if syncDirCalls != 1 {
+		t.Fatalf("directory sync calls = %d, want 1", syncDirCalls)
+	}
+	if got := strings.Join(barriers, ","); got != "file,directory" {
+		t.Fatalf("first-creation barriers = %q, want file,directory", got)
+	}
+
+	recorder.syncDirFn = func(string) error {
+		syncDirCalls++
+		barriers = append(barriers, "directory")
+		return nil
+	}
+	if err := recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}}); err != nil {
+		t.Fatalf("retry AppendBatch: %v", err)
+	}
+	if err := recorder.AppendBatch([]Event{{Type: ExecutionStepDefined}}); err != nil {
+		t.Fatalf("settled AppendBatch: %v", err)
+	}
+	if syncDirCalls != 2 {
+		t.Fatalf("directory sync calls = %d, want one failed and one successful barrier", syncDirCalls)
+	}
+	if got := strings.Join(barriers, ","); got != "file,directory,file,directory,file" {
+		t.Fatalf("barrier sequence = %q, want directory sync retired after its first success", got)
+	}
 }
 
 func TestWriteBatchDetectsShortWriteInOneCall(t *testing.T) {
