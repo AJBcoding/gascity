@@ -388,6 +388,28 @@ Allowed actions are:
 
 Terminal actions do not execute the proposed operation.
 
+### Operator-owned single-writer contract
+
+A bead labeled `decision-request` is operator-owned lifecycle state. Beaddash
+may mutate it on behalf of the current operator, and a human operator may use
+equivalent direct `bd` commands while Beaddash is stopped. Agents and other
+automation may read the decision and add comments, but they must not change its
+status, lifecycle labels, assignee, or `operator_decision` metadata. Source
+beads remain ordinary collaborative records.
+
+Before a direct lifecycle edit, the operator stops every Beaddash process that
+can reach the project. After the edit, the operator restarts Beaddash; its
+startup refresh loads the direct change as the new observed state. Concurrent
+raw `bd` lifecycle mutation while Beaddash is running is outside the supported
+contract.
+
+Observed timestamps, in-process serialization, operation IDs, and canonical
+post-write verification remain defense in depth for stale tabs, duplicate
+submissions, and multiple Beaddash actions. They are not cross-process
+compare-and-set. If post-write verification does not match the requested
+operation, Beaddash reports a visible conflict, stops follow-up delivery, and
+does not retry or overwrite again.
+
 ### Idempotent terminal write
 
 The browser submits a decision ID, project identity, desired outcome, comment,
@@ -416,10 +438,10 @@ The canonical outcome is never rolled back because a follow-up step failed.
 The failed step remains visible with its last error and is retried by the
 reconciler. A repeated operation ID returns the previously recorded result.
 
-The service re-reads after writes because external CLI writers can still race
-between the precondition check and the command. A detected conflicting result
-is surfaced for manual review; the service never overwrites a different
-terminal outcome.
+The service re-reads after writes to verify the canonical result and to detect
+violations of the single-writer convention. A mismatch is surfaced for manual
+review and stops delivery. Beaddash does not claim that this re-read prevents a
+noncompliant concurrent CLI writer from overwriting state.
 
 ## Automatic obsolescence
 
@@ -572,7 +594,10 @@ Use temporary city and project directories to cover:
 - Restart recovery from pending delivery metadata
 - Duplicate operation submission
 - Exact duplicate groups and partial member failure
-- External mutation between browser refresh and write
+- A stale browser submission after an observed direct operator mutation
+- Restart and refresh after a direct operator mutation made while Beaddash was
+  stopped
+- A post-write verification mismatch that becomes visible and stops delivery
 - Independently closed sources and gates
 - One unreachable project among healthy projects
 - Unsupported writer fallback to read-only
@@ -585,6 +610,7 @@ Use temporary city and project directories to cover:
 - Filter and sorting behavior
 - Deferred section placement and restore
 - Inbox read state and promotion
+- Visible operator-ownership and stop-before-direct-write guidance
 - Keyboard-only operation
 - Screen-reader names, focus movement, and non-color status cues
 
@@ -612,7 +638,9 @@ test projects:
    stops and the requesting agent is absent.
 5. A linked gate is never released before the outcome is durable.
 6. Failed follow-up delivery remains visible and converges after retry.
-7. Duplicate submissions cannot create conflicting outcomes.
+7. Within the operator-owned single-writer contract, stale or duplicate
+   Beaddash submissions cannot create conflicting outcomes; a post-write
+   verification mismatch is visible and stops delivery.
 8. An unhealthy project cannot block healthy projects.
 9. Legacy human beads, bare human gates, and inbox messages can be promoted to
    structured decisions.
