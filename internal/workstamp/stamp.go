@@ -47,8 +47,8 @@ func ValidateLandingEvidence(reader EvidenceReader, storeRef string, bead beads.
 	if !gitSHAPattern.MatchString(workCommit) {
 		return []string{fmt.Sprintf("%s=shipped requires %s to be a lowercase 40-character Git SHA", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey)}
 	}
-	if metadata[beadmeta.DeliveryStateMetadataKey] != "landed" {
-		return []string{fmt.Sprintf("%s=shipped requires %s=landed", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryStateMetadataKey)}
+	if metadata[beadmeta.DeliveryStateMetadataKey] != beadmeta.DeliveryStateLanded {
+		return []string{fmt.Sprintf("%s=shipped requires %s=%s", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryStateMetadataKey, beadmeta.DeliveryStateLanded)}
 	}
 	eventID := metadata[beadmeta.DeliveryEventIDMetadataKey]
 	if !deliveryEventIDPattern.MatchString(eventID) {
@@ -174,7 +174,7 @@ func (s Service) Stamp(ctx context.Context, eventID string) (Result, error) {
 			continue
 		}
 		patch := beads.StringMap{
-			beadmeta.DeliveryStateMetadataKey:        "landed",
+			beadmeta.DeliveryStateMetadataKey:        beadmeta.DeliveryStateLanded,
 			beadmeta.DeliveryEventIDMetadataKey:      landing.EventID,
 			beadmeta.DeliveryRepositoryMetadataKey:   landing.Repository,
 			beadmeta.DeliveryTargetRefMetadataKey:    landing.TargetRef,
@@ -194,7 +194,7 @@ func (s Service) Stamp(ctx context.Context, eventID string) (Result, error) {
 			result.AlreadyStamped++
 			continue
 		}
-		if !metadataContains(bead.Metadata, patch) && hasDeliveryMetadata(bead.Metadata) {
+		if !metadataContains(bead.Metadata, patch) && hasConflictingDeliveryMetadata(bead.Metadata, patch) {
 			result.Conflicts = append(result.Conflicts, conflict(record, "delivery_metadata_mismatch", "existing delivery metadata differs from landing evidence"))
 			continue
 		}
@@ -323,6 +323,26 @@ func hasDeliveryMetadata(metadata beads.StringMap) bool {
 		if strings.HasPrefix(key, beadmeta.DeliveryMetadataPrefix) {
 			return true
 		}
+	}
+	return false
+}
+
+// hasConflictingDeliveryMetadata reports whether metadata carries delivery
+// evidence that contradicts the landing patch. The recognized pre-landing
+// lifecycle marker gc.delivery_state=integration_ready is stampable, not
+// conflicting: implementation workflows record it on the still-open source
+// anchor before landing, and stamping overwrites it with the landed state.
+// Every other divergent gc.delivery_* value is evidence from a different
+// landing event and must not be overwritten.
+func hasConflictingDeliveryMetadata(metadata, patch beads.StringMap) bool {
+	for key, value := range metadata {
+		if !strings.HasPrefix(key, beadmeta.DeliveryMetadataPrefix) || value == patch[key] {
+			continue
+		}
+		if key == beadmeta.DeliveryStateMetadataKey && value == beadmeta.DeliveryStateIntegrationReady {
+			continue
+		}
+		return true
 	}
 	return false
 }

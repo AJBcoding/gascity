@@ -80,6 +80,18 @@ const (
 	WorkOutcomeAbandoned = "abandoned"
 )
 
+// Values of DeliveryStateMetadataKey ("gc.delivery_state"), the work-record
+// delivery lifecycle. DeliveryStateIntegrationReady is the recognized
+// pre-landing marker an implementation workflow may record on the still-open
+// source anchor before its work lands; the stamper (internal/workstamp)
+// overwrites it instead of treating it as conflicting evidence from another
+// landing event. DeliveryStateLanded is written only by the stamper together
+// with the full delivery-evidence patch.
+const (
+	DeliveryStateLanded           = "landed"
+	DeliveryStateIntegrationReady = "integration_ready"
+)
+
 // Failure-class vocabulary, shared by FailureClassMetadataKey
 // ("gc.failure_class") and its sibling keys LastFailureClassMetadataKey
 // ("gc.last_failure_class") and ControllerErrorClassMetadataKey

@@ -58,6 +58,8 @@ func TestPinnedOutcomeAndFailureClassValues(t *testing.T) {
 // are distinct.
 func TestPinnedVocabularyValues(t *testing.T) {
 	pinned := map[string]string{
+		DeliveryStateLanded:             "landed",
+		DeliveryStateIntegrationReady:   "integration_ready",
 		FormulaContractGraphV2:          "graph.v2",
 		ScopeRoleBody:                   "body",
 		ScopeRoleMember:                 "member",

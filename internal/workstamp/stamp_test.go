@@ -88,13 +88,18 @@ func (r *mapResolver) Resolve(_ context.Context, storeRef string) (beads.Store, 
 
 func workStore(t *testing.T, workCommit string) *beads.MemStore {
 	t.Helper()
+	return workStoreWithMetadata(t, beads.StringMap{"gc.work_commit": workCommit, "gc.work_base_commit": "base-unchanged"})
+}
+
+func workStoreWithMetadata(t *testing.T, metadata beads.StringMap) *beads.MemStore {
+	t.Helper()
 	store := beads.NewMemStore()
 	store.HonorExplicitIDs = true
 	if _, err := store.Create(beads.Bead{
 		ID:       "gc-same",
 		Title:    "source work",
 		Status:   "in_progress",
-		Metadata: beads.StringMap{"gc.work_commit": workCommit, "gc.work_base_commit": "base-unchanged"},
+		Metadata: metadata,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -294,6 +299,184 @@ func TestStampStaleRevisionRaceLeavesNoFalseLandedMetadata(t *testing.T) {
 	}
 	if alpha.Metadata["concurrent"] != "write" || hasDeliveryMetadata(alpha.Metadata) {
 		t.Fatalf("stale race left false delivery metadata: %#v", alpha.Metadata)
+	}
+}
+
+func TestStampTreatsIntegrationReadyAnchorAsStampable(t *testing.T) {
+	alpha := workStoreWithMetadata(t, beads.StringMap{
+		"gc.work_commit":      testWorkCommitA,
+		"gc.work_base_commit": "base-unchanged",
+		"gc.delivery_state":   "integration_ready",
+	})
+	beta := workStore(t, testWorkCommitB)
+	service := Service{Journal: landingJournal(t), Stores: &mapResolver{stores: map[string]beads.Store{
+		"rig:alpha": alpha,
+		"rig:beta":  beta,
+	}}}
+
+	result, err := service.Stamp(context.Background(), testLandingEventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stamped != 2 || result.AlreadyStamped != 0 || len(result.Conflicts) != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	bead, err := alpha.Get("gc-same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"gc.delivery_state":         "landed",
+		"gc.delivery_event_id":      testLandingEventID,
+		"gc.delivery_repository":    "https://example.invalid/acme/repo.git",
+		"gc.delivery_target_ref":    "refs/heads/main",
+		"gc.delivery_landed_sha":    testLandedSHA,
+		"gc.delivery_verified_at":   "2026-08-16T21:00:00Z",
+		"gc.delivery_source_commit": testWorkCommitA,
+	}
+	for key, value := range want {
+		if bead.Metadata[key] != value {
+			t.Errorf("%s = %q, want %q", key, bead.Metadata[key], value)
+		}
+	}
+	if bead.Metadata["gc.work_commit"] != testWorkCommitA || bead.Metadata["gc.work_base_commit"] != "base-unchanged" {
+		t.Errorf("source provenance changed: %#v", bead.Metadata)
+	}
+	if bead.Status != "open" {
+		t.Errorf("status = %q, want open", bead.Status)
+	}
+}
+
+func TestStampReplayOverIntegrationReadyAnchorIsIdempotent(t *testing.T) {
+	alpha := workStoreWithMetadata(t, beads.StringMap{
+		"gc.work_commit":      testWorkCommitA,
+		"gc.work_base_commit": "base-unchanged",
+		"gc.delivery_state":   "integration_ready",
+	})
+	beta := workStore(t, testWorkCommitB)
+	service := Service{Journal: landingJournal(t), Stores: &mapResolver{stores: map[string]beads.Store{
+		"rig:alpha": alpha,
+		"rig:beta":  beta,
+	}}}
+
+	if _, err := service.Stamp(context.Background(), testLandingEventID); err != nil {
+		t.Fatal(err)
+	}
+	replay, err := service.Stamp(context.Background(), testLandingEventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.Stamped != 0 || replay.AlreadyStamped != 2 || len(replay.Conflicts) != 0 {
+		t.Fatalf("replay result = %#v", replay)
+	}
+	stampedEvents, err := service.Journal.List(events.Filter{Type: events.DeliveryWorkStamped})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stampedEvents) != 2 {
+		t.Fatalf("replay duplicated work-stamped events: %d", len(stampedEvents))
+	}
+}
+
+func TestStampStillConflictsOnDeliveryMetadataFromAnotherEvent(t *testing.T) {
+	for name, metadata := range map[string]beads.StringMap{
+		"different event id": {
+			"gc.work_commit":       testWorkCommitA,
+			"gc.work_base_commit":  "base-unchanged",
+			"gc.delivery_state":    "landed",
+			"gc.delivery_event_id": "gcl-" + strings.Repeat("f", 64),
+		},
+		"different landed sha beside pre-landing state": {
+			"gc.work_commit":         testWorkCommitA,
+			"gc.work_base_commit":    "base-unchanged",
+			"gc.delivery_state":      "integration_ready",
+			"gc.delivery_landed_sha": "4444444444444444444444444444444444444444",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			alpha := workStoreWithMetadata(t, metadata)
+			beta := workStore(t, testWorkCommitB)
+			journal := landingJournal(t)
+			service := Service{Journal: journal, Stores: &mapResolver{stores: map[string]beads.Store{
+				"rig:alpha": alpha,
+				"rig:beta":  beta,
+			}}}
+			before, err := alpha.Get("gc-same")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			result, err := service.Stamp(context.Background(), testLandingEventID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Stamped != 1 || result.AlreadyStamped != 0 || len(result.Conflicts) != 1 {
+				t.Fatalf("result = %#v", result)
+			}
+			if result.Conflicts[0].StoreRef != "rig:alpha" || result.Conflicts[0].Code != "delivery_metadata_mismatch" {
+				t.Fatalf("conflict = %#v", result.Conflicts[0])
+			}
+			after, err := alpha.Get("gc-same")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(after.Metadata, before.Metadata) {
+				t.Fatalf("conflicting evidence was overwritten: %#v", after.Metadata)
+			}
+			stampEvents, err := journal.List(events.Filter{Type: events.DeliveryWorkStamped})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(stampEvents) != 1 {
+				t.Fatalf("stamp events = %d, want only beta", len(stampEvents))
+			}
+		})
+	}
+}
+
+func TestStampConflictsOnUnrecognizedDeliveryStateValue(t *testing.T) {
+	alpha := workStoreWithMetadata(t, beads.StringMap{
+		"gc.work_commit":      testWorkCommitA,
+		"gc.work_base_commit": "base-unchanged",
+		"gc.delivery_state":   "ready-to-integrate",
+	})
+	beta := workStore(t, testWorkCommitB)
+	service := Service{Journal: landingJournal(t), Stores: &mapResolver{stores: map[string]beads.Store{
+		"rig:alpha": alpha,
+		"rig:beta":  beta,
+	}}}
+
+	result, err := service.Stamp(context.Background(), testLandingEventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stamped != 1 || len(result.Conflicts) != 1 || result.Conflicts[0].Code != "delivery_metadata_mismatch" {
+		t.Fatalf("result = %#v", result)
+	}
+	bead, err := alpha.Get("gc-same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bead.Metadata["gc.delivery_state"] != "ready-to-integrate" {
+		t.Fatalf("unrecognized delivery state was overwritten: %#v", bead.Metadata)
+	}
+}
+
+func TestHasDeliveryMetadata(t *testing.T) {
+	for name, tc := range map[string]struct {
+		metadata beads.StringMap
+		want     bool
+	}{
+		"no metadata":        {metadata: beads.StringMap{}, want: false},
+		"non-delivery keys":  {metadata: beads.StringMap{"gc.work_commit": testWorkCommitA, "gc.work_base_commit": "base-unchanged"}, want: false},
+		"delivery state key": {metadata: beads.StringMap{"gc.delivery_state": "integration_ready"}, want: true},
+		"delivery event key": {metadata: beads.StringMap{"gc.work_commit": testWorkCommitA, "gc.delivery_event_id": testLandingEventID}, want: true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := hasDeliveryMetadata(tc.metadata); got != tc.want {
+				t.Fatalf("hasDeliveryMetadata(%#v) = %t, want %t", tc.metadata, got, tc.want)
+			}
+		})
 	}
 }
 
