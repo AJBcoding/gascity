@@ -397,6 +397,10 @@ automation may read the decision and add comments, but they must not change its
 status, lifecycle labels, assignee, or `operator_decision` metadata. Source
 beads remain ordinary collaborative records.
 
+At most one Beaddash process may have lifecycle-write access to a given project
+at a time. One Beaddash process may cover multiple projects, but two processes
+must not be configured as writers for the same project.
+
 Before a direct lifecycle edit, the operator stops every Beaddash process that
 can reach the project. After the edit, the operator restarts Beaddash; its
 startup refresh loads the direct change as the new observed state. Concurrent
