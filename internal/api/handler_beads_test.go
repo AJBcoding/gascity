@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -552,6 +553,65 @@ func TestHTTPBeadCloseRejectsShippedWorkWithoutLandingEvidence(t *testing.T) {
 	}
 	if after.Status == "closed" {
 		t.Fatal("HTTP close mutated shipped work after policy refusal")
+	}
+}
+
+// TestHTTPBeadCloseSurfacesUnreadableLandingEvidenceAsServiceUnavailable pins
+// the error taxonomy of the shipped-close gate: when the landing-evidence
+// journal cannot be read, the refusal is an infrastructure failure (503
+// service-unavailable), not a client-state conflict — while remaining
+// fail-closed, so the row is still not mutated.
+func TestHTTPBeadCloseSurfacesUnreadableLandingEvidenceAsServiceUnavailable(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in PATH")
+	}
+	repo := t.TempDir()
+	runResolverGit(t, repo, "init", "-b", "main")
+	runResolverGit(t, repo, "-c", "user.email=test@example.invalid", "-c", "user.name=test", "commit", "--allow-empty", "-m", "shipped work")
+	revParse := exec.Command("git", "rev-parse", "HEAD")
+	revParse.Dir = repo
+	out, err := revParse.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	sha := strings.TrimSpace(string(out))
+
+	state := newFakeState(t)
+	state.eventProv = events.NewFailFake()
+	store := state.stores["myrig"]
+	created, err := store.Create(beads.Bead{Title: "shipped with unreadable evidence", Type: "task", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey:          beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkCommitMetadataKey:           sha,
+		beadmeta.WorkBranchMetadataKey:           "main",
+		beadmeta.WorkDirMetadataKey:              repo,
+		beadmeta.DeliveryStateMetadataKey:        "landed",
+		beadmeta.DeliveryEventIDMetadataKey:      "gcl-" + strings.Repeat("a", 64),
+		beadmeta.DeliverySourceCommitMetadataKey: sha,
+		beadmeta.DeliveryLandedSHAMetadataKey:    strings.Repeat("3", 40),
+	}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+created.ID+"/close", nil))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("close status = %d, want %d, body: %s", rec.Code, http.StatusServiceUnavailable, rec.Body.String())
+	}
+	model := apierr.ErrorModel{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &model); err != nil {
+		t.Fatalf("decoding problem body: %v", err)
+	}
+	if model.Code != apierr.ServiceUnavailable.Code {
+		t.Fatalf("problem code = %q, want %q, body: %s", model.Code, apierr.ServiceUnavailable.Code, rec.Body.String())
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.Status == "closed" {
+		t.Fatal("HTTP close mutated shipped work while evidence was unreadable")
 	}
 }
 

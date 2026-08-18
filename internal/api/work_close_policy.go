@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/workclose"
+	"github.com/gastownhall/gascity/internal/workstamp"
 )
 
 func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref storeref.StoreRef) error {
@@ -20,8 +21,9 @@ func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref s
 	if repoDir == "" {
 		repoDir = s.state.CityPath()
 	}
+	evidence := s.state.EventProvider()
 	policy := workclose.WorkClosePolicy{
-		Evidence: s.state.EventProvider(),
+		Evidence: evidence,
 		CommitReachable: func(commit, branch string) bool {
 			return apiGitCommitReachable(repoDir, commit, branch)
 		},
@@ -53,9 +55,30 @@ func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref s
 	message := strings.Join(violations, "; ")
 	log.Printf("api: work-record gate (%s): close of %s: %s", mode, prospective.ID, message)
 	if mode == "enforced" {
+		if landingEvidenceUnreadable(evidence, storeRef, prospective) {
+			return apierr.ServiceUnavailable.Msg("work-record close refused: " + message)
+		}
 		return apierr.ConflictWrongState.Msg("conflict: work-record close refused: " + message)
 	}
 	return nil
+}
+
+// landingEvidenceUnreadable reports whether a refused close stems from landing
+// evidence the server could not read (an infrastructure failure) rather than
+// from the record's own state, so the transport can answer 503 instead of a
+// client-state 409. It re-runs the typed evidence classification only for
+// prospective shipped work, mirroring the policy's evidence gate; the close
+// stays refused either way.
+func landingEvidenceUnreadable(evidence workstamp.EvidenceReader, storeRef string, prospective beads.Bead) bool {
+	if prospective.Metadata[beadmeta.WorkOutcomeMetadataKey] != beadmeta.WorkOutcomeShipped {
+		return false
+	}
+	for _, violation := range workstamp.ClassifyLandingEvidence(evidence, storeRef, prospective) {
+		if violation.Class == workstamp.EvidenceUnreadable {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) canonicalWorkCloseStoreRef(ref storeref.StoreRef) string {

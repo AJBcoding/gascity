@@ -38,62 +38,108 @@ var (
 	gitSHAPattern          = regexp.MustCompile(`^[0-9a-f]{40}$`)
 )
 
+// EvidenceClass classifies why one landing-evidence violation refused a close,
+// so transports can map infrastructure failures and client state to different
+// errors. Enforcement is fail-closed under either class.
+type EvidenceClass string
+
+const (
+	// EvidenceInvalid marks durable evidence that was readable but absent,
+	// malformed, or bound to different work — a client-state problem.
+	EvidenceInvalid EvidenceClass = "invalid"
+	// EvidenceUnreadable marks durable evidence that could not be read or
+	// decoded at all — an infrastructure failure, not a statement about the
+	// record's own state.
+	EvidenceUnreadable EvidenceClass = "unreadable"
+)
+
+// EvidenceViolation is one landing-evidence violation with its class.
+type EvidenceViolation struct {
+	Class   EvidenceClass
+	Message string
+}
+
 // ValidateLandingEvidence verifies that a bead's landed delivery metadata is
 // corroborated by exactly one durable delivery.landed event. storeRef must be
-// the caller's already-canonical physical store identity.
+// the caller's already-canonical physical store identity. It flattens
+// ClassifyLandingEvidence for callers that only need the violation text.
 func ValidateLandingEvidence(reader EvidenceReader, storeRef string, bead beads.Bead) []string {
+	classified := ClassifyLandingEvidence(reader, storeRef, bead)
+	if len(classified) == 0 {
+		return nil
+	}
+	violations := make([]string, len(classified))
+	for i, violation := range classified {
+		violations[i] = violation.Message
+	}
+	return violations
+}
+
+// ClassifyLandingEvidence is ValidateLandingEvidence with a typed class on
+// each violation: the same checks, messages, and order, plus whether the
+// refusal reports unreadable evidence (infrastructure) or invalid evidence
+// (client state).
+func ClassifyLandingEvidence(reader EvidenceReader, storeRef string, bead beads.Bead) []EvidenceViolation {
 	metadata := bead.Metadata
 	workCommit := metadata[beadmeta.WorkCommitMetadataKey]
 	if !gitSHAPattern.MatchString(workCommit) {
-		return []string{fmt.Sprintf("%s=shipped requires %s to be a lowercase 40-character Git SHA", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey)}
+		return invalidEvidence(fmt.Sprintf("%s=shipped requires %s to be a lowercase 40-character Git SHA", beadmeta.WorkOutcomeMetadataKey, beadmeta.WorkCommitMetadataKey))
 	}
 	if metadata[beadmeta.DeliveryStateMetadataKey] != beadmeta.DeliveryStateLanded {
-		return []string{fmt.Sprintf("%s=shipped requires %s=%s", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryStateMetadataKey, beadmeta.DeliveryStateLanded)}
+		return invalidEvidence(fmt.Sprintf("%s=shipped requires %s=%s", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryStateMetadataKey, beadmeta.DeliveryStateLanded))
 	}
 	eventID := metadata[beadmeta.DeliveryEventIDMetadataKey]
 	if !deliveryEventIDPattern.MatchString(eventID) {
-		return []string{fmt.Sprintf("%s=shipped requires %s=gcl-<64 lowercase hex>", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryEventIDMetadataKey)}
+		return invalidEvidence(fmt.Sprintf("%s=shipped requires %s=gcl-<64 lowercase hex>", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryEventIDMetadataKey))
 	}
 	if metadata[beadmeta.DeliverySourceCommitMetadataKey] != workCommit {
-		return []string{fmt.Sprintf("%s must equal %s", beadmeta.DeliverySourceCommitMetadataKey, beadmeta.WorkCommitMetadataKey)}
+		return invalidEvidence(fmt.Sprintf("%s must equal %s", beadmeta.DeliverySourceCommitMetadataKey, beadmeta.WorkCommitMetadataKey))
 	}
 	landedSHA := metadata[beadmeta.DeliveryLandedSHAMetadataKey]
 	if !gitSHAPattern.MatchString(landedSHA) {
-		return []string{fmt.Sprintf("%s=shipped requires %s to be a lowercase 40-character Git SHA", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryLandedSHAMetadataKey)}
+		return invalidEvidence(fmt.Sprintf("%s=shipped requires %s to be a lowercase 40-character Git SHA", beadmeta.WorkOutcomeMetadataKey, beadmeta.DeliveryLandedSHAMetadataKey))
 	}
 	if strings.TrimSpace(storeRef) == "" {
-		return []string{"landing evidence requires an explicit canonical store ref"}
+		return invalidEvidence("landing evidence requires an explicit canonical store ref")
 	}
 	if reader == nil {
-		return []string{"landing event is unreadable: event journal is unavailable"}
+		return unreadableEvidence("landing event is unreadable: event journal is unavailable")
 	}
 	matches, err := listLandingEvidence(reader, events.Filter{Type: events.DeliveryLanded, Subject: eventID})
 	if err != nil {
-		return []string{fmt.Sprintf("landing event %q is unreadable: %v", eventID, err)}
+		return unreadableEvidence(fmt.Sprintf("landing event %q is unreadable: %v", eventID, err))
 	}
 	if len(matches) != 1 {
-		return []string{fmt.Sprintf("expected exactly one landing event %q, found %d", eventID, len(matches))}
+		return invalidEvidence(fmt.Sprintf("expected exactly one landing event %q, found %d", eventID, len(matches)))
 	}
 	decoded, registered, err := events.DecodePayload(matches[0].Type, matches[0].Payload)
 	if err != nil || !registered {
 		if err != nil {
-			return []string{fmt.Sprintf("landing event %q is unreadable: %v", eventID, err)}
+			return unreadableEvidence(fmt.Sprintf("landing event %q is unreadable: %v", eventID, err))
 		}
-		return []string{fmt.Sprintf("landing event %q is unreadable: payload is not registered", eventID)}
+		return unreadableEvidence(fmt.Sprintf("landing event %q is unreadable: payload is not registered", eventID))
 	}
 	landing, ok := decoded.(events.DeliveryLandedPayload)
 	if !ok || landing.EventID != eventID {
-		return []string{fmt.Sprintf("landing event %q is not valid v2 delivery evidence", eventID)}
+		return invalidEvidence(fmt.Sprintf("landing event %q is not valid v2 delivery evidence", eventID))
 	}
 	if landing.ObservedLandedSHA != landedSHA {
-		return []string{fmt.Sprintf("%s does not match landing event observed landed SHA", beadmeta.DeliveryLandedSHAMetadataKey)}
+		return invalidEvidence(fmt.Sprintf("%s does not match landing event observed landed SHA", beadmeta.DeliveryLandedSHAMetadataKey))
 	}
 	for _, record := range landing.WorkRecords {
 		if record.StoreRef == storeRef && record.BeadID == bead.ID && record.WorkCommit == workCommit {
 			return nil
 		}
 	}
-	return []string{fmt.Sprintf("landing event %q is not bound to store %q bead %q commit %s", eventID, storeRef, bead.ID, workCommit)}
+	return invalidEvidence(fmt.Sprintf("landing event %q is not bound to store %q bead %q commit %s", eventID, storeRef, bead.ID, workCommit))
+}
+
+func invalidEvidence(message string) []EvidenceViolation {
+	return []EvidenceViolation{{Class: EvidenceInvalid, Message: message}}
+}
+
+func unreadableEvidence(message string) []EvidenceViolation {
+	return []EvidenceViolation{{Class: EvidenceUnreadable, Message: message}}
 }
 
 func listLandingEvidence(reader EvidenceReader, filter events.Filter) ([]events.Event, error) {

@@ -588,6 +588,97 @@ func TestValidateLandingEvidence(t *testing.T) {
 	}
 }
 
+// TestClassifyLandingEvidenceSeparatesUnreadableFromInvalid pins the typed
+// violation surface: evidence-read failures (infrastructure) classify as
+// unreadable, everything else — absent, malformed, or foreign-bound evidence —
+// classifies as invalid, and the messages stay identical to
+// ValidateLandingEvidence so both surfaces describe one refusal.
+func TestClassifyLandingEvidenceSeparatesUnreadableFromInvalid(t *testing.T) {
+	baseMetadata := beads.StringMap{
+		"gc.work_outcome":           "shipped",
+		"gc.work_commit":            testWorkCommitA,
+		"gc.delivery_state":         "landed",
+		"gc.delivery_event_id":      testLandingEventID,
+		"gc.delivery_source_commit": testWorkCommitA,
+		"gc.delivery_landed_sha":    testLandedSHA,
+	}
+	matchingRecord := events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA}
+	tests := []struct {
+		name      string
+		mutate    func(beads.StringMap)
+		journal   func(t *testing.T) EvidenceReader
+		wantClass EvidenceClass
+	}{
+		{
+			name:      "journal read failure",
+			mutate:    func(beads.StringMap) {},
+			journal:   func(*testing.T) EvidenceReader { return events.NewFailFake() },
+			wantClass: EvidenceUnreadable,
+		},
+		{
+			name:      "nil journal",
+			mutate:    func(beads.StringMap) {},
+			journal:   func(*testing.T) EvidenceReader { return nil },
+			wantClass: EvidenceUnreadable,
+		},
+		{
+			name:      "absent landing event",
+			mutate:    func(beads.StringMap) {},
+			journal:   func(*testing.T) EvidenceReader { return events.NewFake() },
+			wantClass: EvidenceInvalid,
+		},
+		{
+			name:      "metadata precheck failure",
+			mutate:    func(metadata beads.StringMap) { delete(metadata, "gc.delivery_state") },
+			journal:   func(t *testing.T) EvidenceReader { return landingEvidenceJournal(t, matchingRecord) },
+			wantClass: EvidenceInvalid,
+		},
+		{
+			name:   "event bound to another bead",
+			mutate: func(beads.StringMap) {},
+			journal: func(t *testing.T) EvidenceReader {
+				return landingEvidenceJournal(t, events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "other", WorkCommit: testWorkCommitA})
+			},
+			wantClass: EvidenceInvalid,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			metadata := make(beads.StringMap, len(baseMetadata))
+			for key, value := range baseMetadata {
+				metadata[key] = value
+			}
+			tc.mutate(metadata)
+			journal := tc.journal(t)
+			bead := beads.Bead{ID: "gc-same", Metadata: metadata}
+			classified := ClassifyLandingEvidence(journal, "rig:alpha", bead)
+			if len(classified) != 1 || classified[0].Class != tc.wantClass {
+				t.Fatalf("classified = %#v, want one violation of class %q", classified, tc.wantClass)
+			}
+			flat := ValidateLandingEvidence(journal, "rig:alpha", bead)
+			if len(flat) != 1 || flat[0] != classified[0].Message {
+				t.Fatalf("ValidateLandingEvidence = %v, want the classified message %q", flat, classified[0].Message)
+			}
+		})
+	}
+}
+
+func TestClassifyLandingEvidenceReportsNoViolationForValidReplay(t *testing.T) {
+	metadata := beads.StringMap{
+		"gc.work_outcome":           "shipped",
+		"gc.work_commit":            testWorkCommitA,
+		"gc.delivery_state":         "landed",
+		"gc.delivery_event_id":      testLandingEventID,
+		"gc.delivery_source_commit": testWorkCommitA,
+		"gc.delivery_landed_sha":    testLandedSHA,
+	}
+	journal := landingEvidenceJournal(t, events.DeliveryWorkRecordRef{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA})
+	classified := ClassifyLandingEvidence(journal, "rig:alpha", beads.Bead{ID: "gc-same", Metadata: metadata})
+	if len(classified) != 0 {
+		t.Fatalf("classified = %#v, want none", classified)
+	}
+}
+
 func TestValidateLandingEvidenceRejectsNonCanonicalMetadata(t *testing.T) {
 	baseMetadata := beads.StringMap{
 		"gc.work_outcome":           "shipped",
