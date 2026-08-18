@@ -15,6 +15,7 @@
 package herdr
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -90,11 +91,54 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 	return env.Result, nil
 }
 
+// stderrHerdrError extracts herdr's error envelope from a failed verb's stderr.
+// A rejection arrives as the SAME {"error":{code,message}} envelope the success
+// path parses — but on stderr, with a nonzero exit and an empty stdout (herdr
+// 0.7.5). stderr is also where a transport failure's plain text lands (`Error:
+// Os { code: 2, kind: NotFound … }` when the session socket is absent), so the
+// scan is per-line and best-effort: the first line that decodes to an envelope
+// carrying a code wins, and anything else yields nil so the caller keeps the raw
+// stderr as the message. Per-line rather than whole-buffer so a log line printed
+// alongside the envelope cannot blind the parse — and because Output caps
+// ee.Stderr at 32KiB, which makes a truncated envelope simply fail to decode
+// instead of being misread.
+func stderrHerdrError(stderr []byte) *herdrError {
+	for _, line := range bytes.Split(stderr, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var env envelope
+		if err := json.Unmarshal(line, &env); err == nil && env.Error != nil && env.Error.Code != "" {
+			return env.Error
+		}
+	}
+	return nil
+}
+
 // runFailure renders a failed `herdr` exec as this package's error, shared by
 // run and runRaw so both classify a rejection identically.
+//
+// A rejection carrying an envelope is wrapped exactly as the stdout path wraps
+// its own, so errors.As recovers the typed *herdrError and herdrErrorCode
+// resolves the code. Formatting those bytes with %s instead leaves no
+// *herdrError anywhere in the chain: herdrErrorCode answers "" and every code
+// comparison in the package silently fails to match on the one path a real
+// herdr actually rejects on — which is how the pane-busy retry ladder, the
+// agent_name_taken storm guard, and the timeout / agent_not_found branches came
+// to be dead in production (gas-ao8z). The *exec.ExitError is wrapped alongside
+// it (Go's multi-%w) so the exit status stays recoverable, and herdr's own
+// stderr is kept verbatim in the text so a log reader still sees every byte it
+// printed.
+//
+// An unparseable stderr keeps its raw-text message unchanged: there is nothing
+// typed to recover, and that text is the only diagnostic a transport failure has.
 func runFailure(args []string, err error) error {
 	var ee *exec.ExitError
 	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		if he := stderrHerdrError(ee.Stderr); he != nil {
+			return fmt.Errorf("herdr %v: %w (%w): %s", args, he, ee, bytes.TrimSpace(ee.Stderr))
+		}
 		return fmt.Errorf("herdr %v: %s", args, ee.Stderr)
 	}
 	return fmt.Errorf("herdr %v: %w", args, err)

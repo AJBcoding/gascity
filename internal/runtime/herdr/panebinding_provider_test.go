@@ -54,6 +54,17 @@ agent_get)
 agent_list)
   printf '%s' '{"result":{"agents":[]}}' ;;
 agent_start)
+  if [ -e "$STATE/pane_busy_once" ]; then
+    # The one branch modeled the way a REAL herdr rejects: envelope on stderr,
+    # nonzero exit (0.7.5 writes nothing to stdout in that case). Every other
+    # error here answers on stdout with exit 0, which is the shape gc's own
+    # stdout path already typed correctly — and why the stderr path's lost
+    # error codes went unnoticed for so long (gas-ao8z). Consumed on use, so
+    # the retry lands on a pane herdr now accepts.
+    rm -f "$STATE/pane_busy_once"
+    printf '%s\n' '{"error":{"code":"agent_pane_busy","message":"pane %5 is not an available shell"},"id":"cli:agent:start"}' >&2
+    exit 1
+  fi
   if [ -e "$STATE/name_taken" ]; then
     # A concurrent Start won the name and its agent is live: herdr rejects the
     # launch, agent get then resolves the live holder and its pane probes
@@ -337,6 +348,53 @@ func TestStartMapsSessionNameToValidHerdrName(t *testing.T) {
 	}
 	if names, err := p.ListRunning("Indigo"); err != nil || len(names) != 1 || names[0] != "Indigo--anthony" {
 		t.Fatalf("ListRunning = %v, %v; want [Indigo--anthony]", names, err)
+	}
+}
+
+// The consequence of gas-ao8z, at the level that matters: the pane-busy retry
+// ladder must actually engage when herdr rejects the launch the way a real
+// herdr does — envelope on stderr, nonzero exit. A fresh pane's shell is still
+// sourcing rc files when gc's readiness probe calls it idle, and herdr's own
+// availability check disagrees; the residual agent_pane_busy is what the ladder
+// (paneBusyRetries, 1s/2s/4s) exists to absorb. Untyped, herdrErrorCode
+// returned "" and the loop broke on attempt 0: one `agent start`, Start failed,
+// and the ladder never ran once in production.
+func TestStartRetriesPaneBusyRejectedOnStderr(t *testing.T) {
+	p, session, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, session)
+	setState(t, state, "pane_busy_once")
+
+	if err := p.Start(context.Background(), "gastown__witness", runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("Start: %v; want the retry ladder to absorb the pane-busy rejection", err)
+	}
+	calls := fakeCalls(t, state)
+	if n := strings.Count(calls, "agent start gastown__witness"); n != 2 {
+		t.Fatalf("agent start issued %d times; want 2 (the rejection plus exactly one ladder retry):\n%s", n, calls)
+	}
+	// The retry is a real launch, not a bookkeeping success: the binding and
+	// mode Start persists must describe the pane the agent actually landed in.
+	if got, _ := p.GetMeta("gastown__witness", metaBoundMode); got != bindModeAgent {
+		t.Errorf("bound mode after the retried launch = %q; want %q", got, bindModeAgent)
+	}
+}
+
+// The ladder is bounded, not a loop: a pane that stays busy exhausts
+// paneBusyRetries and surfaces herdr's own verdict. This is the cost side of
+// reviving the branch — worst case one Start pays 1s+2s+4s before failing — and
+// it must stay a ceiling.
+func TestStartPaneBusyLadderIsBounded(t *testing.T) {
+	p, session, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, session)
+	// Never consumed: every attempt is rejected on stderr.
+	rewriteFake(t, p, `rm -f "$STATE/pane_busy_once"`, `:`)
+	setState(t, state, "pane_busy_once")
+
+	err := p.Start(context.Background(), "gastown__witness", runtime.Config{Command: "claude"})
+	if herdrErrorCode(err) != "agent_pane_busy" {
+		t.Fatalf("Start = %v; want the exhausted ladder to surface herdr's agent_pane_busy verdict", err)
+	}
+	if n := strings.Count(fakeCalls(t, state), "agent start gastown__witness"); n != paneBusyRetries+1 {
+		t.Errorf("agent start issued %d times; want %d (bounded by paneBusyRetries)", n, paneBusyRetries+1)
 	}
 }
 
