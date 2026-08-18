@@ -445,7 +445,14 @@ var bootstrapPolicy = Ledger{
 			Invariant:       "shipped-close graduation gate proof is a checked Medium owner",
 			ResourceOwner:   "the one bash invocation of scripts/check-shipped-close-graduation.sh is confined to TestShippedCloseGraduationReleaseCheck, which runs the real release gate to prove it refuses a v1.6.0 removal release while stale beads.shipped_close_warn_only migration artifacts remain; the call retires when that compatibility flag graduates",
 			MigrationTarget: "P0.4b",
-			Expires:         "2026-10-01",
+			// Aligned to the protected migration window rather than the
+			// ledger's usual horizon: this row retires when
+			// beads.shipped_close_warn_only graduates, and that flag runs
+			// through 2026-12-31 (internal/rollout/registry.go). An earlier
+			// expiry would fail validation in October for a subprocess still
+			// legitimately required. Lifecycle owner: gas-ftv4 /
+			// @gastownhall/gascity-admin through the same date.
+			Expires: "2026-12-31",
 		},
 		{
 			PackageDir:      "internal/doctor",
