@@ -7,11 +7,35 @@ version = 2
 # These broad rows retain the audit's point-in-time source needles. They do
 # not classify tests. The AST baselines below ignore comments and strings;
 # reported_* preserves the historical regex totals for comparison.
+#
+# Subprocess deltas carried at this revision, attributed separately so a later
+# reader never has to re-derive which cost belongs to which change:
+#
+#   PRE-EXISTING  +1 call / +1 file
+#     cmd/gc/landing_git_test.go:42 -- exec.Command("git", args...) inside the
+#     helper landingTestGit, added by ancestor commit c5234c4b0 ("feat(gc):
+#     record remotely verified landing receipts"). The census records this
+#     occurrence as runnable=false because its enclosing top-level declaration
+#     is a helper, not a Go test, so NO [[medium]] row can exempt it
+#     (validateMediumOwners rejects a non-runnable owner). It therefore raises
+#     every subprocess baseline below, the Small ratchet included.
+#
+#   gas-ftv4      +1 call / +1 file
+#     scripts/shipped_close_graduation_test.go:17 -- exec.Command("bash",
+#     script, version, root) inside TestShippedCloseGraduationReleaseCheck,
+#     added in this branch's range by commit d7b69d9d6 ("fix: make
+#     shipped-close migration auditable"). The census records it as
+#     runnable=true, so it is declared as an exact [[medium]] owner below. It
+#     raises only the Count-based audit and source-debt baselines (Count does
+#     not subtract Medium owners) and leaves the untagged Small subprocess
+#     ratchet flat.
 [[audit_baseline]]
 scope = "all"
 resource = "subprocess"
-baseline_calls = 618
-baseline_files = 177
+# 618 -> 620 calls, 177 -> 179 files: +1 pre-existing (landing_git_test.go),
+# +1 gas-ftv4 (shipped_close_graduation_test.go).
+baseline_calls = 620
+baseline_files = 179
 reported_calls = 495
 reported_files = 135
 owner_bead = "ga-80po0c.2"
@@ -51,8 +75,11 @@ expires = "2026-10-01"
 [[debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 416
-baseline_files = 119
+# 416 -> 418 calls, 119 -> 121 files: +1 pre-existing (landing_git_test.go),
+# +1 gas-ftv4 (shipped_close_graduation_test.go). Both files are untagged, and
+# this row uses Count, which does not subtract Medium owners.
+baseline_calls = 418
+baseline_files = 121
 reported_calls = 380
 reported_files = 98
 owner_bead = "ga-80po0c.2"
@@ -296,6 +323,21 @@ resource_owner = "the six isolated Make invocations are confined to TestProvider
 migration_target = "P0.1"
 expires = "2026-10-01"
 
+# gas-ftv4's one new subprocess occurrence
+# (scripts/shipped_close_graduation_test.go:17, added by commit d7b69d9d6).
+# runnable=true, so it takes an exact Medium owner instead of growing the
+# untagged Small subprocess ratchet.
+[[medium]]
+package_dir = "scripts"
+package_name = "scripts_test"
+owner = "TestShippedCloseGraduationReleaseCheck"
+resources = ["subprocess"]
+owner_bead = "gas-ftv4"
+invariant = "shipped-close graduation gate proof is a checked Medium owner"
+resource_owner = "the one bash invocation of scripts/check-shipped-close-graduation.sh is confined to TestShippedCloseGraduationReleaseCheck, which runs the real release gate to prove it refuses a v1.6.0 removal release while stale beads.shipped_close_warn_only migration artifacts remain; the call retires when that compatibility flag graduates"
+migration_target = "P0.4b"
+expires = "2026-10-01"
+
 [[medium]]
 package_dir = "internal/doctor"
 package_name = "doctor"
@@ -355,8 +397,13 @@ medium_reason = "package TestMain mutates process state"
 [[small_debt]]
 scope = "untagged"
 resource = "subprocess"
-baseline_calls = 409
-baseline_files = 115
+# 409 -> 410 calls, 115 -> 116 files: the PRE-EXISTING occurrence only
+# (cmd/gc/landing_git_test.go:42, runnable=false, ancestor commit c5234c4b0).
+# gas-ftv4's occurrence does not appear here: the scripts_test
+# TestShippedCloseGraduationReleaseCheck [[medium]] row above removes it from
+# SmallCount, so the untagged Small subprocess total stays flat for this branch.
+baseline_calls = 410
+baseline_files = 116
 reported_calls = 394
 reported_files = 105
 owner_bead = "ga-80po0c.2.1"
