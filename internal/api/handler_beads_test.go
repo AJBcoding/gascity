@@ -667,11 +667,30 @@ func TestHTTPBeadCloseKeepsOriginalInvalidEvidenceClassWhenReaderChanges(t *test
 	}
 }
 
+// retargetWorkStoreToBDContract re-fronts the fake state's work store with the
+// pinned bd store contract, keeping the very same in-memory rows.
+//
+// beads.shipped_close_warn_only relaxes only a close written through that
+// contract — the one deficiency the mode exists for — so a test about the
+// warn-only path has to name a target the mode actually applies to. The plain
+// MemStore the fake state ships is natively fence-capable and stays strictly
+// enforced no matter how the city sets the flag.
+func retargetWorkStoreToBDContract(t *testing.T, state *fakeState) beads.Store {
+	t.Helper()
+	mem, ok := state.stores["myrig"].(*beads.MemStore)
+	if !ok {
+		t.Fatalf("fake work store = %T, want *beads.MemStore to re-front", state.stores["myrig"])
+	}
+	store := bdContractStore{MemStore: mem}
+	state.stores["myrig"] = store
+	return store
+}
+
 func TestHTTPWarnOnlyCloseEmitsUsageTelemetryEvenWithoutViolation(t *testing.T) {
 	state := newFakeState(t)
 	warnOnly := true
 	state.cfg.Beads.ShippedCloseWarnOnly = &warnOnly
-	store := state.stores["myrig"]
+	store := retargetWorkStoreToBDContract(t, state)
 	created, err := store.Create(beads.Bead{Title: "valid no-op", Type: "task", Metadata: beads.StringMap{
 		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
 	}})
@@ -690,27 +709,90 @@ func TestHTTPWarnOnlyCloseEmitsUsageTelemetryEvenWithoutViolation(t *testing.T) 
 	}
 }
 
+// TestHTTPNativeTargetCloseStaysStrictAndEmitsNoWarnOnlyTelemetry is the
+// companion to the test above on the other target. The city sets the same
+// city-global flag, but the route writes through a natively fence-capable
+// MemStore, which has no compatibility need: the close stays ENFORCED, so a
+// contract violation is refused and no durable warn-only use is recorded for
+// either arm. Warn-only telemetry is the price of warning; a target that never
+// warns must never pay it.
+func TestHTTPNativeTargetCloseStaysStrictAndEmitsNoWarnOnlyTelemetry(t *testing.T) {
+	state := newFakeState(t)
+	warnOnly := true
+	state.cfg.Beads.ShippedCloseWarnOnly = &warnOnly
+	store := state.stores["myrig"]
+	valid, err := store.Create(beads.Bead{Title: "valid no-op", Type: "task", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unstamped, err := store.Create(beads.Bead{Title: "unstamped work", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+valid.ID+"/close", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid close status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+unstamped.ID+"/close", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("unstamped close status = %d, want conflict: the natively fence-capable target lost strict enforcement to a bd-compatibility flag it has no need of: %s", rec.Code, rec.Body.String())
+	}
+	after, err := store.Get(unstamped.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Status == "closed" {
+		t.Fatal("the refused close still mutated the natively fence-capable store")
+	}
+
+	used, err := state.eventProv.List(events.Filter{Type: events.WorkCloseWarnOnlyUsed})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(used) != 0 {
+		t.Fatalf("warn-only telemetry events = %d, want none for an enforced target", len(used))
+	}
+}
+
 type apiUnreadableWarnOnlyProvider struct{ *events.Fake }
 
 func (p apiUnreadableWarnOnlyProvider) List(events.Filter) ([]events.Event, error) {
 	return nil, errors.New("usage readback unavailable")
 }
 
-func TestHTTPWarnOnlyCloseRefusesWhenUsageCannotBeConfirmed(t *testing.T) {
-	for _, test := range []struct {
-		name     string
-		provider events.Provider
-	}{
+// warnOnlyTelemetryFailure is one way the durable warn-only use record can fail
+// to be confirmed.
+type warnOnlyTelemetryFailure struct {
+	name     string
+	provider events.Provider
+}
+
+// brokenWarnOnlyTelemetry enumerates those ways: the append fails, the readback
+// fails, or there is no journal at all. A warn-only close must refuse on every
+// one of them; an enforced close must be indifferent to all three.
+func brokenWarnOnlyTelemetry() []warnOnlyTelemetryFailure {
+	return []warnOnlyTelemetryFailure{
 		{name: "append failure", provider: events.NewFailFake()},
 		{name: "readback failure", provider: apiUnreadableWarnOnlyProvider{Fake: events.NewFake()}},
 		{name: "nil provider"},
-	} {
+	}
+}
+
+func TestHTTPWarnOnlyCloseRefusesWhenUsageCannotBeConfirmed(t *testing.T) {
+	for _, test := range brokenWarnOnlyTelemetry() {
 		t.Run(test.name, func(t *testing.T) {
 			state := newFakeState(t)
 			warnOnly := true
 			state.cfg.Beads.ShippedCloseWarnOnly = &warnOnly
 			state.eventProv = test.provider
-			store := state.stores["myrig"]
+			store := retargetWorkStoreToBDContract(t, state)
 			created, err := store.Create(beads.Bead{Title: "valid no-op", Type: "task", Metadata: beads.StringMap{
 				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
 			}})
@@ -729,6 +811,42 @@ func TestHTTPWarnOnlyCloseRefusesWhenUsageCannotBeConfirmed(t *testing.T) {
 			}
 			if after.Status == "closed" {
 				t.Fatal("HTTP warn-only close mutated work without confirmed usage telemetry")
+			}
+		})
+	}
+}
+
+// TestHTTPNativeTargetCloseIsUnaffectedByBrokenWarnOnlyTelemetry is the
+// companion to the refusal test above. The same city-global flag and the same
+// three broken journals, but the route writes through a natively fence-capable
+// MemStore: that close is enforced, never warns, and therefore has no warn-only
+// use to record — so a journal that cannot record one must not refuse it.
+func TestHTTPNativeTargetCloseIsUnaffectedByBrokenWarnOnlyTelemetry(t *testing.T) {
+	for _, test := range brokenWarnOnlyTelemetry() {
+		t.Run(test.name, func(t *testing.T) {
+			state := newFakeState(t)
+			warnOnly := true
+			state.cfg.Beads.ShippedCloseWarnOnly = &warnOnly
+			state.eventProv = test.provider
+			store := state.stores["myrig"]
+			created, err := store.Create(beads.Bead{Title: "valid no-op", Type: "task", Metadata: beads.StringMap{
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+			}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			h := newTestCityHandler(t, state)
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+created.ID+"/close", nil))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("close status = %d, want 200: an enforced close was made to depend on warn-only telemetry: %s", rec.Code, rec.Body.String())
+			}
+			after, err := store.Get(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Status != "closed" {
+				t.Fatalf("bead status = %q, want closed", after.Status)
 			}
 		})
 	}
