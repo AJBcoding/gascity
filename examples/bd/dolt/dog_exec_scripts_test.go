@@ -4658,6 +4658,38 @@ func TestBackupScriptDiscoversNamedBackupsAndSyncsArtifactsOffsite(t *testing.T)
 	}
 }
 
+// backupLockHangBackstop bounds a hang, not the behavior under test. While the
+// first backup run holds the lock, a contending run that queues behind it can
+// never return — the holder only exits after the test writes the release file —
+// so "did the contending run return at all" is already a deterministic signal
+// and this constant only decides how long a genuine hang takes to report.
+//
+// It replaces a 2s budget on the contending run's whole wall time. That budget
+// was measuring process startup, not lock behavior: on an idle host the
+// contending run costs ~32ms end to end, of which ~24ms is bash spawn plus
+// runtime.sh/_notify.sh sourcing and ~8ms covers the flock decision. Under a
+// saturated broad gate shard the startup share inflates without bound (measured
+// 24ms → 130ms across a 4x CPU/fork load sweep; the gate host that failed had
+// 0% idle and 240MB free RAM), so the assertion failed on machine load while the
+// script behaved correctly — it reported "already running" both times (gas-h898).
+const backupLockHangBackstop = 60 * time.Second
+
+// backupLockSkipSlack is how much longer than the *first* run's
+// launch-to-backup-sync time a non-waiting contending run may take before the
+// test calls it queued. The first run's readiness time is measured moments
+// earlier on the same host and covers strictly more work than the contending
+// run (same startup, plus the lock acquisition and two extra dolt invocations),
+// so it is a contemporaneous upper bound on startup cost that tracks load
+// instead of assuming it. Measured margin: first-run readiness ~200ms vs a
+// contending run of ~32ms when idle, ~440ms vs ~130ms under load.
+const backupLockSkipSlack = time.Second
+
+// backupLockProbeWaitSeconds is the non-zero GC_DOLT_BACKUP_LOCK_WAIT_SECONDS
+// used to prove the wait knob is honored. Comparing it against the zero-wait
+// run isolates the lock wait from startup cost: both runs pay the same startup
+// on the same loaded host, so the difference between them is the waiting.
+const backupLockProbeWaitSeconds = 2
+
 func TestBackupScriptSkipsConcurrentRunBeforeBackupSync(t *testing.T) {
 	if _, err := exec.LookPath("flock"); err != nil {
 		t.Skip("flock not installed; skipping")
@@ -4703,6 +4735,7 @@ exit 0
 	firstDone := make(chan struct{})
 	var firstOut string
 	var firstErr error
+	firstStart := time.Now()
 	go func() {
 		firstOut, firstErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
 		close(firstDone)
@@ -4718,31 +4751,61 @@ exit 0
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
+	// The first run now holds the lock and stays blocked inside `dolt backup
+	// sync` until the release file appears, so every contending run below meets
+	// a held lock with no timing window of its own.
+	firstReady := time.Since(firstStart)
 
-	secondDone := make(chan struct{})
-	var secondOut string
-	var secondErr error
-	go func() {
-		secondOut, secondErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
-			"GC_BACKUP_DATABASES=prod",
-			"GC_DOLT_BACKUP_LOCK_WAIT_SECONDS=0",
-		)
-		close(secondDone)
-	}()
-	select {
-	case <-secondDone:
-	case <-time.After(2 * time.Second):
-		if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
-			t.Fatalf("release blocked backup runs: %v", err)
+	// contendingRun starts another backup run against the held lock at the given
+	// GC_DOLT_BACKUP_LOCK_WAIT_SECONDS, checks that it skipped, and returns how
+	// long it took. A run that queues behind the lock cannot return at all, so
+	// the backstop below only fires on that failure.
+	contendingRun := func(waitSeconds int) time.Duration {
+		t.Helper()
+		done := make(chan struct{})
+		var out string
+		var runErr error
+		start := time.Now()
+		go func() {
+			out, runErr = runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+				"GC_BACKUP_DATABASES=prod",
+				fmt.Sprintf("GC_DOLT_BACKUP_LOCK_WAIT_SECONDS=%d", waitSeconds),
+			)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(backupLockHangBackstop):
+			if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
+				t.Fatalf("release blocked backup runs: %v", err)
+			}
+			<-done
+			t.Fatalf("backup run with lock wait %ds queued behind the held lock instead of returning:\n%s", waitSeconds, out)
 		}
-		<-secondDone
-		t.Fatalf("second backup run blocked instead of skipping while lock is held:\n%s", secondOut)
+		elapsed := time.Since(start)
+		if runErr != nil {
+			t.Fatalf("backup run with lock wait %ds failed: %v\n%s", waitSeconds, runErr, out)
+		}
+		if !strings.Contains(out, "already running") {
+			t.Fatalf("backup run with lock wait %ds should skip while lock is held:\n%s", waitSeconds, out)
+		}
+		return elapsed
 	}
-	if secondErr != nil {
-		t.Fatalf("second backup run failed: %v\n%s", secondErr, secondOut)
+
+	noWaitElapsed := contendingRun(0)
+	if budget := firstReady + backupLockSkipSlack; noWaitElapsed > budget {
+		t.Fatalf("zero-wait backup run took %s, more than the first run's %s launch-to-sync time plus %s: it queued for the lock instead of skipping",
+			noWaitElapsed, firstReady, backupLockSkipSlack)
 	}
-	if !strings.Contains(secondOut, "already running") {
-		t.Fatalf("second backup run should skip while lock is held:\n%s", secondOut)
+
+	// A non-zero wait must actually wait. Measured against the zero-wait run on
+	// the same host moments earlier, the difference isolates lock waiting from
+	// startup cost, so this holds on a loaded machine as well as an idle one.
+	waitElapsed := contendingRun(backupLockProbeWaitSeconds)
+	minWaitDelta := backupLockProbeWaitSeconds * time.Second / 2
+	if delta := waitElapsed - noWaitElapsed; delta < minWaitDelta {
+		t.Fatalf("backup run with lock wait %ds took %s vs %s for the zero-wait run (delta %s, want at least %s): the lock wait setting is not honored",
+			backupLockProbeWaitSeconds, waitElapsed, noWaitElapsed, delta, minWaitDelta)
 	}
 
 	if err := os.WriteFile(releaseFile, []byte("ok\n"), 0o644); err != nil {
@@ -4763,6 +4826,91 @@ exit 0
 	}
 	if got := strings.Count(string(doltLog), "backup sync prod-backup"); got != 1 {
 		t.Fatalf("backup sync count = %d, want 1 while concurrent run skipped:\n%s", got, doltLog)
+	}
+}
+
+// TestBackupScriptRunsWithZeroLockWaitWhenLockIsFree pins the portability half
+// of the backup lock: a zero wait means "do not queue behind a running backup",
+// never "skip the backup". The script used to spell that as `flock -w 0`, which
+// the flock this project documents for macOS (`brew install flock` = discoteq
+// flock 0.4.0) rejects with "timeout must be greater than 0" and exit 64
+// whether or not the lock is free. That usage error was read as contention, so
+// on those hosts a zero wait silently skipped every backup, reported
+// "already running" with nothing running, and exited 0.
+func TestBackupScriptRunsWithZeroLockWaitWhenLockIsFree(t *testing.T) {
+	if _, err := exec.LookPath("flock"); err != nil {
+		t.Skip("flock not installed; skipping")
+	}
+
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	binDir := t.TempDir()
+	_ = writeDogFakeGC(t, binDir)
+	doltLogPath := writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
+
+	out := runDogScript(t, "mol-dog-backup.sh", binDir, cityPath, dataDir,
+		"GC_BACKUP_DATABASES=prod",
+		"GC_DOLT_BACKUP_LOCK_WAIT_SECONDS=0",
+	)
+	if !strings.Contains(out, "synced: 1/1") {
+		t.Fatalf("zero lock wait with a free lock must still back up:\n%s", out)
+	}
+	if strings.Contains(out, "already running") {
+		t.Fatalf("zero lock wait reported contention with a free lock:\n%s", out)
+	}
+	doltLog, err := os.ReadFile(doltLogPath)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(doltLog), "backup sync prod-backup") {
+		t.Fatalf("zero lock wait skipped the backup sync entirely:\n%s", doltLog)
+	}
+}
+
+// TestBackupScriptFailsClosedWhenFlockCannotEvaluateLock pins the fail-closed
+// half: an flock that cannot evaluate the lock at all — usage error, bad fd,
+// unsupported filesystem — is not contention. Reporting it as a benign
+// "already running" skip with exit 0 hides a backup outage behind a healthy
+// order, the same way a missing flock would if it were not escalated.
+func TestBackupScriptFailsClosedWhenFlockCannotEvaluateLock(t *testing.T) {
+	cityPath := t.TempDir()
+	dataDir := filepath.Join(cityPath, "dolt-data")
+	if err := os.MkdirAll(filepath.Join(dataDir, "prod", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir db: %v", err)
+	}
+	binDir := t.TempDir()
+	gcLogPath := writeDogFakeGC(t, binDir)
+	doltLogPath := writeBackupFakeDolt(t, binDir, "2.1.0", 0, "prod")
+	// 64 is EX_USAGE, what Homebrew's flock returns for an option it rejects.
+	// Any non-conflict exit must take the same fail-closed path.
+	writeExecutable(t, filepath.Join(binDir, "flock"), "#!/bin/sh\necho 'flock: unusable' >&2\nexit 64\n")
+
+	out, err := runDogScriptCommand(t, "mol-dog-backup.sh", binDir, cityPath, dataDir, "GC_BACKUP_DATABASES=prod")
+	if err == nil {
+		t.Fatalf("backup must fail closed when flock cannot evaluate the lock:\n%s", out)
+	}
+	if !strings.Contains(out, "lock-error") {
+		t.Fatalf("backup should report a lock error, got:\n%s", out)
+	}
+	if strings.Contains(out, "already running") {
+		t.Fatalf("an unusable flock must not be reported as contention:\n%s", out)
+	}
+	doltLog, err := os.ReadFile(doltLogPath)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(doltLog), "backup sync") {
+		t.Fatalf("backup synced without a proven lock:\n%s", doltLog)
+	}
+	gcLog, err := os.ReadFile(gcLogPath)
+	if err != nil {
+		t.Fatalf("read gc log: %v", err)
+	}
+	if !strings.Contains(string(gcLog), "Dolt backup: flock could not evaluate the backup lock [HIGH]") {
+		t.Fatalf("unusable flock must escalate, gc log:\n%s", gcLog)
 	}
 }
 
