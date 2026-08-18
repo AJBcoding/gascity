@@ -1409,9 +1409,13 @@ type BeadsConfig struct {
 	// ShippedCloseWarnOnly temporarily permits managed closes that violate the
 	// shipped work-record contract after emitting warnings and durably confirmed
 	// telemetry. It is false by default, so managed closes enforce the contract.
-	// This setting
+	// A bd-backed city needs it because the pinned bd cannot revision-fence a
+	// managed close; a stock FileStore deployment fences natively and must omit
+	// it, keeping strict enforcement. This setting
 	// exists for one compatibility release and must be removed at v1.6.0 after
-	// gc beads audit-shipped reports complete=true clean=true and the durable
+	// a bd exposing --if-revision is pinned (upstream beads#4682) with green
+	// revision-fence qualification, gc beads audit-shipped reports
+	// complete=true clean=true, and the durable
 	// journal confirms zero acknowledged warn-only-use events throughout the
 	// declared observation window. Warn-only closes fail if readback fails.
 	ShippedCloseWarnOnly *bool `toml:"shipped_close_warn_only,omitempty" jsonschema:"default=false"`

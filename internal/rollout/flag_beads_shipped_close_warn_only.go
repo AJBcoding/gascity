@@ -15,8 +15,13 @@ const (
 	// the setting, warning path, doctor notice, and telemetry must be deleted.
 	ShippedCloseWarnOnlyRemovalVersion = "v1.6.0"
 	// ShippedCloseWarnOnlyRemovalCondition is the operator-verifiable readiness
-	// condition for that mandatory deletion.
-	ShippedCloseWarnOnlyRemovalCondition = "gc beads audit-shipped reports complete=true clean=true and the durable event-journal query completes with zero acknowledged work.close.warn_only.used events throughout the declared observation window (warn-only closes refuse unless each event is durably read back)"
+	// condition for that mandatory deletion. The revision-fence clause leads
+	// because it is why a bd-backed city enables the mode at all: the pinned bd
+	// cannot fence a managed close, so removing the mode before a fence-capable
+	// bd is pinned and qualified would refuse every gated work-record close
+	// rather than enforce one. The audit and observation clauses cannot detect
+	// that, so satisfying them alone must never read as ready.
+	ShippedCloseWarnOnlyRemovalCondition = "a bd exposing --if-revision is pinned (upstream beads#4682) and its revision-fence qualification is green, gc beads audit-shipped reports complete=true clean=true, and the durable event-journal query completes with zero acknowledged work.close.warn_only.used events throughout the declared observation window (warn-only closes refuse unless each event is durably read back)"
 )
 
 // ShippedCloseWarnOnly reports whether managed close violations warn instead
