@@ -76,7 +76,7 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
-		return nil, runFailure(args, err)
+		return nil, runFailure(ctx, args, err)
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
 		return nil, nil // success with no payload (e.g. pane send-keys / pane run)
@@ -116,32 +116,73 @@ func stderrHerdrError(stderr []byte) *herdrError {
 	return nil
 }
 
+// runError is a failed `herdr` exec: the message a human reads, and every cause
+// a program matches on, kept in separate places on purpose.
+//
+// The message is this package's established rendering, unchanged —
+// "herdr [<args>]: <stderr bytes>" verbatim when herdr printed any, otherwise
+// "herdr [<args>]: <cause>". That string is what lands in gc's logs and in CLI
+// output, so growing it a prefix per newly-typed detail would make every
+// consumer of it re-learn the format; the detail goes into Unwrap instead,
+// where errors.Is/errors.As read it and the text does not move.
+type runError struct {
+	msg      string      // exactly what the pre-typed code formatted
+	herdrErr *herdrError // herdr's own error, when stderr carried a decodable envelope
+	execErr  error       // the exec failure as returned (*exec.ExitError, exec.ErrNotFound, …)
+	ctxErr   error       // ctx.Err() at failure time, when the caller's context had already died
+}
+
+func (e *runError) Error() string { return e.msg }
+
+// Unwrap exposes all three causes (Go multi-error unwrapping), so herdrErrorCode
+// finds the code, errors.As recovers the exit status, and errors.Is answers for
+// context.Canceled / context.DeadlineExceeded — none of which appear in the text.
+func (e *runError) Unwrap() []error {
+	causes := make([]error, 0, 3)
+	if e.herdrErr != nil {
+		causes = append(causes, e.herdrErr)
+	}
+	if e.execErr != nil {
+		causes = append(causes, e.execErr)
+	}
+	if e.ctxErr != nil {
+		causes = append(causes, e.ctxErr)
+	}
+	return causes
+}
+
 // runFailure renders a failed `herdr` exec as this package's error, shared by
 // run and runRaw so both classify a rejection identically.
 //
-// A rejection carrying an envelope is wrapped exactly as the stdout path wraps
-// its own, so errors.As recovers the typed *herdrError and herdrErrorCode
-// resolves the code. Formatting those bytes with %s instead leaves no
-// *herdrError anywhere in the chain: herdrErrorCode answers "" and every code
-// comparison in the package silently fails to match on the one path a real
-// herdr actually rejects on — which is how the pane-busy retry ladder, the
-// agent_name_taken storm guard, and the timeout / agent_not_found branches came
-// to be dead in production (gas-ao8z). The *exec.ExitError is wrapped alongside
-// it (Go's multi-%w) so the exit status stays recoverable, and herdr's own
-// stderr is kept verbatim in the text so a log reader still sees every byte it
-// printed.
+// A rejection carrying an envelope contributes its typed *herdrError to the
+// chain, so errors.As recovers it and herdrErrorCode resolves the code.
+// Formatting those bytes with %s instead left no *herdrError anywhere in the
+// chain: herdrErrorCode answered "" and every code comparison in the package
+// silently failed to match on the one path a real herdr actually rejects on —
+// which is how the pane-busy retry ladder, the agent_name_taken storm guard,
+// and the timeout / agent_not_found branches came to be dead in production
+// (gas-ao8z). The *exec.ExitError joins it on BOTH stderr shapes, parseable or
+// not, so the exit status never depends on whether herdr happened to emit an
+// envelope.
 //
-// An unparseable stderr keeps its raw-text message unchanged: there is nothing
-// typed to recover, and that text is the only diagnostic a transport failure has.
-func runFailure(args []string, err error) error {
+// ctx.Err() joins them because os/exec will not report it: when a context dies
+// mid-command, Cmd.Wait sees the killed process first and deliberately prefers
+// its *exec.ExitError over the context watcher's cause, so a canceled verb
+// otherwise comes back as a plain nonzero exit and errors.Is(err,
+// context.Canceled) is false. Callers that bound a Start on a deadline read
+// that distinction to tell "herdr refused" from "we ran out of time".
+func runFailure(ctx context.Context, args []string, err error) error {
+	fail := &runError{execErr: err, ctxErr: ctx.Err()}
 	var ee *exec.ExitError
 	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-		if he := stderrHerdrError(ee.Stderr); he != nil {
-			return fmt.Errorf("herdr %v: %w (%w): %s", args, he, ee, bytes.TrimSpace(ee.Stderr))
-		}
-		return fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+		// herdr's stderr, byte for byte: for a transport failure it is the only
+		// diagnostic there is, and for a rejection it is what the operator saw.
+		fail.msg = fmt.Sprintf("herdr %v: %s", args, ee.Stderr)
+		fail.herdrErr = stderrHerdrError(ee.Stderr)
+		return fail
 	}
-	return fmt.Errorf("herdr %v: %w", args, err)
+	fail.msg = fmt.Sprintf("herdr %v: %v", args, err)
+	return fail
 }
 
 // agentInfo mirrors herdr's agent object.
@@ -249,7 +290,7 @@ func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
-		return "", runFailure(args, err)
+		return "", runFailure(ctx, args, err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {

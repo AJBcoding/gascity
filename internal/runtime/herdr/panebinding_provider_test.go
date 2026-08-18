@@ -398,6 +398,56 @@ func TestStartPaneBusyLadderIsBounded(t *testing.T) {
 	}
 }
 
+// Cancellation must survive the ladder, and the ATTEMPT is the half that was
+// broken. The backoff already returns ctx.Err() verbatim (the select in
+// provider.go), so a cancel that lands between attempts was always matchable; a
+// cancel that lands while an `agent start` is in flight comes back from os/exec
+// as the killed process's exit status instead, because Cmd.Wait prefers the
+// process error over the context watcher's cause. A reconciler that bounds
+// Start on startup_timeout then reads its own deadline as a herdr refusal —
+// and the ladder widens the window, since a busy pane keeps a Start in flight
+// for minutes.
+func TestStartCancelledDuringPaneBusyRetryAttemptStaysMatchable(t *testing.T) {
+	p, session, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, session)
+	// Attempt 1 is rejected pane-busy, which arms the ladder; the RETRY attempt
+	// blocks until it is killed, so the cancel lands inside `agent start`.
+	rewriteFake(t, p, "agent_start)", "agent_start)\n"+`  if [ -e "$STATE/hang_next" ]; then : > "$STATE/hanging"; exec sleep 5; fi`)
+	rewriteFake(t, p, `rm -f "$STATE/pane_busy_once"`, `rm -f "$STATE/pane_busy_once"; : > "$STATE/hang_next"`)
+	setState(t, state, "pane_busy_once")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel on the fake's own signal that it has entered the retry attempt,
+	// not on a fixed delay — a delay could drift into the backoff window and
+	// quietly assert the case that already worked.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			if _, err := os.Stat(filepath.Join(state, "hanging")); err == nil {
+				cancel()
+				return
+			}
+			select {
+			case <-done:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
+
+	err := p.Start(ctx, "gastown__witness", runtime.Config{Command: "claude"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v; want errors.Is(context.Canceled) for a cancel during the retry attempt", err)
+	}
+	// Two starts prove the cancel interrupted the RETRY: a cancel during the
+	// backoff would have returned after the first.
+	if n := strings.Count(fakeCalls(t, state), "agent start gastown__witness"); n != 2 {
+		t.Errorf("agent start issued %d times; want 2 (the rejection plus the retry attempt the cancel interrupted)", n)
+	}
+}
+
 // Placement must recycle EVERY stale tab carrying the session's label, not
 // just the first: reconciler churn can leave several behind, and a survivor
 // lingers forever (its shell pane with it).
