@@ -205,7 +205,9 @@ type agentInfo struct {
 // exact wave it exists to survive. Its Duration twin is
 // startupNudgeIdleTimeout. The worst case is three of these end to end
 // (readiness, prompt confirmation, Enter recovery), well inside the
-// reconciler's pendingCreateNeverStartedTimeout of 10m.
+// reconciler's pendingCreateNeverStartedTimeout of 10m — though on the
+// reconciler path [session].startup_timeout (60s by default) is the shorter,
+// live bound; see paneBusyRetries in provider.go for the full deadline stack.
 const startupBootBudgetMS = 60000
 
 // agentStartTimeoutMS bounds herdr's own wait for the launched agent TUI to
