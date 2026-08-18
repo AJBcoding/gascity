@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,8 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/workclose"
 )
+
+const managedMatrixStoreRef = "city:test"
 
 type managedMutationBackend struct {
 	name string
@@ -86,7 +89,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 			t.Run("exact shipped update persists and replay is idempotent", func(t *testing.T) {
 				store, reopen := backend.open(t)
 				current := createManagedMatrixBead(t, store, "gc-matrix-shipped", nil)
-				repoDir, metadata, journal := managedLandingEvidence(t, current.ID, "city")
+				repoDir, metadata, journal := managedLandingEvidence(t, current.ID, managedMatrixStoreRef)
 				metadata[beadmeta.WorkDirMetadataKey] = repoDir
 				closed := "closed"
 				opts := beads.UpdateOpts{Status: &closed, Metadata: metadata}
@@ -96,16 +99,24 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 					t.Fatalf("UpdateIfMatch: %v", err)
 				}
 
-				persisted := reopenManagedMatrixBead(t, reopen, current.ID)
+				replayStore := reopen()
+				persisted := getManagedMatrixBead(t, replayStore, current.ID)
 				if persisted.Status != "closed" || persisted.Metadata[beadmeta.WorkOutcomeMetadataKey] != beadmeta.WorkOutcomeShipped {
 					t.Fatalf("persisted shipped close = status %q outcome %q", persisted.Status, persisted.Metadata[beadmeta.WorkOutcomeMetadataKey])
 				}
 				beforeReplayRevision := persisted.Revision
 				assertManagedCloseAllowed(t, persisted, persisted, journal)
-
-				// Managed close treats an exact already-closed row as an idempotent
-				// replay, so no conditional write is issued.
+				writer := managedConditionalWriter(t, replayStore)
+				if err := writer.CloseIfMatch(current.ID, persisted.Revision); err != nil {
+					t.Fatalf("already-closed CloseIfMatch: %v", err)
+				}
 				afterReplay := reopenManagedMatrixBead(t, reopen, current.ID)
+				if afterReplay.Status != persisted.Status {
+					t.Fatalf("replay status = %q, want unchanged %q", afterReplay.Status, persisted.Status)
+				}
+				if !maps.Equal(afterReplay.Metadata, persisted.Metadata) {
+					t.Fatalf("replay metadata changed: got %#v, want %#v", afterReplay.Metadata, persisted.Metadata)
+				}
 				if afterReplay.Revision != beforeReplayRevision {
 					t.Fatalf("replay revision = %d, want unchanged %d", afterReplay.Revision, beforeReplayRevision)
 				}
@@ -153,7 +164,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 					store,
 					nil,
 					t.TempDir(),
-					"city",
+					managedMatrixStoreRef,
 					nil,
 					true,
 					&stderr,
@@ -173,7 +184,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 			t.Run("event journal read failure refuses mutation", func(t *testing.T) {
 				store, reopen := backend.open(t)
 				current := createManagedMatrixBead(t, store, "gc-matrix-journal", nil)
-				repoDir, metadata, _ := managedLandingEvidence(t, current.ID, "city")
+				repoDir, metadata, _ := managedLandingEvidence(t, current.ID, managedMatrixStoreRef)
 				metadata[beadmeta.WorkDirMetadataKey] = repoDir
 				seed := managedConditionalWriter(t, store)
 				if err := seed.UpdateIfMatch(current.ID, current.Revision, beads.UpdateOpts{Metadata: metadata}); err != nil {
@@ -184,7 +195,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 				prospective.Status = "closed"
 				provider := &unreadableManagedCloseEvidence{Fake: events.NewFake()}
 				var stderr strings.Builder
-				if !evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), "city", &config.City{}, provider, &stderr) {
+				if !evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), managedMatrixStoreRef, &config.City{}, provider, &stderr) {
 					t.Fatalf("journal failure allowed mutation; stderr=%q", stderr.String())
 				}
 
@@ -244,7 +255,11 @@ func createManagedMatrixBead(t *testing.T, store beads.Store, id string, metadat
 
 func reopenManagedMatrixBead(t *testing.T, reopen func() beads.Store, id string) beads.Bead {
 	t.Helper()
-	store := reopen()
+	return getManagedMatrixBead(t, reopen(), id)
+}
+
+func getManagedMatrixBead(t *testing.T, store beads.Store, id string) beads.Bead {
+	t.Helper()
 	got, err := store.Get(id)
 	if err != nil {
 		t.Fatalf("reopen/get %s: %v", id, err)
@@ -264,7 +279,7 @@ func managedConditionalWriter(t *testing.T, store beads.Store) beads.Conditional
 func assertManagedCloseAllowed(t *testing.T, current, prospective beads.Bead, evidence events.Provider) {
 	t.Helper()
 	var stderr strings.Builder
-	if evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), "city", &config.City{}, evidence, &stderr) {
+	if evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), managedMatrixStoreRef, &config.City{}, evidence, &stderr) {
 		t.Fatalf("managed close blocked: %s", stderr.String())
 	}
 }
