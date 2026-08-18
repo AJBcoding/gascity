@@ -33,6 +33,23 @@ type policyWriteRaceStore struct {
 	once sync.Once
 }
 
+// firstEmptyThenFailProvider reproduces an event backend that serves an
+// evidence query successfully before becoming unavailable. It catches the
+// former landingEvidenceUnreadable second-read bug: an original invalid
+// evidence refusal must remain a 409 even if a later read would fail.
+type firstEmptyThenFailProvider struct {
+	*events.Fake
+	calls int
+}
+
+func (p *firstEmptyThenFailProvider) List(filter events.Filter) ([]events.Event, error) {
+	p.calls++
+	if p.calls == 1 {
+		return p.Fake.List(filter)
+	}
+	return nil, errors.New("event backend became unavailable")
+}
+
 func (s *policyWriteRaceStore) race(id string) {
 	s.once.Do(func() {
 		value := "changed concurrently"
@@ -612,6 +629,53 @@ func TestHTTPBeadCloseSurfacesUnreadableLandingEvidenceAsServiceUnavailable(t *t
 	}
 	if after.Status == "closed" {
 		t.Fatal("HTTP close mutated shipped work while evidence was unreadable")
+	}
+}
+
+func TestHTTPBeadCloseKeepsOriginalInvalidEvidenceClassWhenReaderChanges(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available in PATH")
+	}
+	repo := t.TempDir()
+	runResolverGit(t, repo, "init", "-b", "main")
+	runResolverGit(t, repo, "-c", "user.email=test@example.invalid", "-c", "user.name=test", "commit", "--allow-empty", "-m", "shipped work")
+	revParse := exec.Command("git", "rev-parse", "HEAD")
+	revParse.Dir = repo
+	out, err := revParse.Output()
+	if err != nil {
+		t.Fatalf("git rev-parse HEAD: %v", err)
+	}
+	sha := strings.TrimSpace(string(out))
+
+	state := newFakeState(t)
+	state.eventProv = &firstEmptyThenFailProvider{Fake: events.NewFake()}
+	store := state.stores["myrig"]
+	created, err := store.Create(beads.Bead{Title: "shipped with missing evidence", Type: "task", Metadata: beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey:          beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkCommitMetadataKey:           sha,
+		beadmeta.WorkBranchMetadataKey:           "main",
+		beadmeta.WorkDirMetadataKey:              repo,
+		beadmeta.DeliveryStateMetadataKey:        beadmeta.DeliveryStateLanded,
+		beadmeta.DeliveryEventIDMetadataKey:      "gcl-" + strings.Repeat("a", 64),
+		beadmeta.DeliverySourceCommitMetadataKey: sha,
+		beadmeta.DeliveryLandedSHAMetadataKey:    strings.Repeat("3", 40),
+	}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	h := newTestCityHandler(t, state)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, newPostRequest(cityURL(state, "/bead/")+created.ID+"/close", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("close status = %d, want %d, body: %s", rec.Code, http.StatusConflict, rec.Body.String())
+	}
+	after, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if after.Status == "closed" {
+		t.Fatal("HTTP close mutated shipped work after the original invalid-evidence refusal")
 	}
 }
 

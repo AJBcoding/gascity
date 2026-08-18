@@ -28,24 +28,53 @@ type Request struct {
 	StoreRef            string
 }
 
+// Evaluation is the work-close policy result. LandingEvidence preserves the
+// typed result from the same evidence read that contributed its messages, so a
+// transport can distinguish unavailable infrastructure without reading the
+// event backend again.
+type Evaluation struct {
+	Violations      []string
+	LandingEvidence []workstamp.EvidenceViolation
+}
+
+// LandingEvidenceUnreadable reports whether the original evaluation found an
+// unreadable landing-evidence dependency.
+func (e Evaluation) LandingEvidenceUnreadable() bool {
+	for _, violation := range e.LandingEvidence {
+		if violation.Class == workstamp.EvidenceUnreadable {
+			return true
+		}
+	}
+	return false
+}
+
 // Evaluate returns every work-record violation in prospective. Non-work and
 // control-plane beads are deliberately outside this policy.
 func (p WorkClosePolicy) Evaluate(req Request) []string {
+	return p.EvaluateDetailed(req).Violations
+}
+
+// EvaluateDetailed evaluates a prospective work close once and preserves the
+// typed landing-evidence result alongside its message surface.
+func (p WorkClosePolicy) EvaluateDetailed(req Request) Evaluation {
 	if !strings.EqualFold(strings.TrimSpace(req.ProspectiveStatus), "closed") {
-		return nil
+		return Evaluation{}
 	}
 	prospective := req.Current
 	prospective.Type = req.ProspectiveType
 	prospective.Status = req.ProspectiveStatus
 	prospective.Metadata = req.ProspectiveMetadata
 	if !AppliesTo(req.Current) && !AppliesTo(prospective) {
-		return nil
+		return Evaluation{}
 	}
-	violations := ValidateRecord(prospective, p.CommitReachable)
+	evaluation := Evaluation{Violations: ValidateRecord(prospective, p.CommitReachable)}
 	if prospective.Metadata[beadmeta.WorkOutcomeMetadataKey] == beadmeta.WorkOutcomeShipped {
-		violations = append(violations, workstamp.ValidateLandingEvidence(p.Evidence, req.StoreRef, prospective)...)
+		evaluation.LandingEvidence = workstamp.ClassifyLandingEvidence(p.Evidence, req.StoreRef, prospective)
+		for _, violation := range evaluation.LandingEvidence {
+			evaluation.Violations = append(evaluation.Violations, violation.Message)
+		}
 	}
-	return violations
+	return evaluation
 }
 
 // ProjectUpdate applies the object-model fields that can change policy scope
