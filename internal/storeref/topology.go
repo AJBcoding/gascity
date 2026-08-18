@@ -183,6 +183,34 @@ func (t Topology) BindingFor(c coordclass.Class) (ClassBinding, bool) {
 	return ClassBinding{}, false
 }
 
+// BindingLegFor returns the leg of the binding ref names, and whether this city
+// serves one.
+//
+// It is the inverse of the vocabulary ClassRef mints. A persisted census row, a
+// landing-evidence record and an operator's diagnostic all name a binding by
+// its ref, and "which store is that" is the resolver's question for the same
+// reason "which refs can this city record under" is (ClaimRefs). Re-derived at
+// the asker — routes.storeFor for the store, a second ClassRef over whatever
+// classes the routes carry for the ref — it is one fact derived twice, and the
+// two derivations part company the day a city serves its classes from more than
+// one binding: the ref would name one binding and the store would be another's.
+//
+// Like ClaimRefs it is answered from the topology rather than from a Plan: the
+// asker matches a ref and reads no store, so a plan's executor has nothing to
+// do, and a REFUSED city still holds records under its binding's ref, so the
+// answer has to exist exactly where a plan correctly refuses.
+//
+// A leg with no store is not served and matches nothing — the same rule
+// dedupeLegs applies, so a ref never resolves to a handle a plan would drop.
+func (t Topology) BindingLegFor(ref StoreRef) (Leg, bool) {
+	for _, b := range t.orderedBindings() {
+		if b.Leg.Ref == ref && b.Leg.Store != nil {
+			return b.Leg, true
+		}
+	}
+	return Leg{}, false
+}
+
 // orderedBindings returns the bindings by ref ascending. Sorting here rather
 // than trusting the constructor is what makes a plan deterministic for every
 // caller, including one that assembled a Topology by hand in a test.

@@ -168,6 +168,53 @@ func TestShippedAuditSourcesUseAuthoritativeCityRigAndSplitClassStores(t *testin
 	}
 }
 
+// The refused-city branch. A plan the resolver declines to build must still
+// leave an audit that NAMES every binding it could not reach — dropping them
+// would report a clean city — and it must name them with no handle: the audit
+// never reads a source carrying an open error, so passing the store anyway
+// would take a probe out of a plan the resolver had just refused.
+func TestShippedAuditSourcesNameEveryBindingARefusedPlanCouldNotReach(t *testing.T) {
+	clearGCEnv(t)
+	resetCLIStorageRoutes(t)
+	resetCLIResidencyBindings()
+	t.Cleanup(resetCLIResidencyBindings)
+	cityPath := t.TempDir()
+	cityTOML := "[workspace]\nname = \"audit-city\"\n[beads]\nprovider = \"bd\"\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seedAuditFileStore(t, cityPath, "city-row")
+	entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
+	entry.once.Do(func() { entry.routes = refusingStorageRoutes("infra", errStorageRefusedForTest{}) })
+
+	cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+	if err != nil {
+		t.Fatalf("load fixture config: %v", err)
+	}
+	t.Setenv("GC_BEADS", "bd")
+	sources := shippedAuditSources(cityPath, cfg)
+	t.Cleanup(func() { _ = sources.closeOwned() })
+	if !strings.Contains(strings.Join(sources.errors, "; "), "authoritative store topology") {
+		t.Fatalf("a refused plan reported errors %v, want the topology failure", sources.errors)
+	}
+	found := false
+	for _, source := range sources.stores {
+		if !strings.HasPrefix(source.StoreRef, "class:") {
+			continue
+		}
+		found = true
+		if source.OpenError == nil {
+			t.Errorf("%s was reported as readable on a refused city", source.StoreRef)
+		}
+		if source.Store != nil {
+			t.Errorf("%s was handed a store handle out of a plan the resolver refused", source.StoreRef)
+		}
+	}
+	if !found {
+		t.Fatalf("the refused binding was dropped from the audit: %+v", sources.stores)
+	}
+}
+
 func seedAuditFileStore(t *testing.T, root, id string) {
 	t.Helper()
 	store, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(root, ".gc", "beads.json"))

@@ -402,6 +402,51 @@ func TestClassRefRoundTripsAsCityScope(t *testing.T) {
 	}
 }
 
+// BindingLegFor is the ref vocabulary read back: a consumer holding a persisted
+// ref must reach the store that ref names, and no other.
+//
+// T5 is the row that matters. On the per-class split, an asker that re-derived
+// the binding itself — one class's store, plus a ref built from every class the
+// routes carry — gets ONE ref naming the whole set and hands back whichever
+// store it asked about: the ref names one binding and the store is another's.
+func TestBindingLegForNamesExactlyTheBindingTheRefSpells(t *testing.T) {
+	fan := newT5()
+	graph := ClassRef([]coordclass.Class{coordclass.ClassGraph})
+	sessions := ClassRef([]coordclass.Class{coordclass.ClassSessions})
+	for _, ref := range []StoreRef{graph, sessions} {
+		leg, ok := fan.topo.BindingLegFor(ref)
+		if !ok {
+			t.Fatalf("BindingLegFor(%q) found no binding on the per-class split", ref)
+		}
+		if leg.Ref != ref {
+			t.Fatalf("BindingLegFor(%q) returned leg %q", ref, leg.Ref)
+		}
+		if got, want := storeNameOf(leg.Store), string(ref); got != want {
+			t.Fatalf("BindingLegFor(%q) returned the store of %q", ref, got)
+		}
+	}
+	// A ref naming the two classes TOGETHER is the shape a second derivation
+	// mints, and this city serves no such binding.
+	if _, ok := fan.topo.BindingLegFor(ClassRef([]coordclass.Class{coordclass.ClassGraph, coordclass.ClassSessions})); ok {
+		t.Fatal("BindingLegFor answered a ref no binding on this city is spelled with")
+	}
+	// A refused city still answers: its records are under the refusing
+	// binding's ref, and a plan that correctly refuses must not take that away.
+	refused := newT3()
+	if _, ok := refused.topo.BindingLegFor(ClassRef(infraClasses)); !ok {
+		t.Fatal("BindingLegFor lost the binding ref of a refused city")
+	}
+	// The work leg is not a binding, and a leg with no store is not served —
+	// dedupeLegs would drop it, so a ref must not resolve to it either.
+	if _, ok := newT1().topo.BindingLegFor(WorkRef); ok {
+		t.Fatal("BindingLegFor answered the work ref")
+	}
+	empty := Topology{Bindings: []ClassBinding{{Classes: infraClasses, Leg: Leg{Ref: ClassRef(infraClasses)}}}}
+	if _, ok := empty.BindingLegFor(ClassRef(infraClasses)); ok {
+		t.Fatal("BindingLegFor handed back a leg with no store")
+	}
+}
+
 // uncomparableStore is a store whose dynamic type carries a slice, so it can be
 // neither a map key nor an == operand. Real consumers have these — a test
 // double that pre-loads snapshots, or any store that embeds a []beads.Bead —

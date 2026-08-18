@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/workstamp"
 	"github.com/spf13/cobra"
@@ -149,20 +149,18 @@ func (r *cityLandingStampResolver) Resolve(ctx context.Context, storeRef string)
 		}
 		storePath = resolveStoreScopeRoot(r.cityPath, rig.Path)
 	case "class":
-		routes := cliStorageRoutes(r.cityPath)
-		store, relocated := graphClassBinding(routes)
-		if !relocated {
-			return nil, fmt.Errorf("class store ref %q is not served by a local class binding", storeRef)
+		// The binding a class ref names is the RESOLVER's answer, read back from
+		// the topology the census spelled the ref with in the first place. The
+		// work and rig legs stay unopened: a class ref is answered from the
+		// bindings alone, and this resolver opens one store per ref on purpose —
+		// building a whole topology would open every rig to stamp one event.
+		topo := cliResidencyTopology(r.cityPath, r.cfg, nil, nil)
+		leg, ok := topo.BindingLegFor(storeref.StoreRef(storeRef))
+		if !ok {
+			return nil, fmt.Errorf("class store ref %q names no class binding this city serves%s", storeRef, landingServedBindings(topo))
 		}
-		classes := make([]coordclass.Class, 0, len(routes.stores))
-		for class := range routes.stores {
-			classes = append(classes, class)
-		}
-		if want := string(storeref.ClassRef(classes)); storeRef != want {
-			return nil, fmt.Errorf("class store ref %q does not name current class binding %q", storeRef, want)
-		}
-		r.stores[storeRef] = store
-		return store, nil
+		r.stores[storeRef] = leg.Store
+		return leg.Store, nil
 	}
 	store, err := openStoreAtForCityWithConfig(storePath, r.cityPath, r.cfg)
 	if err != nil {
@@ -170,6 +168,21 @@ func (r *cityLandingStampResolver) Resolve(ctx context.Context, storeRef string)
 	}
 	r.stores[storeRef] = store
 	return store, nil
+}
+
+// landingServedBindings names the class bindings a city does serve, so a ref
+// that matches none of them reports what it could have named. It is empty on a
+// city that relocates nothing, which leaves the plain sentence.
+func landingServedBindings(topo storeref.Topology) string {
+	refs := make([]string, 0, len(topo.Bindings))
+	for _, binding := range topo.Bindings {
+		refs = append(refs, string(binding.Leg.Ref))
+	}
+	if len(refs) == 0 {
+		return ""
+	}
+	sort.Strings(refs)
+	return " (serving " + strings.Join(refs, ", ") + ")"
 }
 
 func (r *cityLandingStampResolver) Close() error {

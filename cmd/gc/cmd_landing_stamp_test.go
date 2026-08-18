@@ -302,3 +302,31 @@ func TestCityLandingStampResolverStampsAuthoritativeClassRow(t *testing.T) {
 		t.Fatalf("class landing evidence violations = %v", violations)
 	}
 }
+
+// A class ref is read back from the TOPOLOGY the census spelled it with, never
+// from a second reading of the routes. The two halves a re-derivation gets
+// separately — one class's store, and a ref rebuilt from every class the routes
+// carry — are pinned here as one answer: the served ref resolves to the binding
+// itself, and a ref this city serves no binding for is refused by name.
+func TestCityLandingStampResolverAnswersClassRefsFromTheTopology(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	chdirProviderAwareTest(t, cityPath)
+	t.Setenv("GC_CITY_PATH", cityPath)
+
+	resolver, err := newCityLandingStampResolver(io.Discard)
+	if err != nil {
+		t.Fatalf("building the resolver: %v", err)
+	}
+	store, err := resolver.Resolve(context.Background(), "class:gmnos")
+	if err != nil {
+		t.Fatalf("resolving the ref this city serves: %v", err)
+	}
+	if store != classStore {
+		t.Fatalf("class:gmnos resolved to %T, want the binding the routes opened", store)
+	}
+	if _, err := resolver.Resolve(context.Background(), "class:g"); err == nil {
+		t.Fatal("a class ref naming no binding this city serves resolved to a store")
+	} else if !strings.Contains(err.Error(), "class:gmnos") {
+		t.Fatalf("the refusal must name what this city does serve: %v", err)
+	}
+}
