@@ -20,6 +20,25 @@ version = 2
 #     (validateMediumOwners rejects a non-runnable owner). It therefore raises
 #     every subprocess baseline below, the Small ratchet included.
 #
+#     Disposition: KEEP. This raise is accepted permanent debt, not deferred
+#     cleanup, and the reasons are recorded here so the next reader does not
+#     reopen the question. cmd/gc/landing_e2e_test.go drives real git through
+#     that one helper 31 times to build a work repo and a bare remote, push,
+#     and then verify landing receipts against real refs (ls-remote
+#     --exit-code, for-each-ref, worktree cleanliness before and after). The
+#     landingGitSpy at the top of the same file already covers the unit half
+#     -- which args, env and deadline the landing code passes -- so the
+#     surviving subprocess is exactly the part a spy cannot answer: whether a
+#     real remote ref really moved. Replacing it would delete the only proof
+#     the receipt logic holds against real git semantics.
+#     It is also already minimal: a single exec.Command funnels all 31
+#     invocations, so there is nothing left to consolidate.
+#     Deliberately NOT moved behind a build tag either. Tagging would drop it
+#     out of the untagged rows and the default lane, buying a smaller number
+#     by removing safety-critical landing coverage from the gate that
+#     everyone actually runs -- the same trade as deleting the call, only
+#     quieter.
+#
 #   gas-ftv4      +1 call / +1 file
 #     scripts/shipped_close_graduation_test.go:17 -- exec.Command("bash",
 #     script, version, root) inside TestShippedCloseGraduationReleaseCheck,

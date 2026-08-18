@@ -126,7 +126,11 @@ type Baseline struct {
 //	exec.Command("git", ...) inside the helper landingTestGit added by ancestor
 //	commit c5234c4b0. Its owner is not a Go test, so the census records
 //	runnable=false and no Medium row can exempt it; it raises the audit, source
-//	debt, and Small debt subprocess baselines alike.
+//	debt, and Small debt subprocess baselines alike. That raise is accepted
+//	permanent debt: the helper is the single exec.Command through which
+//	landing_e2e_test.go drives real git to prove a real remote ref moved, which
+//	is the one thing the landingGitSpy beside it cannot answer. test-resources.toml
+//	records the full disposition, including why tagging it out was refused.
 //
 //	gas-ftv4 +1 call / +1 file: scripts/shipped_close_graduation_test.go:17, an
 //	exec.Command("bash", ...) inside TestShippedCloseGraduationReleaseCheck
