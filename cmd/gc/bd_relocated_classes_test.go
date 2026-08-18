@@ -418,11 +418,15 @@ dolt.auto-start: false
 	// with that body and exit 0 — which is how a projection's confident empty
 	// answer (`[]`, exit 0) is reproduced without a real ledger. It exits 0
 	// explicitly so an unset BD_STUB_STDOUT does not leak the test's exit code.
-	// A --help invocation answers like the pinned bd instead: it advertises
-	// --if-revision, so the close fence's capability probe sees a
-	// fence-capable bd and a gated work close is not refused for bd age —
-	// these tests pin ROUTING, not fence capability (that fail-closed rule is
-	// pinned by TestGcBdPassthroughRefusesGatedCloseWhenBdCannotFence).
+	// A --help invocation answers differently: it advertises --if-revision, so
+	// the close fence's capability probe sees a fence-capable bd and a gated
+	// work close is not refused for bd age. That is a deliberate simulation of
+	// a HYPOTHETICAL fence-capable bd, not a model of what is installed — the
+	// pinned bd (v1.1.0) does NOT support --if-revision (upstream beads#4682
+	// is unlanded), so on a real bd-backed scope today the enforced path is
+	// the refusal path. These tests pin ROUTING and must not be re-litigating
+	// fence capability; the fail-closed rule itself is pinned by
+	// TestGcBdPassthroughRefusesGatedCloseWhenBdCannotFence.
 	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\ncase \" $* \" in *' --help '*) printf 'Flags:\\n      --if-revision int\\n'; exit 0;; esac\nif [ -n \"${BD_STUB_STDOUT}\" ]; then printf '%s\\n' \"${BD_STUB_STDOUT}\"; fi\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}

@@ -43,6 +43,13 @@ package main
 // says so on stderr — the silent unfenced write is the shape this seam
 // exists to remove.
 //
+// As of this change the pinned bd is v1.1.0, which does not implement
+// --if-revision (upstream beads#4682 is unlanded), so on a bd-backed scope
+// under enforcement the refusal above IS the path every gated work-record
+// close takes today — not a legacy-deployment edge. It stays the path until
+// #4682 lands and the pin moves; beads.shipped_close_warn_only is the
+// bounded escape in the meantime.
+//
 // # Cost
 //
 // The capability probe runs only when a gated close is actually about to
