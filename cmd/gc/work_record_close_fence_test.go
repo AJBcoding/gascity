@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -10,7 +11,9 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // fenceCloseCity configures a bd-backed city served by a fake PATH bd script
@@ -85,6 +88,67 @@ func fenceWriteLines(t *testing.T, capture string) []string {
 		}
 	}
 	return writes
+}
+
+// fenceNativeReader is the capability shape the production factory returns
+// for an eligible NativeDoltStore: it is authoritative for reads but does not
+// implement ConditionalWriter. Embedding only beads.Store deliberately hides
+// the MemStore's optional conditional-write methods.
+type fenceNativeReader struct {
+	beads.Store
+	row beads.Bead
+}
+
+func (s fenceNativeReader) Get(id string) (beads.Bead, error) {
+	if id != s.row.ID {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	return s.row, nil
+}
+
+// nativeFenceReaderFromFactory runs the real beads factory's eligible-native
+// branch with an injected native-shaped reader. This exercises factory
+// selection without opening a live Dolt server; the diagnostic proves the
+// returned read authority is the NativeDoltStore branch rather than BdStore.
+func nativeFenceReaderFromFactory(t *testing.T, row beads.Bead) beads.Store {
+	t.Helper()
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "")
+	scope := t.TempDir()
+	files := fsys.NewFake()
+	files.Files[filepath.Join(scope, ".beads", "metadata.json")] = []byte(`{
+  "backend": "dolt",
+  "dolt_mode": "server",
+  "dolt_database": "gascity",
+  "project_id": "gc-local"
+}`)
+	reader := fenceNativeReader{Store: beads.NewMemStore(), row: row}
+	result, err := beads.OpenStoreAtForCity(context.Background(), beads.StoreOpenOptions{
+		ScopeRoot: scope,
+		Provider:  "bd",
+		PreflightChecker: contract.PreflightChecker{
+			FS:                  files,
+			Provider:            "bd",
+			BeadsLibraryVersion: "1.1.0",
+			BDContext: func(string) (contract.PreflightBDContext, error) {
+				return contract.PreflightBDContext{Backend: "dolt", DoltMode: "server", BDVersion: "1.1.0", SchemaVersion: 1}, nil
+			},
+			DatabaseProjectID: func(string) (string, bool, error) {
+				return "gc-local", true, nil
+			},
+		},
+		OpenBdStore: func() (beads.Store, error) {
+			t.Fatal("factory selected BdStore for an eligible native-reader fixture")
+			return nil, nil
+		},
+		OpenNativeStore: func() (beads.Store, error) { return reader, nil },
+	})
+	if err != nil {
+		t.Fatalf("OpenStoreAtForCity(native reader): %v", err)
+	}
+	if result.Diagnostic.Store != beads.BeadsStoreNameNativeDoltStore || !result.Diagnostic.NativeStoreEligible {
+		t.Fatalf("factory diagnostic = %+v, want eligible %s", result.Diagnostic, beads.BeadsStoreNameNativeDoltStore)
+	}
+	return wrapStoreWithBeadPolicies(result.Store, &config.City{})
 }
 
 // fenceCapableBdScript serves the gated work row at revision 7, advertises
@@ -201,6 +265,33 @@ func TestGcBdPassthroughFencesGatedWorkRecordClose(t *testing.T) {
 		if strings.Count(line, "--if-revision") != 1 {
 			t.Fatalf("argv %q carries the fence more than once", line)
 		}
+	}
+}
+
+// TestGcBdPassthroughFencesNativeFactoryReaderWithSelectedBdTransport catches
+// the production mutation that asks the authoritative reader (NativeDoltStore)
+// whether the separately exec'd bd binary supports --if-revision. The reader
+// intentionally has no ConditionalWriter; capability belongs to the exact bd
+// write transport. Its advertised support must admit the close, carrying the
+// native row's literal revision 73 to that selected binary exactly once.
+func TestGcBdPassthroughFencesNativeFactoryReaderWithSelectedBdTransport(t *testing.T) {
+	capture := fenceCloseCity(t, fenceCapableBdScript, false)
+	reader := nativeFenceReaderFromFactory(t, beads.Bead{
+		ID: "demo-native", Title: "native-read work row", Type: "task", Status: "open", Revision: 73,
+		Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp},
+	})
+
+	originalOpen := openBdMutationReadStore
+	openBdMutationReadStore = func(_, _ string, _ *config.City) (beads.Store, error) { return reader, nil }
+	t.Cleanup(func() { openBdMutationReadStore = originalOpen })
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"close", "demo-native"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(native-reader close) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	writes := fenceWriteLines(t, capture)
+	if len(writes) != 1 || writes[0] != "write: close demo-native --if-revision 73" {
+		t.Fatalf("selected bd writes = %q, want native revision fenced on exact argv", writes)
 	}
 }
 

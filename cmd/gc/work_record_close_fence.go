@@ -60,6 +60,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os/exec"
 	"strconv"
 	"strings"
 
@@ -73,7 +74,7 @@ import (
 // re-read, pinned by TestEvaluateWorkRecordCloseGateUsesPreFetchedBead) — so
 // the appended fence is the revision the policy actually judged. It returns
 // the argv to exec and whether the close must be refused instead.
-func applyWorkRecordCloseFence(bdArgs []string, store beads.Store, evaluated map[string]beads.Bead, enforce bool, stderr io.Writer) ([]string, bool) {
+func applyWorkRecordCloseFence(bdArgs []string, writeTransport beads.Store, evaluated map[string]beads.Bead, enforce bool, stderr io.Writer) ([]string, bool) {
 	ids, isClose := workRecordCloseTargets(bdArgs)
 	if !isClose {
 		return bdArgs, false
@@ -145,7 +146,7 @@ func applyWorkRecordCloseFence(bdArgs []string, store beads.Store, evaluated map
 		return bdArgs, false
 	}
 
-	if capable, reason := beads.ProbeConditionalWriteSupport(store); !capable {
+	if capable, reason := beads.ProbeConditionalWriteSupport(writeTransport); !capable {
 		if enforce {
 			fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close of %s refused: validated against revision %d, but this scope's bd cannot fence the write (%s); an unfenced close could land after a concurrent change invalidates that validation. Upgrade bd to a build that supports %s, or set beads.shipped_close_warn_only = true to temporarily proceed unfenced.\n", id, revision, reason, beads.ConditionalWriteFenceFlag) //nolint:errcheck // best-effort stderr
 			return bdArgs, true
@@ -160,6 +161,21 @@ func applyWorkRecordCloseFence(bdArgs []string, store beads.Store, evaluated map
 	fenced = append(fenced, bdArgs...)
 	fenced = append(fenced, beads.ConditionalWriteFenceFlag, fence)
 	return fenced, false
+}
+
+// bdWorkRecordFenceTransport represents the exact bd subprocess that will
+// perform a passthrough mutation. The authoritative read store is deliberately
+// absent: a native reader may supply the row and revision even though only the
+// separately resolved bd binary parses and enforces --if-revision. The runner
+// pins the absolute executable, scope directory, and final command environment
+// already resolved by doBd; the same values are reused for the write exec.
+func bdWorkRecordFenceTransport(bdPath, scopeRoot string, env []string) beads.Store {
+	return beads.NewBdStore(scopeRoot, func(dir, _ string, args ...string) ([]byte, error) {
+		cmd := exec.Command(bdPath, args...)
+		cmd.Dir = dir
+		cmd.Env = env
+		return cmd.CombinedOutput()
+	})
 }
 
 // workRecordCloseFenceGated reports whether the close of this evaluated row

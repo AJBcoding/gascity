@@ -148,6 +148,12 @@ var bdBeadExists = func(cityPath string, cfg *config.City, target execStoreTarge
 	return err == nil && strings.TrimSpace(bead.ID) != ""
 }
 
+// openBdMutationReadStore is the factory-selected authoritative read seam for
+// the exact-ID guard and work-record close gate. Tests replace it only to
+// exercise a native-reader factory result without starting an external Dolt
+// server; production always uses the normal city/scope store factory.
+var openBdMutationReadStore = openStoreAtForCityWithConfig
+
 func bdCommandEnv(cityPath string, cfg *config.City, target execStoreTarget) ([]string, error) {
 	var overrides map[string]string
 	var err error
@@ -224,7 +230,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
 	// Refuse a dropped --set-metadata pair before any store work, so nothing is
 	// written and the exit code is honest. bd applies the subset and exits 0.
 	if msg, mistyped := mistypedMetadataPairRefusal(bdArgs); mistyped {
@@ -349,7 +354,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		if len(writeIDs) > 0 {
-			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
+			store, storeErr := openBdMutationReadStore(target.ScopeRoot, cityPath, cfg)
 			// Store-unavailable: we cannot verify, but we must not block
 			// legitimate writes. Fall through; bd will error on actual problems.
 			if storeErr == nil {
@@ -383,15 +388,35 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Resolve the write transport before deciding fence capability. The
+	// authoritative reader above may be NativeDoltStore, while the mutation is
+	// performed by this separately selected bd binary; capability therefore
+	// belongs to this exact binary plus the environment and scope it will run
+	// with, not to guardStore. Reuse both values for the final exec so the probe
+	// and mutation cannot drift to different transports within one invocation.
+	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	bdEnv, err := bdCommandEnv(cityPath, cfg, target)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	bdExecEnv := workQueryEnvForDir(bdEnv, target.ScopeRoot)
+
 	// Join the gate's verdict to the mutation (gas-dq28): a gated work-record
 	// close carries the exact revision the gate evaluated into the subprocess
 	// as bd's --if-revision fence, so a row a concurrent writer moved between
 	// evaluation and exec is refused by bd instead of closed against a stale
 	// verdict. Fencing reuses the rows the guard read (the gate validated
-	// those same rows) and the store's own capability probe; when the fence
-	// cannot be applied, enforcement refuses rather than writing unfenced.
+	// those same rows) and the exact write transport's capability probe; when
+	// the fence cannot be applied, enforcement refuses rather than writing
+	// unfenced.
 	// Non-close commands and closes of exempt beads pass through untouched.
-	fencedArgs, fenceBlocked := applyWorkRecordCloseFence(bdArgs, guardStore, guardBeads, workRecordEnforceEnabled(cfg), stderr)
+	fenceTransport := bdWorkRecordFenceTransport(bdPath, target.ScopeRoot, bdExecEnv)
+	fencedArgs, fenceBlocked := applyWorkRecordCloseFence(bdArgs, fenceTransport, guardBeads, workRecordEnforceEnabled(cfg), stderr)
 	if fenceBlocked {
 		return 1
 	}
@@ -407,12 +432,6 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// backend. Keying on the target scope rather than the city keeps a rig
 	// that owns its binding on its pin, and keeps a rig that overrides the
 	// city backend on the ambient bd its runtime env already implies.
-	bdPath, err := resolveBdBinaryForScope(cityPath, target.ScopeRoot)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-
 	cmd := exec.Command(bdPath, bdArgs...)
 	cmd.Dir = target.ScopeRoot
 	cmd.Stdin = os.Stdin
@@ -424,12 +443,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// (close path) — both go through this handoff.
 	stderrScan := &headLimitedWriter{limit: bdStderrScanLimit}
 	cmd.Stderr = io.MultiWriter(stderr, stderrScan)
-	env, err := bdCommandEnv(cityPath, cfg, target)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	cmd.Env = workQueryEnvForDir(env, cmd.Dir)
+	cmd.Env = bdExecEnv
 
 	traceStart := time.Now()
 	runErr := cmd.Run()
