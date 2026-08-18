@@ -75,11 +75,7 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("herdr %v: %s", args, ee.Stderr)
-		}
-		return nil, fmt.Errorf("herdr %v: %w", args, err)
+		return nil, runFailure(args, err)
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
 		return nil, nil // success with no payload (e.g. pane send-keys / pane run)
@@ -92,6 +88,16 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 		return nil, fmt.Errorf("herdr %v: %w", args, env.Error)
 	}
 	return env.Result, nil
+}
+
+// runFailure renders a failed `herdr` exec as this package's error, shared by
+// run and runRaw so both classify a rejection identically.
+func runFailure(args []string, err error) error {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		return fmt.Errorf("herdr %v: %s", args, ee.Stderr)
+	}
+	return fmt.Errorf("herdr %v: %w", args, err)
 }
 
 // agentInfo mirrors herdr's agent object.
@@ -199,11 +205,7 @@ func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %s", args, ee.Stderr)
-		}
-		return "", fmt.Errorf("herdr %v: %w", args, err)
+		return "", runFailure(args, err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {
