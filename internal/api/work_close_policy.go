@@ -14,7 +14,15 @@ import (
 	"github.com/gastownhall/gascity/internal/workclose"
 )
 
-func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref storeref.StoreRef) error {
+// enforceResolvedWorkClose applies the work-record close policy to the exact
+// row, physical store ref, and STORE this plane resolved for the mutation.
+//
+// store is the target, not a convenience: the bounded shipped-close warn-only
+// setting relaxes only a close written through the pinned bd contract, and on a
+// mixed-provider city that is a per-store fact. Handlers pass the store they
+// are about to write through, so the decision never has to re-derive a provider
+// from config or from the bead's ID prefix.
+func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref storeref.StoreRef, store beads.Store) error {
 	storeRef := s.canonicalWorkCloseStoreRef(ref)
 	repoDir := strings.TrimSpace(prospective.Metadata[beadmeta.WorkDirMetadataKey])
 	if repoDir == "" {
@@ -35,7 +43,9 @@ func (s *Server) enforceResolvedWorkClose(current, prospective beads.Bead, ref s
 		StoreRef:            storeRef,
 	})
 	mode := "enforced"
-	if s.bootFlags.ShippedCloseWarnOnly() {
+	if !workclose.Enforce(s.bootFlags.ShippedCloseWarnOnly(), workclose.CloseTarget{
+		BDStoreContract: beads.StoreUsesBDContract(store),
+	}) {
 		mode = "warn-only"
 	}
 	if mode == "warn-only" {

@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/workclose"
 )
 
 // alwaysReachable / neverReachable are injected commit-reachability oracles so
@@ -600,7 +601,7 @@ func TestRunWorkRecordCloseGateWarnOnlyFailsClosedWhenJournalOpenFails(t *testin
 		beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
 	}}
 	var stderr strings.Builder
-	if block := runWorkRecordCloseGate([]string{"close", bead.ID}, t.TempDir(), "/nonexistent/no-event-journal", cfg, panicOnGetStore{}, map[string]beads.Bead{bead.ID: bead}, &stderr); !block {
+	if block := runWorkRecordCloseGate([]string{"close", bead.ID}, t.TempDir(), "/nonexistent/no-event-journal", cfg, panicOnGetStore{}, map[string]beads.Bead{bead.ID: bead}, bdCloseTarget, &stderr); !block {
 		t.Fatalf("warn-only close proceeded after journal open failure; stderr=%q", stderr.String())
 	}
 }
@@ -623,7 +624,7 @@ func TestResolvedByIDWarnOnlyCloseFailsClosedWhenUsageCannotBeConfirmed(t *testi
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			var stderr strings.Builder
-			if block := evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), "city:test", cfg, test.provider, &stderr); !block {
+			if block := evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), "city:test", cfg, bdCloseTarget, test.provider, &stderr); !block {
 				t.Fatalf("by-ID warn-only close proceeded without confirmed telemetry; stderr=%q", stderr.String())
 			}
 		})
@@ -639,7 +640,7 @@ func TestResolvedByIDWarnOnlyCloseProceedsAfterConfirmedUsage(t *testing.T) {
 	prospective := current
 	prospective.Status = "closed"
 	var stderr strings.Builder
-	if block := evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), "city:test", cfg, events.NewFake(), &stderr); block {
+	if block := evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), "city:test", cfg, bdCloseTarget, events.NewFake(), &stderr); block {
 		t.Fatalf("by-ID warn-only close blocked after confirmed telemetry; stderr=%q", stderr.String())
 	}
 }
@@ -658,7 +659,7 @@ func TestRunWorkRecordCloseGateReusesPreOpenedStore(t *testing.T) {
 	}
 	var stderr strings.Builder
 	const bogusCityPath = "/nonexistent/does-not-exist"
-	block := runWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, t.TempDir(), bogusCityPath, nil, panicOnGetStore{}, preFetched, &stderr)
+	block := runWorkRecordCloseGate([]string{"close", "wr-shipped-nocommit"}, t.TempDir(), bogusCityPath, nil, panicOnGetStore{}, preFetched, bdCloseTarget, &stderr)
 	if !block {
 		t.Fatalf("expected block=true for shipped-without-commit, got false (fallback store open may have silently swallowed the preOpened store); stderr=%s", stderr.String())
 	}
@@ -669,11 +670,19 @@ func TestRunWorkRecordCloseGateReusesPreOpenedStore(t *testing.T) {
 
 func TestWorkRecordEnforceEnabled(t *testing.T) {
 	t.Setenv("GC_WORK_RECORD_ENFORCE", "0")
-	if !workRecordEnforceEnabled(&config.City{}) {
+	if !workRecordEnforceEnabled(&config.City{}, bdCloseTarget) {
 		t.Fatal("absent migration setting must default to enforced mode; legacy env must not disable it")
 	}
 	warnOnly := true
-	if workRecordEnforceEnabled(&config.City{Beads: config.BeadsConfig{ShippedCloseWarnOnly: &warnOnly}}) {
-		t.Fatal("explicit shipped_close_warn_only=true must select warn-only mode")
+	warnOnlyCity := &config.City{Beads: config.BeadsConfig{ShippedCloseWarnOnly: &warnOnly}}
+	if workRecordEnforceEnabled(warnOnlyCity, bdCloseTarget) {
+		t.Fatal("explicit shipped_close_warn_only=true must select warn-only mode for a bd-backed target")
+	}
+	if !workRecordEnforceEnabled(warnOnlyCity, workclose.CloseTarget{}) {
+		t.Fatal("shipped_close_warn_only must not relax a natively fence-capable target")
 	}
 }
+
+// bdCloseTarget is the mutation target of a close written through the pinned bd
+// contract — the only target the bounded compatibility mode may relax.
+var bdCloseTarget = workclose.CloseTarget{BDStoreContract: true}

@@ -41,6 +41,16 @@ func (c *shippedCloseBoundaryCheck) Run(_ *doctor.CheckContext) *doctor.CheckRes
 		if len(bdScopes) > 0 {
 			res.Details = append(res.Details, "raw-close-reachable scopes: "+strings.Join(bdScopes, ", "))
 		}
+		// Advisory, never a block. The mode is scoped to the mutation target,
+		// so "warn-only is on" no longer describes the whole city, and an
+		// operator who reads it that way will file a refusal from a
+		// fence-capable rig as a bug. Naming those scopes here is the cheapest
+		// place to correct that; refusing the topology outright would fail a
+		// whole city for a per-scope arrangement that is individually sane.
+		res.Details = append(res.Details, "the compatibility mode relaxes only closes written through the pinned bd contract")
+		if strict := c.strictlyEnforcedScopes(); len(strict) > 0 {
+			res.Details = append(res.Details, "still strictly enforced (natively fence-capable): "+strings.Join(strict, ", "))
+		}
 		res.FixHint = "disable beads.shipped_close_warn_only after the shipped-work audit and observation gate pass"
 		return res
 	}
@@ -109,6 +119,29 @@ func (c *shippedCloseBoundaryCheck) scopeHasConfiguredOrEffectiveBDPath(scopeRoo
 		provider = "bd"
 	}
 	return providerUsesBdStoreContract(provider)
+}
+
+// strictlyEnforcedScopes names the scopes whose managed closes keep refusing
+// contract violations while beads.shipped_close_warn_only is true.
+//
+// It reads the close-routing resolver the gate itself consults, NOT this
+// check's raw-reachability probe above. The two answer different questions on
+// purpose: raw reachability is deliberately generous, because a transient
+// GC_BEADS=file must not hide a configured raw-bd entrypoint, while an
+// operator reading this line is asking which of their scopes will still refuse
+// a close today. Only the resolver that routes the close can answer that.
+func (c *shippedCloseBoundaryCheck) strictlyEnforcedScopes() []string {
+	var scopes []string
+	if !workRecordCloseTargetForScope(c.cityPath, c.cityPath).BDStoreContract {
+		scopes = append(scopes, fmt.Sprintf("city (%s)", c.bdScopeEvidence(c.cityPath)))
+	}
+	for _, rig := range c.cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" || workRecordCloseTargetForScope(rig.Path, c.cityPath).BDStoreContract {
+			continue
+		}
+		scopes = append(scopes, fmt.Sprintf("rig:%s (%s)", rig.Name, c.bdScopeEvidence(rig.Path)))
+	}
+	return scopes
 }
 
 func (c *shippedCloseBoundaryCheck) bdScopeEvidence(scopeRoot string) string {

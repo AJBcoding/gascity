@@ -302,7 +302,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		}
 		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
-	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
+	// The scope's resolved provider is both the routing decision below and the
+	// close gate's mutation target: this passthrough hands the write to a bd
+	// subprocess, so what that subprocess writes is what the bounded
+	// shipped-close compatibility mode may or may not relax. One resolution
+	// serves the in-process close route, the rejection text, and the gate, so
+	// the three cannot disagree about which store this invocation is about.
+	scopeProvider := rawBeadsProviderForScope(target.ScopeRoot, cityPath)
+	if !providerUsesBdStoreContract(scopeProvider) {
 		// A work-record close (`close`, or `update … --status=closed`) is the
 		// one command family a non-bd provider must still serve: the packs
 		// render it into every worker, and rejecting it here — BEFORE the
@@ -310,11 +317,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		// close route at all (gas-dq28). It runs in process with the same
 		// read → evaluate → revision-fenced write shape as the class door;
 		// every other verb keeps the rejection below unchanged.
-		if code, handled := maybeDoBdStoreClose(cityPath, cfg, target, provider, bdArgs, stdout, stderr); handled {
+		if code, handled := maybeDoBdStoreClose(cityPath, cfg, target, scopeProvider, bdArgs, stdout, stderr); handled {
 			return code
 		}
-		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
-		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
+		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", scopeProvider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
+		if hint := bdProviderMismatchHint(target.ScopeRoot, scopeProvider); hint != "" {
 			fmt.Fprintf(stderr, "  hint: %s\n", hint) //nolint:errcheck // best-effort stderr
 		}
 		return 1
@@ -384,7 +391,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// beads.shipped_close_warn_only setting may temporarily downgrade it. Reuses the
 	// store/beads the write-ID guard above already opened and read, and the
 	// config the caller already loaded.
-	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, stderr) {
+	if runWorkRecordCloseGate(bdArgs, target.ScopeRoot, cityPath, cfg, guardStore, guardBeads, workRecordCloseTargetForProvider(scopeProvider), stderr) {
 		return 1
 	}
 
@@ -415,8 +422,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// the fence cannot be applied, enforcement refuses rather than writing
 	// unfenced.
 	// Non-close commands and closes of exempt beads pass through untouched.
+	//
+	// The enforcement question is the same one the gate just answered, asked
+	// about the same target: this exec IS the mutation, and it is written
+	// through the bd contract the scope's provider names. Reusing the hoisted
+	// provider keeps the fence's fail-closed verdict and the gate's verdict on
+	// one answer rather than letting the fence re-derive a city-global one.
 	fenceTransport := bdWorkRecordFenceTransport(bdPath, target.ScopeRoot, bdExecEnv)
-	fencedArgs, fenceBlocked := applyWorkRecordCloseFence(bdArgs, fenceTransport, guardBeads, workRecordEnforceEnabled(cfg), stderr)
+	fencedArgs, fenceBlocked := applyWorkRecordCloseFence(bdArgs, fenceTransport, guardBeads, workRecordEnforceEnabled(cfg, workRecordCloseTargetForProvider(scopeProvider)), stderr)
 	if fenceBlocked {
 		return 1
 	}

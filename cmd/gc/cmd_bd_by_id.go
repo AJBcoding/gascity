@@ -588,6 +588,12 @@ type bdByIDClassDoor struct {
 	Graph    storebinding.GraphStore
 	Binding  string
 	StoreRef string
+	// Target is the compatibility identity of the store behind Graph, captured
+	// where the binding is opened. Writes through this door are in-process
+	// revision-fenced writes against that store — never a bd subprocess — so a
+	// close it serves is relaxed by beads.shipped_close_warn_only only if the
+	// binding itself is bd-backed. Every native binding stays enforced.
+	Target workclose.CloseTarget
 }
 
 // bindingName names the binding in operator-facing text.
@@ -642,7 +648,12 @@ func openBdByIDClassFrontDoor(cityPath string) (bdByIDClassDoor, bool, error) {
 	for class := range routes.stores {
 		classes = append(classes, class)
 	}
-	return bdByIDClassDoor{Graph: graph, Binding: routes.binding, StoreRef: string(storeref.ClassRef(classes))}, true, nil
+	return bdByIDClassDoor{
+		Graph:    graph,
+		Binding:  routes.binding,
+		StoreRef: string(storeref.ClassRef(classes)),
+		Target:   workRecordCloseTargetForStore(store),
+	}, true, nil
 }
 
 // resolve asks the open front door whether it owns id.
@@ -831,7 +842,7 @@ func maybeRouteBdByID(cityPath, rigName string, bdArgs []string, stdout, stderr 
 		prospective = workclose.ProjectUpdate(resolution.Bead, op.Update)
 		closing = op.Update.Status != nil && strings.EqualFold(strings.TrimSpace(*op.Update.Status), "closed")
 	}
-	if closing && evaluateResolvedWorkClose(resolution.Bead, prospective, cityPath, door.StoreRef, cityPath, cfg, stderr) {
+	if closing && evaluateResolvedWorkClose(resolution.Bead, prospective, cityPath, door.StoreRef, cityPath, cfg, door.Target, stderr) {
 		return 1, true
 	}
 	switch op.Verb {

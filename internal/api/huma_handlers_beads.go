@@ -757,7 +757,7 @@ func (s *Server) humaHandleBeadClose(_ context.Context, input *BeadCloseInput) (
 	if err != nil {
 		return nil, err
 	}
-	if err := s.enforceResolvedWorkClose(current, workclose.ProjectClose(current), ref); err != nil {
+	if err := s.enforceResolvedWorkClose(current, workclose.ProjectClose(current), ref, store); err != nil {
 		return nil, err
 	}
 	writer, ok := beads.ConditionalWriterFor(store)
@@ -870,7 +870,7 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	}
 	closing := opts.Status != nil && strings.EqualFold(strings.TrimSpace(*opts.Status), "closed")
 	if closing {
-		if err := s.enforceResolvedWorkClose(current, workclose.ProjectUpdate(current, opts), ref); err != nil {
+		if err := s.enforceResolvedWorkClose(current, workclose.ProjectUpdate(current, opts), ref, store); err != nil {
 			return nil, err
 		}
 	}
@@ -927,7 +927,7 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.enforceResolvedWorkClose(current, workclose.ProjectClose(current), ref); err != nil {
+	if err := s.enforceResolvedWorkClose(current, workclose.ProjectClose(current), ref, store); err != nil {
 		return nil, err
 	}
 	writer, ok := beads.ConditionalWriterFor(store)

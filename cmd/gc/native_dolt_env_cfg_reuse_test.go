@@ -214,11 +214,13 @@ func TestWorkRecordCloseGateReusesTheLoadedCityConfig(t *testing.T) {
 // would restore the double read with the whole suite still green.
 func TestBdCloseGateReusesTheWriteGuardsStoreRead(t *testing.T) {
 	const (
-		callee        = "runWorkRecordCloseGate"
-		wantStoreArg  = "guardStore"
-		wantBeadsArg  = "guardBeads"
-		storeArgIndex = 4
-		beadsArgIndex = 5
+		callee         = "runWorkRecordCloseGate"
+		wantStoreArg   = "guardStore"
+		wantBeadsArg   = "guardBeads"
+		storeArgIndex  = 4
+		beadsArgIndex  = 5
+		targetArgIndex = 6
+		wantTargetFunc = "workRecordCloseTargetForProvider"
 	)
 
 	fset := token.NewFileSet()
@@ -243,8 +245,8 @@ func TestBdCloseGateReusesTheWriteGuardsStoreRead(t *testing.T) {
 			return true
 		}
 		calls++
-		if len(call.Args) != 7 {
-			t.Fatalf("%s: got %d args, want 7", callee, len(call.Args))
+		if len(call.Args) != 8 {
+			t.Fatalf("%s: got %d args, want 8", callee, len(call.Args))
 		}
 		for _, want := range []struct {
 			index int
@@ -258,6 +260,17 @@ func TestBdCloseGateReusesTheWriteGuardsStoreRead(t *testing.T) {
 				t.Fatalf("doBd passes %s as %s arg %d; want the write-ID guard's %q, so the gate reuses the read it already paid for",
 					exprText(call.Args[want.index]), callee, want.index, want.name)
 			}
+		}
+		// The mutation target must be RESOLVED from the provider doBd routed
+		// on, not handed over as a literal. A zero CloseTarget compiles, reads
+		// as harmless, and silently re-decides every gated close in this route.
+		target, ok := call.Args[targetArgIndex].(*ast.CallExpr)
+		if !ok {
+			t.Fatalf("doBd passes %s as %s arg %d; want %s(...) so the gate is told the store the bd subprocess actually writes",
+				exprText(call.Args[targetArgIndex]), callee, targetArgIndex, wantTargetFunc)
+		}
+		if fnIdent, ok := target.Fun.(*ast.Ident); !ok || fnIdent.Name != wantTargetFunc {
+			t.Fatalf("doBd resolves %s as %s arg %d; want %s", exprText(target.Fun), callee, targetArgIndex, wantTargetFunc)
 		}
 		return true
 	})

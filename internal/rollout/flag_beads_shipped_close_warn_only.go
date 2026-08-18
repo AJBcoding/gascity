@@ -24,8 +24,15 @@ const (
 	ShippedCloseWarnOnlyRemovalCondition = "a bd exposing --if-revision is pinned (upstream beads#4682) and its revision-fence qualification is green, gc beads audit-shipped reports complete=true clean=true, and the durable event-journal query completes with zero acknowledged work.close.warn_only.used events throughout the declared observation window (warn-only closes refuse unless each event is durably read back)"
 )
 
-// ShippedCloseWarnOnly reports whether managed close violations warn instead
-// of refusing. The built-in and zero-value defaults are false (enforced).
+// ShippedCloseWarnOnly reports the city's configured bounded compatibility
+// setting. The built-in and zero-value defaults are false (enforced).
+//
+// It is the SETTING, not the decision. The mode exists for one deficiency —
+// the pinned bd cannot revision-fence a managed close — so a close is relaxed
+// only when the store it actually mutates is written through that contract.
+// Consumers pass this value and their resolved mutation target to
+// workclose.Enforce; reading it alone re-creates the city-global rule that
+// stripped strict enforcement from natively fence-capable stores.
 func (f Flags) ShippedCloseWarnOnly() bool { return f.shippedCloseWarnOnly.value }
 
 // WithShippedCloseWarnOnly overrides the gate on a ForTest Flags value.

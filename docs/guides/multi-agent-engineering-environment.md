@@ -81,7 +81,11 @@ hooks run after the mutation. A deployment that deliberately treats direct raw
 operational path visible to qualification. When it is omitted/false, arbitrary
 out-of-band execution remains unsupported and cannot be detected by config
 validation. Explicit `beads.shipped_close_warn_only = true` is advisory because
-it opts out of production enforcement rather than making a raw path safe.
+it opts out of production enforcement rather than making a raw path safe. It
+opts out only where the deficiency is: a close is relaxed when the store it
+actually mutates is written through the pinned `bd` contract, so a file-backed
+rig or a relocated class binding under a `bd`-backed city keeps strict
+shipped-close enforcement while the setting is true.
 
 ## Everything sorts into three layers
 

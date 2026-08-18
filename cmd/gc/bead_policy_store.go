@@ -38,7 +38,15 @@ type beadPolicyGraphStore struct {
 var (
 	_ beads.ConditionalAssignmentReleaser    = (*beadPolicyStore)(nil)
 	_ beads.ConditionalWritesResolveTargeter = (*beadPolicyStore)(nil)
+	_ beads.BDContractStore                  = (*beadPolicyStore)(nil)
 )
+
+// UsesBDContract forwards the wrapped store's bd-contract identity. Interface
+// embedding cannot promote it — beads.Store does not carry the method — and a
+// silent miss here would report a bd-backed store as natively fence-capable,
+// which is the direction that turns a compatibility relaxation into a rule the
+// wrong stores obey. beadPolicyGraphStore inherits this via *beadPolicyStore.
+func (s *beadPolicyStore) UsesBDContract() bool { return beads.StoreUsesBDContract(s.Store) }
 
 // ConditionalWritesResolveTarget declares the wrapped store as the
 // conditional-writes resolution target. The policy layer shapes creation and

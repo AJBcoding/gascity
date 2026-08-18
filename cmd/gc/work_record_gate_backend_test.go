@@ -75,7 +75,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 
 				prospective := current
 				prospective.Status = "closed"
-				assertManagedCloseAllowed(t, current, prospective, nil)
+				assertManagedCloseAllowed(t, store, current, prospective, nil)
 				if err := managedConditionalWriter(t, store).CloseIfMatch(current.ID, current.Revision); err != nil {
 					t.Fatalf("CloseIfMatch: %v", err)
 				}
@@ -94,7 +94,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 				closed := "closed"
 				opts := beads.UpdateOpts{Status: &closed, Metadata: metadata}
 				prospective := workclose.ProjectUpdate(current, opts)
-				assertManagedCloseAllowed(t, current, prospective, journal)
+				assertManagedCloseAllowed(t, store, current, prospective, journal)
 				if err := managedConditionalWriter(t, store).UpdateIfMatch(current.ID, current.Revision, opts); err != nil {
 					t.Fatalf("UpdateIfMatch: %v", err)
 				}
@@ -105,7 +105,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 					t.Fatalf("persisted shipped close = status %q outcome %q", persisted.Status, persisted.Metadata[beadmeta.WorkOutcomeMetadataKey])
 				}
 				beforeReplayRevision := persisted.Revision
-				assertManagedCloseAllowed(t, persisted, persisted, journal)
+				assertManagedCloseAllowed(t, replayStore, persisted, persisted, journal)
 				writer := managedConditionalWriter(t, replayStore)
 				if err := writer.CloseIfMatch(current.ID, persisted.Revision); err != nil {
 					t.Fatalf("already-closed CloseIfMatch: %v", err)
@@ -130,7 +130,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 				})
 				prospective := current
 				prospective.Status = "closed"
-				assertManagedCloseAllowed(t, current, prospective, nil)
+				assertManagedCloseAllowed(t, store, current, prospective, nil)
 
 				concurrent := "concurrent writer"
 				writer := managedConditionalWriter(t, store)
@@ -195,7 +195,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 				prospective.Status = "closed"
 				provider := &unreadableManagedCloseEvidence{Fake: events.NewFake()}
 				var stderr strings.Builder
-				if !evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), managedMatrixStoreRef, &config.City{}, provider, &stderr) {
+				if !evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), managedMatrixStoreRef, &config.City{}, workRecordCloseTargetForStore(store), provider, &stderr) {
 					t.Fatalf("journal failure allowed mutation; stderr=%q", stderr.String())
 				}
 
@@ -219,7 +219,7 @@ func TestManagedMutationBackendMatrix(t *testing.T) {
 				})
 				prospective := current
 				prospective.Status = "closed"
-				assertManagedCloseAllowed(t, current, prospective, nil)
+				assertManagedCloseAllowed(t, authoritative, current, prospective, nil)
 				if err := managedConditionalWriter(t, authoritative).CloseIfMatch(id, current.Revision); err != nil {
 					t.Fatalf("authoritative CloseIfMatch: %v", err)
 				}
@@ -276,10 +276,13 @@ func managedConditionalWriter(t *testing.T, store beads.Store) beads.Conditional
 	return writer
 }
 
-func assertManagedCloseAllowed(t *testing.T, current, prospective beads.Bead, evidence events.Provider) {
+// assertManagedCloseAllowed passes the store the matrix actually opened as the
+// close target, which is what an in-process route does: the compatibility
+// decision reads the resolved store, never city config.
+func assertManagedCloseAllowed(t *testing.T, store beads.Store, current, prospective beads.Bead, evidence events.Provider) {
 	t.Helper()
 	var stderr strings.Builder
-	if evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), managedMatrixStoreRef, &config.City{}, evidence, &stderr) {
+	if evaluateResolvedWorkCloseWithProvider(current, prospective, t.TempDir(), managedMatrixStoreRef, &config.City{}, workRecordCloseTargetForStore(store), evidence, &stderr) {
 		t.Fatalf("managed close blocked: %s", stderr.String())
 	}
 }

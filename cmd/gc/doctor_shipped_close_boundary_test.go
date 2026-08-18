@@ -158,6 +158,42 @@ func TestShippedCloseBoundaryWarnsWhenCompatibilityModeDisablesEnforcement(t *te
 	}
 }
 
+// TestShippedCloseBoundarySurfacesTheStrictlyEnforcedScopes is the advisory
+// half of the scoped rule. "warn-only is on" no longer describes the whole
+// city, so the check names the scopes that still refuse — as information, not
+// as a block: the topology below is individually sane and must stay OK-shaped
+// (advisory), which is why this is a detail line and not a status change.
+func TestShippedCloseBoundarySurfacesTheStrictlyEnforcedScopes(t *testing.T) {
+	clearGCEnv(t)
+	cityPath := t.TempDir()
+	rigPath := filepath.Join(cityPath, "rigs", "filerig")
+	if err := os.MkdirAll(filepath.Join(rigPath, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".gc", "beads.json"), []byte("{\"seq\":0,\"beads\":[]}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeShippedCloseBoundaryCityConfig(t, cityPath, "bd")
+	warnOnly := true
+	cfg := &config.City{
+		Beads: config.BeadsConfig{Provider: "bd", ShippedCloseWarnOnly: &warnOnly},
+		Rigs:  []config.Rig{{Name: "filerig", Path: rigPath}},
+	}
+
+	res := newShippedCloseBoundaryCheck(cityPath, cfg).Run(&doctor.CheckContext{CityPath: cityPath})
+
+	if res.Status != doctor.StatusWarning || res.Severity != doctor.SeverityAdvisory {
+		t.Fatalf("result = status %v severity %v, want the advisory warning (a mixed topology is not a block): %+v", res.Status, res.Severity, res)
+	}
+	details := strings.Join(res.Details, " ")
+	if !strings.Contains(details, "still strictly enforced") || !strings.Contains(details, "rig:filerig") {
+		t.Fatalf("Details = %q, want the file-backed rig named as still strictly enforced", details)
+	}
+	if strings.Contains(details, "still strictly enforced (natively fence-capable): city") {
+		t.Fatalf("Details = %q, want the bd-backed city excluded from the strict list", details)
+	}
+}
+
 func TestShippedCloseBoundaryPassesWithoutRawBDBackedScope(t *testing.T) {
 	clearGCEnv(t)
 	cityPath := t.TempDir()

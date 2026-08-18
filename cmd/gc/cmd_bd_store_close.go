@@ -187,7 +187,14 @@ func doBdStoreCloseResolved(op bdByIDOp, store beads.Store, scopeRoot, cityPath,
 	// scopeRoot is the repo fallback for commit-reachability, matching the
 	// passthrough gate's rule: gc.work_dir when the record carries it, the
 	// mutated scope otherwise.
-	if evaluateResolvedWorkCloseForRoute("gc.bd.store", current, prospective, scopeRoot, storeRef, cityPath, cfg, stderr) {
+	//
+	// The compatibility target is this store, not the city setting: the write
+	// below is an in-process revision-fenced write through the store this route
+	// holds, so a natively fencing provider (the FileStore this route exists
+	// for) stays strictly enforced even while a bd-backed city has
+	// beads.shipped_close_warn_only on. It has no compatibility need — it can
+	// fence.
+	if evaluateResolvedWorkCloseForRoute("gc.bd.store", current, prospective, scopeRoot, storeRef, cityPath, cfg, workRecordCloseTargetForStore(store), stderr) {
 		return 1
 	}
 	// A reason belongs to the transition that first closed the row. Replaying a

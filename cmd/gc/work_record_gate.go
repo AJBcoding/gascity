@@ -26,16 +26,45 @@ import (
 // that leaves no artifact at all) into a machine-checkable violation.
 //
 // The gate enforces by default. The bounded beads.shipped_close_warn_only
-// compatibility setting may temporarily log-and-proceed through v1.5.0.
+// compatibility setting may temporarily log-and-proceed through v1.5.0 — but
+// only for a close written through the pinned bd contract, which is the sole
+// deficiency it exists for. A natively fence-capable target stays enforced.
 //
 // Every managed close adapter resolves its mutation target first and supplies
-// that exact row and physical store ref to internal/workclose.WorkClosePolicy.
+// that exact row and physical store ref to internal/workclose.WorkClosePolicy,
+// plus the workclose.CloseTarget for the store it actually writes.
 
 // workRecordEnforceEnabled reports whether the close gate should block closes
-// that violate the work-record contract, rather than only warning.
-func workRecordEnforceEnabled(cfg *config.City) bool {
+// that violate the work-record contract, rather than only warning. target is
+// the store the calling route actually mutates; a resolve failure enforces.
+func workRecordEnforceEnabled(cfg *config.City, target workclose.CloseTarget) bool {
 	flags, err := rollout.Resolve(cfg, rollout.ResolveOptions{})
-	return err != nil || !flags.ShippedCloseWarnOnly()
+	if err != nil {
+		return true
+	}
+	return workclose.Enforce(flags.ShippedCloseWarnOnly(), target)
+}
+
+// workRecordCloseTargetForProvider describes the target of a close this process
+// hands to a bd subprocess: whatever the resolved provider for that scope is,
+// the write goes through the bd CLI contract when the provider does.
+func workRecordCloseTargetForProvider(provider string) workclose.CloseTarget {
+	return workclose.CloseTarget{BDStoreContract: providerUsesBdStoreContract(provider)}
+}
+
+// workRecordCloseTargetForScope resolves the target of a scoped bd mutation for
+// a caller that has not already resolved the scope's provider. It is the same
+// resolution `gc bd` itself routes on, so a rig whose store markers say file
+// stays strict under a bd-backed city's compatibility flag.
+func workRecordCloseTargetForScope(scopeRoot, cityPath string) workclose.CloseTarget {
+	return workRecordCloseTargetForProvider(rawBeadsProviderForScope(scopeRoot, cityPath))
+}
+
+// workRecordCloseTargetForStore describes the target of an in-process close:
+// the already-opened store the route writes through. An in-process route never
+// asks configuration what its store is — it holds the store.
+func workRecordCloseTargetForStore(store beads.Store) workclose.CloseTarget {
+	return workclose.CloseTarget{BDStoreContract: beads.StoreUsesBDContract(store)}
 }
 
 // validWorkOutcome reports whether v is one of the four typed work-record close
@@ -154,12 +183,16 @@ func bdUpdateClosesStatus(bdArgs []string) bool {
 // them in instead of paying a second openStoreAtForCity + store.Get round
 // trip. Both are optional (nil is fine): preOpened falls back to opening its
 // own store, and any ID missing from preFetched falls back to store.Get.
-func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, preOpened beads.Store, preFetched map[string]beads.Bead, stderr io.Writer) bool {
+//
+// closeTarget describes the store the bd subprocess will mutate. The caller
+// resolved that scope's provider to route the invocation at all, so it passes
+// the answer rather than making this gate resolve it a second time.
+func runWorkRecordCloseGate(bdArgs []string, scopeRoot, cityPath string, cfg *config.City, preOpened beads.Store, preFetched map[string]beads.Bead, closeTarget workclose.CloseTarget, stderr io.Writer) bool {
 	ids, ok := workRecordCloseTargets(bdArgs)
 	if !ok {
 		return false
 	}
-	enforce := workRecordEnforceEnabled(cfg)
+	enforce := workRecordEnforceEnabled(cfg, closeTarget)
 	storeRef := workRecordCanonicalStoreRef(scopeRoot, cityPath, cfg)
 	journal, closeJournal, journalErr := openWorkRecordEvidenceJournal(cityPath, cfg)
 	if journalErr == nil {
@@ -295,14 +328,16 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 }
 
 // evaluateResolvedWorkClose applies the shared policy to the exact row and
-// physical store selected by the class-store by-ID route.
-func evaluateResolvedWorkClose(current, prospective beads.Bead, repoFallback, storeRef, cityPath string, cfg *config.City, stderr io.Writer) bool {
-	evidence, closeEvidence, blocked := openResolvedWorkCloseEvidence(prospective.ID, cityPath, cfg, stderr)
+// physical store selected by the class-store by-ID route. closeTarget is that
+// same selection's store identity: the route holds the opened store, so the
+// compatibility decision reads it instead of guessing from city config.
+func evaluateResolvedWorkClose(current, prospective beads.Bead, repoFallback, storeRef, cityPath string, cfg *config.City, closeTarget workclose.CloseTarget, stderr io.Writer) bool {
+	evidence, closeEvidence, blocked := openResolvedWorkCloseEvidence(prospective.ID, cityPath, cfg, closeTarget, stderr)
 	if blocked {
 		return true
 	}
 	defer closeEvidence()
-	return evaluateResolvedWorkCloseWithProvider(current, prospective, repoFallback, storeRef, cfg, evidence, stderr)
+	return evaluateResolvedWorkCloseWithProvider(current, prospective, repoFallback, storeRef, cfg, closeTarget, evidence, stderr)
 }
 
 // evaluateResolvedWorkCloseForRoute is evaluateResolvedWorkClose for an
@@ -311,13 +346,13 @@ func evaluateResolvedWorkClose(current, prospective beads.Bead, repoFallback, st
 // runWorkRecordCloseGate uses for the passthrough's "gc.bd"), so an operator
 // counting down the compatibility window can tell which door the unfenced
 // closes are still arriving through.
-func evaluateResolvedWorkCloseForRoute(route string, current, prospective beads.Bead, repoFallback, storeRef, cityPath string, cfg *config.City, stderr io.Writer) bool {
-	evidence, closeEvidence, blocked := openResolvedWorkCloseEvidence(prospective.ID, cityPath, cfg, stderr)
+func evaluateResolvedWorkCloseForRoute(route string, current, prospective beads.Bead, repoFallback, storeRef, cityPath string, cfg *config.City, closeTarget workclose.CloseTarget, stderr io.Writer) bool {
+	evidence, closeEvidence, blocked := openResolvedWorkCloseEvidence(prospective.ID, cityPath, cfg, closeTarget, stderr)
 	if blocked {
 		return true
 	}
 	defer closeEvidence()
-	return evaluateResolvedWorkCloseWithProviderForRoute(route, current, prospective, repoFallback, storeRef, cfg, evidence, stderr)
+	return evaluateResolvedWorkCloseWithProviderForRoute(route, current, prospective, repoFallback, storeRef, cfg, closeTarget, evidence, stderr)
 }
 
 // openResolvedWorkCloseEvidence opens the evidence journal for an in-process
@@ -325,12 +360,16 @@ func evaluateResolvedWorkCloseForRoute(route string, current, prospective beads.
 // compatibility telemetry that mode depends on has nowhere to land — while
 // enforcement proceeds with a nil provider, whose unreadable-evidence answer
 // the shipped-close rule already converts into a violation.
-func openResolvedWorkCloseEvidence(beadID, cityPath string, cfg *config.City, stderr io.Writer) (events.Provider, func(), bool) {
+//
+// closeTarget decides which of those two arms this route is in: warn-only is
+// only ever in effect for a bd-contract target, so a natively fence-capable
+// store takes the enforcing arm and never blocks on telemetry it does not use.
+func openResolvedWorkCloseEvidence(beadID, cityPath string, cfg *config.City, closeTarget workclose.CloseTarget, stderr io.Writer) (events.Provider, func(), bool) {
 	evidence, closeEvidence, err := openWorkRecordEvidenceJournal(cityPath, cfg)
 	if err == nil {
 		return evidence, closeEvidence, false
 	}
-	if !workRecordEnforceEnabled(cfg) {
+	if !workRecordEnforceEnabled(cfg, closeTarget) {
 		fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close of %s refused: warn-only compatibility telemetry is unavailable: %v\n", beadID, err) //nolint:errcheck
 		return nil, func() {}, true
 	}
@@ -342,11 +381,11 @@ func openResolvedWorkCloseEvidence(beadID, cityPath string, cfg *config.City, st
 // (the backend qualification matrix, the by-ID gate tests) evaluate that
 // route's semantics, so the "gc.bd.by-id" label stays baked here rather than
 // repeated at each call site.
-func evaluateResolvedWorkCloseWithProvider(current, prospective beads.Bead, repoFallback, storeRef string, cfg *config.City, evidence events.Provider, stderr io.Writer) bool {
-	return evaluateResolvedWorkCloseWithProviderForRoute("gc.bd.by-id", current, prospective, repoFallback, storeRef, cfg, evidence, stderr)
+func evaluateResolvedWorkCloseWithProvider(current, prospective beads.Bead, repoFallback, storeRef string, cfg *config.City, closeTarget workclose.CloseTarget, evidence events.Provider, stderr io.Writer) bool {
+	return evaluateResolvedWorkCloseWithProviderForRoute("gc.bd.by-id", current, prospective, repoFallback, storeRef, cfg, closeTarget, evidence, stderr)
 }
 
-func evaluateResolvedWorkCloseWithProviderForRoute(route string, current, prospective beads.Bead, repoFallback, storeRef string, cfg *config.City, evidence events.Provider, stderr io.Writer) bool {
+func evaluateResolvedWorkCloseWithProviderForRoute(route string, current, prospective beads.Bead, repoFallback, storeRef string, cfg *config.City, closeTarget workclose.CloseTarget, evidence events.Provider, stderr io.Writer) bool {
 	repoDir := strings.TrimSpace(prospective.Metadata[beadmeta.WorkDirMetadataKey])
 	if repoDir == "" {
 		repoDir = repoFallback
@@ -361,7 +400,7 @@ func evaluateResolvedWorkCloseWithProviderForRoute(route string, current, prospe
 		ProspectiveMetadata: prospective.Metadata,
 		StoreRef:            storeRef,
 	})
-	enforce := workRecordEnforceEnabled(cfg)
+	enforce := workRecordEnforceEnabled(cfg, closeTarget)
 	mode := "warn-only"
 	if enforce {
 		mode = "enforced"

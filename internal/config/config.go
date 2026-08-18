@@ -1411,7 +1411,12 @@ type BeadsConfig struct {
 	// telemetry. It is false by default, so managed closes enforce the contract.
 	// A bd-backed city needs it because the pinned bd cannot revision-fence a
 	// managed close; a stock FileStore deployment fences natively and must omit
-	// it, keeping strict enforcement. This setting
+	// it, keeping strict enforcement. The setting is declared once for the city
+	// but is never applied city-wide: each managed close is relaxed only when
+	// the store that close actually mutates is written through the pinned bd
+	// contract, so a file-backed rig, a native store, or a relocated class
+	// binding under a bd-backed city keeps strict enforcement while this is
+	// true. This setting
 	// exists for one compatibility release and must be removed at v1.6.0 after
 	// a bd exposing --if-revision is pinned (upstream beads#4682) with green
 	// revision-fence qualification, gc beads audit-shipped reports
@@ -1488,6 +1493,9 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 
 // ShippedCloseWarnOnlyEnabled reports whether the bounded compatibility path
 // was explicitly enabled. Unset and explicit false both enforce closes.
+// Enabled is not the same as applied: which closes it actually relaxes is
+// decided per mutation target by workclose.Enforce, so this answers "is the
+// setting on" and never "is this close enforced".
 func (b BeadsConfig) ShippedCloseWarnOnlyEnabled() bool {
 	return b.ShippedCloseWarnOnly != nil && *b.ShippedCloseWarnOnly
 }
