@@ -544,9 +544,18 @@ func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID st
 	started, startErr := p.c.startAgentKind(ctx, hn, kind, paneID, args)
 	return resolveAgentNameTaken(started, startErr, agentStartOps{
 		getAgent: func() (agentInfo, bool, error) { return p.c.getAgent(ctx, herdrAgentName(name)) },
-		paneAlive: func(holderPane string) bool {
+		paneAlive: func(holderPane string) (bool, error) {
+			// probePane already separates the two failures this turns on: a
+			// pane herdr confirms is gone is (zero, nil) — determinate, and a
+			// dead holder — while a transport failure is (zero, err), which
+			// says nothing about the holder at all. Pass that distinction up
+			// instead of flattening both to "not alive"; the caller reaps what
+			// it is told is dead.
 			probe, perr := p.probePane(ctx, holderPane)
-			return perr == nil && probe.Exists && probe.Busy
+			if perr != nil {
+				return false, perr
+			}
+			return probe.Exists && probe.Busy, nil
 		},
 		closePane:  func(holderPane string) error { return p.c.closePane(ctx, holderPane) },
 		retryStart: func() (agentInfo, error) { return p.c.startAgentKind(ctx, hn, kind, paneID, args) },
@@ -556,6 +565,18 @@ func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID st
 // paneBusyRetries bounds how many agent_pane_busy rejections the kind launch
 // retries after re-waiting for the shell prompt (races between the readiness
 // probe and herdr's own availability check).
+//
+// The budget it was sized against, so the next change to it need not re-derive
+// the ceiling: each retry costs its backoff (1s/2s/4s = 7s total) plus another
+// waitPaneShellReady (≤ paneShellReadyWait, 15s), and every attempt including
+// the first is an `agent start` bounded by agentStartTimeoutMS (60s). Four
+// attempts is therefore 4×60 + 45 + 7 ≈ 292s absolute worst case — comfortably
+// inside the reconciler's pendingCreateNeverStartedTimeout of 10m, which is the
+// only deadline a slow Start can actually miss (the same frame that sizes
+// startupBootBudgetMS). Typical cost is the 7s of backoff alone: agent_pane_busy
+// is a pre-flight rejection herdr returns immediately, not a wait. The worst
+// case grows as (n+1)×60 + n×15 + (2^n − 1), so raising this past 6 breaks the
+// 10m budget (n=7 is ~712s) — and the backoff alone dominates only past n=9.
 const paneBusyRetries = 3
 
 // paneShellReadyWait bounds the wait for a fresh pane's shell to reach its
