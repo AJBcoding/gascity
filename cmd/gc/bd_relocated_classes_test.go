@@ -418,7 +418,12 @@ dolt.auto-start: false
 	// with that body and exit 0 — which is how a projection's confident empty
 	// answer (`[]`, exit 0) is reproduced without a real ledger. It exits 0
 	// explicitly so an unset BD_STUB_STDOUT does not leak the test's exit code.
-	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\nif [ -n \"${BD_STUB_STDOUT}\" ]; then printf '%s\\n' \"${BD_STUB_STDOUT}\"; fi\nexit 0\n"), 0o755); err != nil {
+	// A --help invocation answers like the pinned bd instead: it advertises
+	// --if-revision, so the close fence's capability probe sees a
+	// fence-capable bd and a gated work close is not refused for bd age —
+	// these tests pin ROUTING, not fence capability (that fail-closed rule is
+	// pinned by TestGcBdPassthroughRefusesGatedCloseWhenBdCannotFence).
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"${CAPTURE_PATH}\"\ncase \" $* \" in *' --help '*) printf 'Flags:\\n      --if-revision int\\n'; exit 0;; esac\nif [ -n \"${BD_STUB_STDOUT}\" ]; then printf '%s\\n' \"${BD_STUB_STDOUT}\"; fi\nexit 0\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -1216,7 +1221,7 @@ path = ".gc/store"
 func TestGcBdOnARefusedCitySeparatesWorkFromClassOwnedIDs(t *testing.T) {
 	t.Run("work id still reaches bd", func(t *testing.T) {
 		capture := bdSQLRefusalCity(t, bdUnservableStorage)
-		t.Setenv("BD_STUB_STDOUT", `[{"id":"demo-abc123","title":"work","status":"open","issue_type":"task","metadata":{"gc.work_outcome":"no-op"}}]`)
+		t.Setenv("BD_STUB_STDOUT", `[{"id":"demo-abc123","title":"work","status":"open","issue_type":"task","metadata":{"gc.work_outcome":"no-op"},"revision":5}]`)
 		resetCLIStorageRoutes(t)
 		captureCLIStorageStderr(t)
 

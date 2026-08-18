@@ -383,6 +383,20 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
+	// Join the gate's verdict to the mutation (gas-dq28): a gated work-record
+	// close carries the exact revision the gate evaluated into the subprocess
+	// as bd's --if-revision fence, so a row a concurrent writer moved between
+	// evaluation and exec is refused by bd instead of closed against a stale
+	// verdict. Fencing reuses the rows the guard read (the gate validated
+	// those same rows) and the store's own capability probe; when the fence
+	// cannot be applied, enforcement refuses rather than writing unfenced.
+	// Non-close commands and closes of exempt beads pass through untouched.
+	fencedArgs, fenceBlocked := applyWorkRecordCloseFence(bdArgs, guardStore, guardBeads, workRecordEnforceEnabled(cfg), stderr)
+	if fenceBlocked {
+		return 1
+	}
+	bdArgs = fencedArgs
+
 	reapStaleBdExportJSONL(target.ScopeRoot)
 	warnExternalBdOverrideDrift(stderr, cityPath, target)
 
