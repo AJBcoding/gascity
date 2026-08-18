@@ -62,8 +62,9 @@ var allowedNonMetadata = map[string]string{
 	"gc.endpoint_origin": "city config YAML key (internal/beads/contract/files.go)",
 	"gc.endpoint_status": "city config YAML key (internal/beads/contract/files.go)",
 
-	// Bead LABEL value (not a Metadata key) and a test-binary name marker.
+	// Bead LABEL/event-actor values (not Metadata keys) and a test-binary marker.
 	"gc.session":   "bead Label value, not a Metadata key (internal/agentutil/pool.go)",
+	"gc.bd":        "managed-bd close telemetry source, not a Metadata key (cmd/gc/work_record_gate.go)",
 	"gc.test":      "go test binary name marker (cmd/gc/test_guard.go)",
 	"gc.workstamp": "delivery-work-stamped event actor, not a Metadata key (internal/workstamp/stamp.go)",
 }

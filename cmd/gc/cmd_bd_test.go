@@ -1738,6 +1738,10 @@ set -eu
 // managed Dolt server and falls back to opening the on-disk store. doBd
 // should treat this as a hard failure regardless of bd's exit code.
 const silentFallbackFakeBdScript = `#!/bin/sh
+if [ "${1:-}" = "show" ]; then
+  printf '[{"id":"%s","title":"control row","status":"open","issue_type":"task","metadata":{"gc.kind":"run"}}]\n' "${3:-demo-abc}"
+  exit 0
+fi
 echo "auto-importing 220929 bytes from .beads/issues.jsonl into empty database... auto-imported 123 issues" >&2
 echo "$@"
 exit 0

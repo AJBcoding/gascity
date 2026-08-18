@@ -363,7 +363,13 @@ func TestBdByIDRoutesAWorkShapedIDResidentInTheClassBinding(t *testing.T) {
 // with no error anywhere.
 func TestBdByIDServesTheStepCompletionWrite(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
-	step := mustCreateClassBead(t, classStore, beads.Bead{Title: "the step", Type: "task"})
+	step := mustCreateClassBead(t, classStore, beads.Bead{
+		Title: "the step",
+		Type:  "task",
+		Metadata: beads.StringMap{
+			beadmeta.KindMetadataKey: beadmeta.KindRun,
+		},
+	})
 
 	var stdout, stderr bytes.Buffer
 	code, handled := maybeRouteBdByID(cityPath, "", []string{"update", step.ID, "--set-metadata", "gc.outcome=pass", "--status", "closed"}, &stdout, &stderr)
@@ -385,7 +391,13 @@ func TestBdByIDServesTheStepCompletionWrite(t *testing.T) {
 	}
 
 	// The `--status=closed` spelling the formula uses must land identically.
-	other := mustCreateClassBead(t, classStore, beads.Bead{Title: "the other step", Type: "task"})
+	other := mustCreateClassBead(t, classStore, beads.Bead{
+		Title: "the other step",
+		Type:  "task",
+		Metadata: beads.StringMap{
+			beadmeta.KindMetadataKey: beadmeta.KindRun,
+		},
+	})
 	stdout.Reset()
 	stderr.Reset()
 	if code, handled := maybeRouteBdByID(cityPath, "", []string{"update", other.ID, "--set-metadata", "gc.outcome=fail", "--set-metadata", "gc.failure_class=transient", "--status=closed"}, &stdout, &stderr); !handled || code != 0 {
@@ -1123,7 +1135,13 @@ func TestBdClosePrefixStoreBeadKeepsPassthrough(t *testing.T) {
 // in bd's own shape rather than falling through to a ledger that never held it.
 func TestBdCloseReservedPrefixServedInProcess(t *testing.T) {
 	cityPath, classStore := foreignProviderCity(t)
-	bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "a reserved-prefix step", Type: "task"})
+	bead := mustCreateClassBead(t, classStore, beads.Bead{
+		Title: "a reserved-prefix step",
+		Type:  "task",
+		Metadata: beads.StringMap{
+			beadmeta.KindMetadataKey: beadmeta.KindRun,
+		},
+	})
 
 	var stdout, stderr bytes.Buffer
 	code, handled := maybeRouteBdByID(cityPath, "", []string{"close", bead.ID}, &stdout, &stderr)
@@ -1549,6 +1567,14 @@ type getOnlyClassStore struct {
 func (s getOnlyClassStore) Update(string, beads.UpdateOpts) error { return s.writeErr }
 func (s getOnlyClassStore) Close(string) error                    { return s.writeErr }
 func (s getOnlyClassStore) Reopen(string) error                   { return s.writeErr }
+func (s getOnlyClassStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return s.writeErr
+}
+func (s getOnlyClassStore) CloseIfMatch(string, int64) error  { return s.writeErr }
+func (s getOnlyClassStore) DeleteIfMatch(string, int64) error { return s.writeErr }
+func (s getOnlyClassStore) CompareAndSetMetadataKey(string, string, string, string) (bool, error) {
+	return false, s.writeErr
+}
 
 // stubClassBindingStore replaces this city's resolved class stores with store,
 // for the whole of one test.
