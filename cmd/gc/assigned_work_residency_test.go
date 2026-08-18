@@ -21,28 +21,33 @@ import (
 // The pre-S2 list is written out literally in each row rather than computed, so
 // a future change to either side has to change a row.
 
-// seedSplitRoutes gives cityPath a served whole-split binding without opening
-// one. It seeds the one-shot funnel's memo, which is the same seam the by-id and
-// order-dispatch class tests already use: the topology constructors read OPENED
-// ROUTES, so a test that only sets cfg.Storage is describing a city whose config
-// says "split" and whose routes say nothing.
-func seedSplitRoutes(t *testing.T, cityPath string, binding beads.Store) {
+// seedRoutes gives cityPath a route map without opening a binding. It seeds the
+// one-shot funnel's memo, which is the same seam the by-id and order-dispatch
+// class tests already use: the topology constructors read OPENED ROUTES, so a
+// test that only sets cfg.Storage is describing a city whose config says "split"
+// and whose routes say nothing.
+//
+// A nil routes value is the identity answer — a city that relocates nothing.
+func seedRoutes(t *testing.T, cityPath string, routes *storageRoutes) {
 	t.Helper()
 	resetCLIStorageRoutes(t)
 	resetCLIResidencyBindings()
 	t.Cleanup(resetCLIResidencyBindings)
 	entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
-	entry.once.Do(func() { entry.routes = splitRoutes(binding) })
+	entry.once.Do(func() { entry.routes = routes })
+}
+
+// seedSplitRoutes gives cityPath a served whole-split binding without opening
+// one.
+func seedSplitRoutes(t *testing.T, cityPath string, binding beads.Store) {
+	t.Helper()
+	seedRoutes(t, cityPath, splitRoutes(binding))
 }
 
 // seedNoRoutes is the single-store control: a city that relocates nothing.
 func seedNoRoutes(t *testing.T, cityPath string) {
 	t.Helper()
-	resetCLIStorageRoutes(t)
-	resetCLIResidencyBindings()
-	t.Cleanup(resetCLIResidencyBindings)
-	entry := cliStorageRoutesEntryFor(filepath.Clean(cityPath))
-	entry.once.Do(func() { entry.routes = nil })
+	seedRoutes(t, cityPath, nil)
 }
 
 // planStores walks a plan through the executor and reports the stores it reads,

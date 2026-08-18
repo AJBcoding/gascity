@@ -447,6 +447,59 @@ func TestBindingLegForNamesExactlyTheBindingTheRefSpells(t *testing.T) {
 	}
 }
 
+// The DUPLICATE PHYSICAL ALIAS: two bindings, different refs, ONE store. A city
+// gets this the day two logical bindings resolve to the same root, and it is the
+// one shape ClaimRefs deliberately collapses — it deduplicates by store and
+// answers with the FIRST ref only, so the aliased second ref is not in its list
+// at all.
+//
+// BindingLegFor must not inherit that collapse. A ref is a NAME: a census row,
+// a landing-evidence record and an operator's diagnostic all carry the ref they
+// were written with, and both names have to reach the store they name. The
+// alias is also where the two ways of getting this wrong are visible as
+// different failures — answering nothing (read back off the deduplicated set)
+// and answering the leading binding's store, which on a real city is the graph
+// class's engine (re-derived at the asker).
+func TestBindingLegForResolvesAnAliasedBindingToItsSharedStore(t *testing.T) {
+	graphRef := ClassRef([]coordclass.Class{coordclass.ClassGraph})
+	ordersRef := ClassRef([]coordclass.Class{coordclass.ClassOrders})
+	sessionsRef := ClassRef([]coordclass.Class{coordclass.ClassSessions})
+	graph, shared := newNamedStore("graph-engine"), newNamedStore("shared-engine")
+	topo := Topology{
+		Work: Leg{Ref: WorkRef, Store: newNamedStore("work"), Prefix: cityPrefix},
+		Bindings: []ClassBinding{
+			{Classes: []coordclass.Class{coordclass.ClassGraph}, Prefixes: []string{"gcg"}, Leg: Leg{Ref: graphRef, Store: graph}},
+			{Classes: []coordclass.Class{coordclass.ClassOrders}, Prefixes: []string{"gco"}, Leg: Leg{Ref: ordersRef, Store: shared}},
+			{Classes: []coordclass.Class{coordclass.ClassSessions}, Prefixes: []string{"gcs"}, Leg: Leg{Ref: sessionsRef, Store: shared}},
+		},
+	}
+
+	for _, ref := range []StoreRef{ordersRef, sessionsRef} {
+		leg, ok := topo.BindingLegFor(ref)
+		if !ok {
+			t.Fatalf("BindingLegFor(%q) found no binding; an aliased ref still names a store this city serves", ref)
+		}
+		if leg.Ref != ref {
+			t.Fatalf("BindingLegFor(%q) returned leg %q", ref, leg.Ref)
+		}
+		if leg.Store != shared {
+			t.Fatalf("BindingLegFor(%q) returned %q, want the physical store the two aliased bindings share", ref, storeNameOf(leg.Store))
+		}
+	}
+	// The leading binding is the graph class's, and it stays its own answer —
+	// so the rows above assert which leg came back rather than a method that
+	// hands every ref the same one.
+	if leg, ok := topo.BindingLegFor(graphRef); !ok || leg.Store != graph {
+		t.Fatalf("BindingLegFor(%q) = (%q, %t), want the graph binding's own store", graphRef, storeNameOf(leg.Store), ok)
+	}
+	// The control that makes the alias real: ClaimRefs DOES collapse it, so
+	// "class:s" is reachable by name and unreachable through the claim list.
+	claims := topo.ClaimRefs()
+	if want := []StoreRef{WorkRef, graphRef, ordersRef}; len(claims) != len(want) || claims[1] != want[1] || claims[2] != want[2] {
+		t.Fatalf("ClaimRefs = %v, want %v — the fixture is not an alias unless the second ref collapses here", claims, want)
+	}
+}
+
 // uncomparableStore is a store whose dynamic type carries a slice, so it can be
 // neither a map key nor an == operand. Real consumers have these — a test
 // double that pre-loads snapshots, or any store that embeds a []beads.Bead —
