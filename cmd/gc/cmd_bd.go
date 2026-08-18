@@ -298,6 +298,16 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return doBdReleaseIfCurrent(cityPath, cfg, target, id, expectedAssignee, stdout, stderr)
 	}
 	if provider := rawBeadsProviderForScope(target.ScopeRoot, cityPath); !providerUsesBdStoreContract(provider) {
+		// A work-record close (`close`, or `update … --status=closed`) is the
+		// one command family a non-bd provider must still serve: the packs
+		// render it into every worker, and rejecting it here — BEFORE the
+		// close gate — left the stock FileStore pipeline with no managed
+		// close route at all (gas-dq28). It runs in process with the same
+		// read → evaluate → revision-fenced write shape as the class door;
+		// every other verb keeps the rejection below unchanged.
+		if code, handled := maybeDoBdStoreClose(cityPath, cfg, target, provider, bdArgs, stdout, stderr); handled {
+			return code
+		}
 		fmt.Fprintf(stderr, "gc bd: only supported for bd-backed beads providers (resolved %q for %s)\n", provider, target.ScopeRoot) //nolint:errcheck // best-effort stderr
 		if hint := bdProviderMismatchHint(target.ScopeRoot, provider); hint != "" {
 			fmt.Fprintf(stderr, "  hint: %s\n", hint) //nolint:errcheck // best-effort stderr

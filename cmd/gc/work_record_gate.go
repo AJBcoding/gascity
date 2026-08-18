@@ -295,19 +295,58 @@ func evaluateWorkRecordCloseGate(bdArgs []string, store beads.Store, preFetched 
 }
 
 // evaluateResolvedWorkClose applies the shared policy to the exact row and
-// physical store selected by an in-process mutation route.
+// physical store selected by the class-store by-ID route.
 func evaluateResolvedWorkClose(current, prospective beads.Bead, repoFallback, storeRef, cityPath string, cfg *config.City, stderr io.Writer) bool {
-	evidence, closeEvidence, err := openWorkRecordEvidenceJournal(cityPath, cfg)
-	if err == nil {
-		defer closeEvidence()
-	} else if !workRecordEnforceEnabled(cfg) {
-		fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close of %s refused: warn-only compatibility telemetry is unavailable: %v\n", prospective.ID, err) //nolint:errcheck
+	evidence, closeEvidence, blocked := openResolvedWorkCloseEvidence(prospective.ID, cityPath, cfg, stderr)
+	if blocked {
 		return true
 	}
+	defer closeEvidence()
 	return evaluateResolvedWorkCloseWithProvider(current, prospective, repoFallback, storeRef, cfg, evidence, stderr)
 }
 
+// evaluateResolvedWorkCloseForRoute is evaluateResolvedWorkClose for an
+// in-process mutation route other than the class-store door. route names the
+// adapter in the warn-only usage telemetry (the same vocabulary
+// runWorkRecordCloseGate uses for the passthrough's "gc.bd"), so an operator
+// counting down the compatibility window can tell which door the unfenced
+// closes are still arriving through.
+func evaluateResolvedWorkCloseForRoute(route string, current, prospective beads.Bead, repoFallback, storeRef, cityPath string, cfg *config.City, stderr io.Writer) bool {
+	evidence, closeEvidence, blocked := openResolvedWorkCloseEvidence(prospective.ID, cityPath, cfg, stderr)
+	if blocked {
+		return true
+	}
+	defer closeEvidence()
+	return evaluateResolvedWorkCloseWithProviderForRoute(route, current, prospective, repoFallback, storeRef, cfg, evidence, stderr)
+}
+
+// openResolvedWorkCloseEvidence opens the evidence journal for an in-process
+// close evaluation. An open failure blocks under warn-only mode — the
+// compatibility telemetry that mode depends on has nowhere to land — while
+// enforcement proceeds with a nil provider, whose unreadable-evidence answer
+// the shipped-close rule already converts into a violation.
+func openResolvedWorkCloseEvidence(beadID, cityPath string, cfg *config.City, stderr io.Writer) (events.Provider, func(), bool) {
+	evidence, closeEvidence, err := openWorkRecordEvidenceJournal(cityPath, cfg)
+	if err == nil {
+		return evidence, closeEvidence, false
+	}
+	if !workRecordEnforceEnabled(cfg) {
+		fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close of %s refused: warn-only compatibility telemetry is unavailable: %v\n", beadID, err) //nolint:errcheck
+		return nil, func() {}, true
+	}
+	return nil, func() {}, false
+}
+
+// evaluateResolvedWorkCloseWithProvider keeps the class door's historical
+// shape: it predates the route parameter and both it and its direct callers
+// (the backend qualification matrix, the by-ID gate tests) evaluate that
+// route's semantics, so the "gc.bd.by-id" label stays baked here rather than
+// repeated at each call site.
 func evaluateResolvedWorkCloseWithProvider(current, prospective beads.Bead, repoFallback, storeRef string, cfg *config.City, evidence events.Provider, stderr io.Writer) bool {
+	return evaluateResolvedWorkCloseWithProviderForRoute("gc.bd.by-id", current, prospective, repoFallback, storeRef, cfg, evidence, stderr)
+}
+
+func evaluateResolvedWorkCloseWithProviderForRoute(route string, current, prospective beads.Bead, repoFallback, storeRef string, cfg *config.City, evidence events.Provider, stderr io.Writer) bool {
 	repoDir := strings.TrimSpace(prospective.Metadata[beadmeta.WorkDirMetadataKey])
 	if repoDir == "" {
 		repoDir = repoFallback
@@ -331,7 +370,7 @@ func evaluateResolvedWorkCloseWithProvider(current, prospective beads.Bead, repo
 		fmt.Fprintf(stderr, "gc bd: work-record gate (%s): close of %s: %s\n", mode, prospective.ID, violation) //nolint:errcheck // best-effort stderr
 	}
 	if !enforce {
-		if telemetryErr := recordWorkCloseWarnOnlyUse(evidence, "gc.bd.by-id", storeRef, prospective.ID, len(violations)); telemetryErr != nil {
+		if telemetryErr := recordWorkCloseWarnOnlyUse(evidence, route, storeRef, prospective.ID, len(violations)); telemetryErr != nil {
 			fmt.Fprintf(stderr, "gc bd: work-record gate (enforced): close of %s refused: warn-only compatibility telemetry could not be confirmed: %v\n", prospective.ID, telemetryErr) //nolint:errcheck
 			return true
 		}
