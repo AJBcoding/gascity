@@ -65,6 +65,7 @@ var allowedNonMetadata = map[string]string{
 	// Bead LABEL/event-actor values (not Metadata keys) and a test-binary marker.
 	"gc.session":   "bead Label value, not a Metadata key (internal/agentutil/pool.go)",
 	"gc.bd":        "managed-bd close telemetry source, not a Metadata key (cmd/gc/work_record_gate.go)",
+	"gc.bd.store":  "managed FileStore close telemetry route, not a Metadata key (cmd/gc/cmd_bd_store_close.go)",
 	"gc.test":      "go test binary name marker (cmd/gc/test_guard.go)",
 	"gc.workstamp": "delivery-work-stamped event actor, not a Metadata key (internal/workstamp/stamp.go)",
 }
