@@ -41,10 +41,12 @@ package main
 //     would need per-id writes with partial-failure semantics bd's exit
 //     contract cannot express — the same reason parseBdByIDCloseArgs refuses
 //     batches on the class door. Refused with the remedy named.
-//   - Spellings the object model cannot represent (--reason, --notes,
+//   - Spellings the object model cannot represent (--notes, --reason-file,
 //     --claim-next, …). Serving one by dropping it would report a command as
 //     executed after silently changing what it meant; the refusal names the
-//     flag, exactly like the class door's refusals.
+//     flag, exactly like the class door's refusals. The one FileStore-specific
+//     extension is `close <id> --reason <text>`: close_reason metadata and the
+//     closed status fit in one UpdateOpts and therefore one fenced write.
 //
 // Both refusal classes were plain rejections before this file, so nothing
 // that used to work stops working; they only exchange the misleading
@@ -86,7 +88,7 @@ func maybeDoBdStoreClose(cityPath string, cfg *config.City, target execStoreTarg
 	)
 	switch bdArgs[0] {
 	case "close":
-		op, rejected, ok = parseBdByIDCloseArgs(bdByIDClose, bdArgs[1:])
+		op, rejected, ok = parseBdStoreCloseArgs(bdArgs[1:])
 	case "update":
 		op, rejected, ok = parseBdByIDUpdateArgs(bdArgs[1:])
 	}
@@ -117,6 +119,53 @@ func maybeDoBdStoreClose(cityPath string, cfg *config.City, target execStoreTarg
 	return doBdStoreCloseResolved(op, store, target.ScopeRoot, cityPath, storeRef, provider, cfg, stdout, stderr), true
 }
 
+const bdStoreCloseReasonMetadataKey = "close_reason"
+
+// parseBdStoreCloseArgs is deliberately narrower than bd's close parser and
+// deliberately separate from parseBdByIDCloseArgs. The shared by-ID parser
+// feeds GraphStore.Close, which cannot carry metadata; teaching it --reason
+// would silently broaden the graph surface. This FileStore route can represent
+// the exact pack spelling atomically as UpdateIfMatch(status + close_reason).
+// Short, equals, file, session, workflow, and batch spellings remain refused.
+func parseBdStoreCloseArgs(args []string) (op bdByIDOp, rejected string, ok bool) {
+	op = bdByIDOp{Verb: bdByIDClose}
+	reasonSeen := false
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		switch {
+		case arg == "--json":
+			op.JSON = true
+		case arg == "--reason":
+			if reasonSeen || i+1 >= len(args) {
+				return bdByIDOp{}, "--reason", false
+			}
+			i++
+			reason := strings.TrimSpace(args[i])
+			if reason == "" {
+				return bdByIDOp{}, "--reason", false
+			}
+			reasonSeen = true
+			closed := "closed"
+			op.Update = beads.UpdateOpts{
+				Status:   &closed,
+				Metadata: beads.StringMap{bdStoreCloseReasonMetadataKey: reason},
+			}
+		case strings.HasPrefix(arg, "-"):
+			name, _, _ := strings.Cut(arg, "=")
+			return bdByIDOp{}, name, false
+		default:
+			if op.ID != "" || arg == "" {
+				return bdByIDOp{}, "", false
+			}
+			op.ID = arg
+		}
+	}
+	if op.ID == "" {
+		return bdByIDOp{}, "", false
+	}
+	return op, "", true
+}
+
 // doBdStoreCloseResolved is the store-driven core of the managed close, split
 // from the argv/refusal wrapper so it is unit-testable with an injected
 // store. It mirrors doBdByIDClose/doBdByIDUpdate one seam lower: the policy
@@ -129,8 +178,10 @@ func doBdStoreCloseResolved(op bdByIDOp, store beads.Store, scopeRoot, cityPath,
 		fmt.Fprintf(stderr, "gc bd %s: %s: %v\n", verb, op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	reasonedClose := op.Verb == bdByIDClose && op.Update.Status != nil && len(op.Update.Metadata) == 1 && op.Update.Metadata[bdStoreCloseReasonMetadataKey] != ""
+	alreadyClosedReasonReplay := reasonedClose && strings.EqualFold(strings.TrimSpace(current.Status), "closed")
 	prospective := workclose.ProjectClose(current)
-	if op.Verb == bdByIDUpdate {
+	if op.Verb == bdByIDUpdate || (reasonedClose && !alreadyClosedReasonReplay) {
 		prospective = workclose.ProjectUpdate(current, op.Update)
 	}
 	// scopeRoot is the repo fallback for commit-reachability, matching the
@@ -139,12 +190,18 @@ func doBdStoreCloseResolved(op bdByIDOp, store beads.Store, scopeRoot, cityPath,
 	if evaluateResolvedWorkCloseForRoute("gc.bd.store", current, prospective, scopeRoot, storeRef, cityPath, cfg, stderr) {
 		return 1
 	}
+	// A reason belongs to the transition that first closed the row. Replaying a
+	// completed command may report the durable row but must not replace its
+	// audit reason or bump its revision.
+	if alreadyClosedReasonReplay {
+		return printBdByIDBead(current, op.JSON, fmt.Sprintf("the %q beads provider store", provider), stdout, stderr)
+	}
 	writer, ok := bdStoreCloseConditionalWriter(store)
 	if !ok {
 		fmt.Fprintf(stderr, "gc bd %s: %s refused: the %q beads store does not support revision-fenced writes, and the work-record close contract forbids an unfenced close (the row could change between validation and the write)\n", verb, op.ID, provider) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if op.Verb == bdByIDUpdate {
+	if op.Verb == bdByIDUpdate || reasonedClose {
 		err = writer.UpdateIfMatch(op.ID, current.Revision, op.Update)
 	} else {
 		err = writer.CloseIfMatch(op.ID, current.Revision)

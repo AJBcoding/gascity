@@ -99,6 +99,69 @@ func TestGcBdFileStoreCloseValidNonShippedPersists(t *testing.T) {
 	}
 }
 
+// TestGcBdFileStoreCloseReasonFromPackPersistsAtomically is the exact close
+// command rendered by the integrated Superpowers code-review workflow. The
+// FileStore front door must translate its reason into the repository's
+// close_reason convention and commit status plus metadata in one revision.
+func TestGcBdFileStoreCloseReasonFromPackPersistsAtomically(t *testing.T) {
+	const reason = "Code-review feedback processed and approved."
+	cityDir := fileStoreCloseCity(t, beads.Bead{
+		ID: "demo-reason-pack", Title: "structural review run", Type: "task", Status: "open",
+		Metadata: beads.StringMap{beadmeta.KindMetadataKey: "run"},
+	})
+	before := fileStoreCloseBead(t, cityDir, "demo-reason-pack")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"close", "demo-reason-pack", "--reason", reason}, &stdout, &stderr); got != 0 {
+		t.Fatalf("exact derived close = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	persisted := fileStoreCloseBead(t, cityDir, "demo-reason-pack")
+	if persisted.Status != "closed" {
+		t.Fatalf("persisted status = %q, want closed", persisted.Status)
+	}
+	if got := persisted.Metadata["close_reason"]; got != reason {
+		t.Fatalf("persisted close_reason = %q, want %q", got, reason)
+	}
+	if persisted.Revision != before.Revision+1 {
+		t.Fatalf("persisted revision = %d, want exactly one increment from %d", persisted.Revision, before.Revision)
+	}
+}
+
+func TestGcBdFileStoreCloseReasonTrimsWhitespace(t *testing.T) {
+	cityDir := fileStoreCloseCity(t, beads.Bead{
+		ID: "demo-reason-trim", Title: "work record", Type: "task", Status: "open",
+		Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp},
+	})
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"close", "demo-reason-trim", "--reason", "  completed cleanly  \n"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("reasoned close = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if got := fileStoreCloseBead(t, cityDir, "demo-reason-trim").Metadata["close_reason"]; got != "completed cleanly" {
+		t.Fatalf("persisted close_reason = %q, want trimmed value", got)
+	}
+}
+
+func TestGcBdFileStoreCloseReasonRejectsWhitespaceOnly(t *testing.T) {
+	cityDir := fileStoreCloseCity(t, beads.Bead{
+		ID: "demo-reason-empty", Title: "work record", Type: "task", Status: "open",
+		Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp},
+	})
+	before := fileStoreCloseBead(t, cityDir, "demo-reason-empty")
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"close", "demo-reason-empty", "--reason", "  \n"}, &stdout, &stderr); got == 0 {
+		t.Fatalf("whitespace-only reason succeeded; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "--reason") {
+		t.Fatalf("stderr = %q, want --reason refusal", stderr.String())
+	}
+	after := fileStoreCloseBead(t, cityDir, "demo-reason-empty")
+	if after.Status != before.Status || after.Revision != before.Revision || after.Metadata["close_reason"] != before.Metadata["close_reason"] {
+		t.Fatalf("refusal mutated row: before=%+v after=%+v", before, after)
+	}
+}
+
 // TestGcBdFileStoreUpdateStatusClosedStampsAndCloses covers the atomic
 // stamp-and-close form the worker formulas render (`gc bd update <id>
 // --set-metadata gc.work_outcome=… --status closed`): the metadata stamped in
@@ -194,6 +257,35 @@ func TestGcBdFileStoreAlreadyClosedReplayIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestGcBdFileStoreAlreadyClosedReasonReplayDoesNotRewrite pins the reasoned
+// crash-replay contract: a later invocation cannot replace the audit reason or
+// bump the revision after the first atomic close committed.
+func TestGcBdFileStoreAlreadyClosedReasonReplayDoesNotRewrite(t *testing.T) {
+	cityDir := fileStoreCloseCity(t, beads.Bead{
+		ID: "demo-reason-replay", Title: "work record", Type: "task", Status: "open",
+		Metadata: beads.StringMap{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp},
+	})
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"close", "demo-reason-replay", "--reason", "first durable reason"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("first reasoned close = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	closed := fileStoreCloseBead(t, cityDir, "demo-reason-replay")
+
+	stdout.Reset()
+	stderr.Reset()
+	if got := doBd([]string{"close", "demo-reason-replay", "--reason", "replacement must not land"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("reasoned replay = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	replayed := fileStoreCloseBead(t, cityDir, "demo-reason-replay")
+	if replayed.Metadata["close_reason"] != "first durable reason" {
+		t.Fatalf("replay close_reason = %q, want original", replayed.Metadata["close_reason"])
+	}
+	if replayed.Revision != closed.Revision {
+		t.Fatalf("replay revision = %d, want unchanged %d", replayed.Revision, closed.Revision)
+	}
+}
+
 // TestGcBdFileStoreNonCloseVerbsStayRejected keeps the managed route scoped
 // to the close verbs the gate recognizes: everything else on a non-bd
 // provider must keep the existing typed rejection so the qualification
@@ -250,11 +342,10 @@ func TestGcBdFileStoreCloseRefusesUnservableSpellings(t *testing.T) {
 			args:       []string{"close", "demo-w6", "demo-w7"},
 			wantStderr: "one bead per invocation",
 		},
-		{
-			name:       "close with reason text",
-			args:       []string{"close", "demo-w6", "--reason", "done"},
-			wantStderr: "--reason",
-		},
+		{name: "close with reason equals spelling", args: []string{"close", "demo-w6", "--reason=done"}, wantStderr: "--reason"},
+		{name: "close with short reason spelling", args: []string{"close", "demo-w6", "-r", "done"}, wantStderr: "-r"},
+		{name: "close with reason file", args: []string{"close", "demo-w6", "--reason-file", "reason.txt"}, wantStderr: "--reason-file"},
+		{name: "close with session", args: []string{"close", "demo-w6", "--session", "review-session"}, wantStderr: "--session"},
 		{
 			name:       "status close with notes",
 			args:       []string{"update", "demo-w6", "--status", "closed", "--notes", "done"},
@@ -276,6 +367,83 @@ func TestGcBdFileStoreCloseRefusesUnservableSpellings(t *testing.T) {
 			t.Fatalf("%s mutated despite refusal", id)
 		}
 	}
+}
+
+// TestDoBdStoreReasonedCloseCASRefusalLeavesStatusAndReasonUnchanged proves the
+// close cannot be decomposed into an unfenced reason write followed by a
+// fenced lifecycle write. The wrapper returns a stale read after committing an
+// unrelated concurrent update; the one reason+status CAS must lose cleanly.
+func TestDoBdStoreReasonedCloseCASRefusalLeavesStatusAndReasonUnchanged(t *testing.T) {
+	cityDir := fileStoreCloseCity(t, beads.Bead{
+		ID: "demo-reason-race", Title: "work record", Type: "task", Status: "open",
+		Metadata: beads.StringMap{
+			beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeNoOp,
+			"close_reason":                  "existing reason",
+		},
+	})
+	store, err := openScopeLocalFileStore(cityDir)
+	if err != nil {
+		t.Fatalf("open race FileStore: %v", err)
+	}
+	raceStore := &closeReasonRaceStore{Store: store, writer: store}
+	closed := "closed"
+	op := bdByIDOp{
+		Verb: bdByIDClose,
+		ID:   "demo-reason-race",
+		Update: beads.UpdateOpts{
+			Status:   &closed,
+			Metadata: beads.StringMap{"close_reason": "replacement reason"},
+		},
+	}
+
+	var stdout, stderr bytes.Buffer
+	if got := doBdStoreCloseResolved(op, raceStore, cityDir, cityDir, "city:demo", "file", &config.City{}, &stdout, &stderr); got == 0 {
+		t.Fatalf("contested reasoned close succeeded; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "changed concurrently") {
+		t.Fatalf("stderr = %q, want concurrent-change refusal", stderr.String())
+	}
+	persisted := fileStoreCloseBead(t, cityDir, "demo-reason-race")
+	if persisted.Status != "open" {
+		t.Fatalf("persisted status = %q, want open", persisted.Status)
+	}
+	if got := persisted.Metadata["close_reason"]; got != "existing reason" {
+		t.Fatalf("persisted close_reason = %q, want unchanged", got)
+	}
+}
+
+type closeReasonRaceStore struct {
+	beads.Store
+	writer   beads.ConditionalWriter
+	injected bool
+}
+
+func (s *closeReasonRaceStore) Get(id string) (beads.Bead, error) {
+	bead, err := s.Store.Get(id)
+	if err != nil || s.injected {
+		return bead, err
+	}
+	s.injected = true
+	if err := s.writer.UpdateIfMatch(id, bead.Revision, beads.UpdateOpts{Metadata: beads.StringMap{"concurrent": "won"}}); err != nil {
+		return beads.Bead{}, err
+	}
+	return bead, nil
+}
+
+func (s *closeReasonRaceStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	return s.writer.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+func (s *closeReasonRaceStore) CloseIfMatch(id string, expectedRevision int64) error {
+	return s.writer.CloseIfMatch(id, expectedRevision)
+}
+
+func (s *closeReasonRaceStore) DeleteIfMatch(id string, expectedRevision int64) error {
+	return s.writer.DeleteIfMatch(id, expectedRevision)
+}
+
+func (s *closeReasonRaceStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
+	return s.writer.CompareAndSetMetadataKey(id, key, expected, next)
 }
 
 // TestDoBdStoreCloseFailsClosedWithoutConditionalWriter pins the unfenced-

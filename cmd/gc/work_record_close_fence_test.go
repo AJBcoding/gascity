@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
@@ -217,6 +220,73 @@ echo "UNFENCED-COMMIT" >> "${CAPTURE_PATH}"
 exit 0
 `
 
+// fenceIncapableShippedBdScript is the strict deployment fixture: a genuinely
+// shipped row with valid durable landing evidence, backed by a tiny durable
+// state file. The transport cannot fence; any write would close the state file
+// and be visible after the command, so the test proves both refusal and no
+// partial mutation without opening a bd database or service.
+const fenceIncapableShippedBdScript = `#!/bin/sh
+set -eu
+read -r status revision < "${FENCE_STATE_PATH}"
+if [ "${1:-}" = "show" ]; then
+  printf '[{"id":"%s","title":"shipped work row","status":"%s","issue_type":"task","metadata":{"gc.work_outcome":"shipped","gc.work_commit":"%s","gc.work_branch":"main","gc.work_dir":"%s","gc.delivery_state":"landed","gc.delivery_event_id":"%s","gc.delivery_source_commit":"%s","gc.delivery_landed_sha":"%s"},"revision":%s}]\n' "${3:-demo-shipped}" "$status" "${WORK_COMMIT}" "${WORK_DIR}" "${LANDING_EVENT_ID}" "${WORK_COMMIT}" "${LANDED_SHA}" "$revision"
+  exit 0
+fi
+if [ "${2:-}" = "--help" ]; then
+  printf 'Flags:\n      --json   machine output\n'
+  exit 0
+fi
+echo "write: $*" >> "${CAPTURE_PATH}"
+printf 'closed 8\n' > "${FENCE_STATE_PATH}"
+echo "UNFENCED-COMMIT" >> "${CAPTURE_PATH}"
+exit 0
+`
+
+func seedFenceShippedEvidence(t *testing.T, cityDir, beadID string) string {
+	t.Helper()
+	repoDir := t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.email", "fence@example.com")
+	runGit(t, repoDir, "config", "user.name", "Fence Fixture")
+	if err := os.WriteFile(filepath.Join(repoDir, "artifact.txt"), []byte("shipped\n"), 0o644); err != nil {
+		t.Fatalf("write shipped artifact: %v", err)
+	}
+	runGit(t, repoDir, "add", "artifact.txt")
+	runGit(t, repoDir, "commit", "-m", "shipped fixture")
+	commit := strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+	eventID := "gcl-" + strings.Repeat("c", 64)
+	landedSHA := strings.Repeat("d", 40)
+	payload, err := json.Marshal(events.DeliveryLandedPayload{
+		EventID:           eventID,
+		ObservedLandedSHA: landedSHA,
+		WorkRecords: []events.DeliveryWorkRecordRef{{
+			StoreRef: "city:demo", BeadID: beadID, WorkCommit: commit,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal shipped evidence: %v", err)
+	}
+	journal, err := events.NewFileRecorder(filepath.Join(cityDir, ".gc", "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatalf("open shipped evidence journal: %v", err)
+	}
+	journal.Record(events.Event{Type: events.DeliveryLanded, Subject: eventID, Payload: payload})
+	if err := journal.Close(); err != nil {
+		t.Fatalf("close shipped evidence journal: %v", err)
+	}
+
+	statePath := filepath.Join(t.TempDir(), "shipped.state")
+	if err := os.WriteFile(statePath, []byte("open 7\n"), 0o644); err != nil {
+		t.Fatalf("write shipped state: %v", err)
+	}
+	t.Setenv("FENCE_STATE_PATH", statePath)
+	t.Setenv("WORK_COMMIT", commit)
+	t.Setenv("WORK_DIR", repoDir)
+	t.Setenv("LANDING_EVENT_ID", eventID)
+	t.Setenv("LANDED_SHA", landedSHA)
+	return statePath
+}
+
 // fenceControlBeadBdScript is the incapable bd again, but the row is a
 // control bead (gc.kind) outside the work-record contract — the population
 // whose closes must stay byte-identical whatever bd is installed.
@@ -323,11 +393,13 @@ func TestGcBdPassthroughFencedCloseRefusedWhenRowMovesAfterEvaluation(t *testing
 // rule under enforcement: when the pinned bd cannot honor --if-revision (too
 // old, probe failure, runtime latch), the gated close is refused with an
 // actionable message BEFORE any subprocess write — never executed unfenced.
-func TestGcBdPassthroughRefusesGatedCloseWhenBdCannotFence(t *testing.T) {
-	capture := fenceCloseCity(t, fenceIncapableBdScript, false)
+func TestGcBdPassthroughRefusesEvidenceBackedShippedCloseWhenBdCannotFence(t *testing.T) {
+	capture := fenceCloseCity(t, fenceIncapableShippedBdScript, false)
+	const beadID = "demo-shipped"
+	statePath := seedFenceShippedEvidence(t, os.Getenv("GC_CITY_PATH"), beadID)
 
 	var stdout, stderr bytes.Buffer
-	if got := doBd([]string{"close", "demo-abc"}, &stdout, &stderr); got == 0 {
+	if got := doBd([]string{"close", beadID}, &stdout, &stderr); got == 0 {
 		t.Fatalf("doBd(close) = 0 through a bd that cannot fence; capture=%q", fenceWriteLines(t, capture))
 	}
 	if writes := fenceWriteLines(t, capture); len(writes) != 0 {
@@ -338,6 +410,13 @@ func TestGcBdPassthroughRefusesGatedCloseWhenBdCannotFence(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "shipped_close_warn_only") {
 		t.Fatalf("stderr = %q, want the compatibility remedy named", stderr.String())
+	}
+	state, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatalf("read shipped state: %v", err)
+	}
+	if string(state) != "open 7\n" {
+		t.Fatalf("shipped state = %q, want open revision 7", state)
 	}
 }
 
