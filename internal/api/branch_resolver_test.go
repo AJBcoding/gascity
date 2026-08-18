@@ -34,11 +34,13 @@ func TestApiBranchResolverIgnoresPoisonedGitEnv(t *testing.T) {
 	}
 }
 
-func runResolverGit(t *testing.T, dir string, args ...string) {
+func runResolverGit(t *testing.T, dir string, args ...string) []byte {
 	t.Helper()
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
+	return out
 }

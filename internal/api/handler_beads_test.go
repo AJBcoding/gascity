@@ -585,13 +585,7 @@ func TestHTTPBeadCloseSurfacesUnreadableLandingEvidenceAsServiceUnavailable(t *t
 	repo := t.TempDir()
 	runResolverGit(t, repo, "init", "-b", "main")
 	runResolverGit(t, repo, "-c", "user.email=test@example.invalid", "-c", "user.name=test", "commit", "--allow-empty", "-m", "shipped work")
-	revParse := exec.Command("git", "rev-parse", "HEAD")
-	revParse.Dir = repo
-	out, err := revParse.Output()
-	if err != nil {
-		t.Fatalf("git rev-parse HEAD: %v", err)
-	}
-	sha := strings.TrimSpace(string(out))
+	sha := strings.TrimSpace(string(runResolverGit(t, repo, "rev-parse", "HEAD")))
 
 	state := newFakeState(t)
 	state.eventProv = events.NewFailFake()
@@ -639,13 +633,7 @@ func TestHTTPBeadCloseKeepsOriginalInvalidEvidenceClassWhenReaderChanges(t *test
 	repo := t.TempDir()
 	runResolverGit(t, repo, "init", "-b", "main")
 	runResolverGit(t, repo, "-c", "user.email=test@example.invalid", "-c", "user.name=test", "commit", "--allow-empty", "-m", "shipped work")
-	revParse := exec.Command("git", "rev-parse", "HEAD")
-	revParse.Dir = repo
-	out, err := revParse.Output()
-	if err != nil {
-		t.Fatalf("git rev-parse HEAD: %v", err)
-	}
-	sha := strings.TrimSpace(string(out))
+	sha := strings.TrimSpace(string(runResolverGit(t, repo, "rev-parse", "HEAD")))
 
 	state := newFakeState(t)
 	state.eventProv = &firstEmptyThenFailProvider{Fake: events.NewFake()}
