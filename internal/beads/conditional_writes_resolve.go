@@ -270,15 +270,9 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 		return nil, nil, nil
 	}
 
-	writer, hasWriter := ConditionalWriterFor(store)
+	writer, _ := ConditionalWriterFor(store)
 	pred := func(context.Context) (bool, string) {
-		if !hasWriter {
-			return false, "store does not implement conditional writes"
-		}
-		if prober, ok := store.(conditionalWriteCapabilityProber); ok {
-			return prober.probeConditionalWriteCapability()
-		}
-		return true, "store implements conditional writes"
+		return conditionalWriteCapabilityOf(store)
 	}
 
 	decision, reason := gate.ResolveCapability(context.Background(), mode, pred)
@@ -310,6 +304,47 @@ func ResolveConditionalWriter(store Store) (ConditionalWriter, *BeadsDiagnostic,
 	default: // gate.UseLegacy — unreachable: off/unset short-circuit above.
 		return nil, nil, nil
 	}
+}
+
+// conditionalWriteCapabilityOf is the store-capability predicate: can this
+// (already resolve-target-followed) store honor a fenced write right now? It
+// is shared by ResolveConditionalWriter, which composes it with the
+// factory-stamped mode, and ProbeConditionalWriteSupport, which exports it
+// mode-free — one predicate so the two answers cannot drift. A store that
+// implements ConditionalWriter without a prober is vacuously capable; a
+// store's own prober (bd's memoized four-verb --help probe and runtime
+// latch) otherwise decides.
+func conditionalWriteCapabilityOf(store Store) (bool, string) {
+	if _, ok := ConditionalWriterFor(store); !ok {
+		return false, "store does not implement conditional writes"
+	}
+	if prober, ok := store.(conditionalWriteCapabilityProber); ok {
+		return prober.probeConditionalWriteCapability()
+	}
+	return true, "store implements conditional writes"
+}
+
+// ProbeConditionalWriteSupport reports whether the resolved store can honor
+// revision-fenced conditional writes right now, running the store's own
+// (lazily memoized) capability probe when it has one. It exists for callers
+// whose write is intrinsically fenced — the work-record close routes, which
+// must choose between issuing --if-revision and failing closed — so they
+// consult the store's single capability answer instead of re-deriving bd
+// capability themselves. It deliberately ignores the factory-stamped
+// beads.conditional_writes mode: that mode governs whether OPTIONAL writes
+// upgrade to fenced form, not whether a mandatory fence is possible.
+// reason is empty when capable and names the obstacle otherwise (probe miss,
+// runtime latch, probe failure, or a store with no conditional writes).
+func ProbeConditionalWriteSupport(store Store) (bool, string) {
+	if store == nil {
+		return false, "no store resolved"
+	}
+	store = followConditionalWritesResolveTarget(store)
+	capable, reason := conditionalWriteCapabilityOf(store)
+	if capable {
+		return true, ""
+	}
+	return false, reason
 }
 
 // refuseOrDegrade builds the incapable-store outcome for the resolved mode:

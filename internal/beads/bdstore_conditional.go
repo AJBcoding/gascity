@@ -68,6 +68,14 @@ var conditionalWriteProbeVerbs = []string{"update", "close", "assign", "delete"}
 
 const conditionalWriteFlag = "--if-revision"
 
+// ConditionalWriteFenceFlag is bd's revision-fence flag, exported for the one
+// consumer that composes a bd argv OUTSIDE this store: the `gc bd`
+// passthrough, which appends the fence for the revision its close gate
+// evaluated to the argv it execs. Aliasing the probe's flag keeps the
+// spelling from drifting between the capability probe, the *IfMatch verbs,
+// and that passthrough.
+const ConditionalWriteFenceFlag = conditionalWriteFlag
+
 // conditionalWritesCapable reports whether the bd behind this store parses
 // --if-revision on every conditional-write verb. The verdict is memoized per
 // store instance (mirroring bdReadyProjectionEnabled): the probe fires lazily on
