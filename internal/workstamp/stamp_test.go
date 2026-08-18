@@ -462,6 +462,97 @@ func TestStampConflictsOnUnrecognizedDeliveryStateValue(t *testing.T) {
 	}
 }
 
+// TestStampConflictsOnEmptyValuedForeignDeliveryKey pins what the conflict
+// guard is actually about: an unrecognized gc.delivery_* key is evidence from
+// a DIFFERENT landing event and must not be stamped over, whatever text it
+// carries. Comparing the bead's value against patch[key] answered that
+// question with a zero value for every key the patch does not carry, so a
+// foreign delivery key holding "" compared equal to its own absence and was
+// waved through — the one shape of divergent evidence the guard silently
+// overwrote. Presence, not equality with a zero value, decides.
+func TestStampConflictsOnEmptyValuedForeignDeliveryKey(t *testing.T) {
+	alpha := workStoreWithMetadata(t, beads.StringMap{
+		"gc.work_commit":       testWorkCommitA,
+		"gc.work_base_commit":  "base-unchanged",
+		"gc.delivery_receipt":  "",
+		"gc.delivery_state":    "integration_ready",
+		"gc.delivery_pipeline": "",
+	})
+	beta := workStore(t, testWorkCommitB)
+	journal := landingJournal(t)
+	service := Service{Journal: journal, Stores: &mapResolver{stores: map[string]beads.Store{
+		"rig:alpha": alpha,
+		"rig:beta":  beta,
+	}}}
+	before, err := alpha.Get("gc-same")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := service.Stamp(context.Background(), testLandingEventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stamped != 1 || result.AlreadyStamped != 0 || len(result.Conflicts) != 1 {
+		t.Fatalf("result = %#v", result)
+	}
+	if result.Conflicts[0].StoreRef != "rig:alpha" || result.Conflicts[0].Code != "delivery_metadata_mismatch" {
+		t.Fatalf("conflict = %#v", result.Conflicts[0])
+	}
+	after, err := alpha.Get("gc-same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after.Metadata, before.Metadata) {
+		t.Fatalf("empty-valued foreign delivery evidence was overwritten: %#v", after.Metadata)
+	}
+}
+
+// TestStampAcceptsEmptyLandingValueMatchingTheBead is the other side of the
+// same lookup: a patch key whose landing event supplied no value legitimately
+// agrees with a bead already carrying that empty value, and must still stamp.
+// Distinguishing absent from empty must not turn agreement into a conflict.
+func TestStampAcceptsEmptyLandingValueMatchingTheBead(t *testing.T) {
+	alpha := workStoreWithMetadata(t, beads.StringMap{
+		"gc.work_commit":         testWorkCommitA,
+		"gc.work_base_commit":    "base-unchanged",
+		"gc.delivery_repository": "",
+	})
+	beta := workStore(t, testWorkCommitB)
+	payload, err := json.Marshal(events.DeliveryLandedPayload{
+		EventID:           testLandingEventID,
+		ObservedLandedSHA: testLandedSHA,
+		WorkRecords: []events.DeliveryWorkRecordRef{
+			{StoreRef: "rig:alpha", BeadID: "gc-same", WorkCommit: testWorkCommitA},
+			{StoreRef: "rig:beta", BeadID: "gc-same", WorkCommit: testWorkCommitB},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal := events.NewFake()
+	journal.Record(events.Event{Type: events.DeliveryLanded, Subject: testLandingEventID, Payload: payload})
+	service := Service{Journal: journal, Stores: &mapResolver{stores: map[string]beads.Store{
+		"rig:alpha": alpha,
+		"rig:beta":  beta,
+	}}}
+
+	result, err := service.Stamp(context.Background(), testLandingEventID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Stamped != 2 || result.AlreadyStamped != 0 || len(result.Conflicts) != 0 {
+		t.Fatalf("result = %#v", result)
+	}
+	bead, err := alpha.Get("gc-same")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bead.Metadata["gc.delivery_state"] != "landed" || bead.Metadata["gc.delivery_repository"] != "" {
+		t.Fatalf("agreeing empty landing value was not stamped: %#v", bead.Metadata)
+	}
+}
+
 func TestHasDeliveryMetadata(t *testing.T) {
 	for name, tc := range map[string]struct {
 		metadata beads.StringMap

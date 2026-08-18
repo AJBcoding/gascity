@@ -380,9 +380,20 @@ func hasDeliveryMetadata(metadata beads.StringMap) bool {
 // anchor before landing, and stamping overwrites it with the landed state.
 // Every other divergent gc.delivery_* value is evidence from a different
 // landing event and must not be overwritten.
+//
+// The patch lookup is comma-ok on purpose. A key the patch does not carry is
+// not a key the patch agrees with: reading it as a plain map index yields ""
+// for the absent entry, so a foreign gc.delivery_* key holding an empty value
+// compared equal to its own absence and passed the guard. An unrecognized
+// delivery key is judged on PRESENCE in the patch, never on equality with a
+// zero value; a key the patch does carry is still judged on its value, so an
+// empty landing value that the bead already agrees with stays stampable.
 func hasConflictingDeliveryMetadata(metadata, patch beads.StringMap) bool {
 	for key, value := range metadata {
-		if !strings.HasPrefix(key, beadmeta.DeliveryMetadataPrefix) || value == patch[key] {
+		if !strings.HasPrefix(key, beadmeta.DeliveryMetadataPrefix) {
+			continue
+		}
+		if want, inPatch := patch[key]; inPatch && value == want {
 			continue
 		}
 		if key == beadmeta.DeliveryStateMetadataKey && value == beadmeta.DeliveryStateIntegrationReady {
