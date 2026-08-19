@@ -24,6 +24,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`mol-dog-backup.sh` no longer skips every backup on hosts whose `flock`
+  rejects `-w 0`, and fails closed when `flock` cannot evaluate the lock at
+  all.** A zero `GC_DOLT_BACKUP_LOCK_WAIT_SECONDS` means "do not queue behind a
+  running backup", and the script spelled that as `flock -w 0`. The flock this
+  project documents for macOS (`brew install flock` = discoteq flock 0.4.0)
+  rejects `-w 0` with `flock: timeout must be greater than 0` and exit 64
+  whether or not the lock is free, and the script read every non-zero exit as
+  contention: a zero wait therefore skipped the backup, reported
+  `backup — skipped: already running` with nothing running, and exited 0 — a
+  silent backup outage behind a healthy-looking order. The wait is now spelled
+  `flock -n`, which util-linux and discoteq both accept, and only flock's
+  documented lock-conflict exit 1 is treated as contention. Any other exit
+  escalates `[HIGH]` and exits 1, matching the existing missing-flock path
+  rather than reporting a benign skip. (gas-h898)
+
 - **The dolt pack's `run_bounded` python3 fallback now sends SIGTERM before
   SIGKILL, matching its documented contract.** The fallback (used when
   neither `timeout` nor `gtimeout` is on `PATH`, the default on stock macOS)

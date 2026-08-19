@@ -90,12 +90,46 @@ acquire_backup_lock() {
 
     mkdir -p "$(dirname "$BACKUP_LOCK_FILE")"
     exec 9>"$BACKUP_LOCK_FILE"
-    if ! flock -w "$BACKUP_LOCK_WAIT_SECONDS" 9; then
-        SUMMARY="backup — skipped: already running"
-        dolt_notify_done "$SUMMARY"
-        echo "backup: $SUMMARY"
-        exit 0
+    # A zero wait means "do not queue behind a running backup". Spell that as
+    # `flock -n`, never as `-w 0`: the flock this project documents for macOS
+    # (`brew install flock` = discoteq flock 0.4.0) rejects `-w 0` outright with
+    # "flock: timeout must be greater than 0" and exit 64, whether or not the
+    # lock is free. Reading that usage error as contention made every run on
+    # those hosts skip the backup and report a benign "already running" — a
+    # silent backup outage. util-linux's flock accepts `-w 0`; `-n` is the
+    # spelling both accept.
+    lock_rc=0
+    if [ "$BACKUP_LOCK_WAIT_SECONDS" -gt 0 ]; then
+        flock -w "$BACKUP_LOCK_WAIT_SECONDS" 9 || lock_rc=$?
+    else
+        flock -n 9 || lock_rc=$?
     fi
+    case "$lock_rc" in
+        0)
+            return 0
+            ;;
+        1)
+            # The documented conflict exit: another backup holds the lock.
+            SUMMARY="backup — skipped: already running"
+            dolt_notify_done "$SUMMARY"
+            echo "backup: $SUMMARY"
+            exit 0
+            ;;
+        *)
+            # flock could not evaluate the lock at all (usage error, bad fd,
+            # unsupported filesystem). Fail closed exactly as a missing flock
+            # does: a backup whose exclusivity is unproven must not run, and
+            # must not be reported as a benign skip.
+            SUMMARY="backup — lock-error: flock exited $lock_rc"
+            dolt_escalate \
+                "Dolt backup: flock could not evaluate the backup lock [HIGH]" \
+                "Skipping backup sync because flock exited $lock_rc for $BACKUP_LOCK_FILE instead of the documented lock-conflict exit 1; concurrent dolt backup sync can overload the shared sql-server." \
+                2>/dev/null || true
+            dolt_notify_done "$SUMMARY"
+            echo "backup: $SUMMARY"
+            exit 1
+            ;;
+    esac
 }
 
 # --- Step 1: Preflight Dolt version before backup sync ---
