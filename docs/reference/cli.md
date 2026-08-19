@@ -2564,6 +2564,9 @@ Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional &lt;to&gt; argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
+Use --body-file to read the body from a file, or from stdin with "-", instead
+of -m. Prefer it for markdown bodies: backticks and $(...) inside an inlined
+-m argument are expanded by the shell before gc sees them.
 Use --all to broadcast to all live sessions (excluding sender and "human").
 
 ```
@@ -2576,6 +2579,8 @@ gc mail send [<to>] [<body>] [flags]
 gc mail send mayor "Build is green"
 gc mail send mayor -s "Build is green"
 gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+gc mail send myrig/witness -s "Deploy report" --body-file report.md
+gc mail send myrig/witness -s "Deploy report" --body-file - < report.md
 gc mail send --to mayor "Build is green"
 gc mail send human "Review needed for PR #42"
 gc mail send polecat "Priority task" --notify
@@ -2585,6 +2590,7 @@ gc mail send --all "Status update: tests passing"
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--all` | bool |  | broadcast to all live sessions (excludes sender and human) |
+| `--body-file` | string |  | read the message body from this file ("-" for stdin) instead of -m |
 | `--from` | string |  | sender identity (default: $GC_SESSION_ID, $GC_ALIAS, or $GC_AGENT; required when none is set) |
 | `--json` | bool |  | emit JSONL result |
 | `-m`, `--message` | string |  | message body text |

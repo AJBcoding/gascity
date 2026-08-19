@@ -1553,6 +1553,39 @@ type multiRecipientMailCounter interface {
 	CountRecipients([]string) (int, int, error)
 }
 
+// mailSendStdin returns the reader for --body-file "-". Extracted for
+// testability, mirroring the slingStdin seam.
+var mailSendStdin = func() io.Reader { return os.Stdin }
+
+// readMailSendBody reads a message body from path, or from stdin when path is
+// "-". It exists so a body never has to be inlined into argv: mail bodies are
+// markdown and routinely contain backticks, which a shell expands as command
+// substitution before gc is even invoked.
+//
+// Trailing newlines are stripped — they are an artifact of how the file was
+// written, not body content. An unreadable or empty source is an error: the
+// caller asked for those bytes, and delivering an empty message instead would
+// hide the failure.
+func readMailSendBody(path string) (string, error) {
+	var (
+		data []byte
+		err  error
+	)
+	if path == "-" {
+		data, err = io.ReadAll(mailSendStdin())
+	} else {
+		data, err = os.ReadFile(path)
+	}
+	if err != nil {
+		return "", fmt.Errorf("--body-file %s: %w", path, err)
+	}
+	body := strings.TrimRight(string(data), "\n")
+	if body == "" {
+		return "", fmt.Errorf("--body-file %s: no body content", path)
+	}
+	return body, nil
+}
+
 func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var notify bool
 	var all bool
@@ -1560,6 +1593,7 @@ func newMailSendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var to string
 	var subject string
 	var message string
+	var bodyFile string
 	var jsonOut bool
 	cmd := &cobra.Command{
 		Use:   "send [<to>] [<body>]",
@@ -1576,16 +1610,29 @@ Unread mail alone does not request a wake.
 Use --from to override the sender identity.
 Use --to as an alternative to the positional <to> argument.
 Use -s/--subject for the summary line and -m/--message for the body text.
+Use --body-file to read the body from a file, or from stdin with "-", instead
+of -m. Prefer it for markdown bodies: backticks and $(...) inside an inlined
+-m argument are expanded by the shell before gc sees them.
 Use --all to broadcast to all live sessions (excluding sender and "human").`,
 		Example: `  gc mail send mayor "Build is green"
   gc mail send mayor -s "Build is green"
   gc mail send myrig/witness -s "Need investigation" -m "Attach logs from the last failed run"
+  gc mail send myrig/witness -s "Deploy report" --body-file report.md
+  gc mail send myrig/witness -s "Deploy report" --body-file - < report.md
   gc mail send --to mayor "Build is green"
   gc mail send human "Review needed for PR #42"
   gc mail send polecat "Priority task" --notify
   gc mail send --all "Status update: tests passing"`,
 		Args: cobra.ArbitraryArgs,
 		RunE: func(_ *cobra.Command, args []string) error {
+			if bodyFile != "" {
+				body, err := readMailSendBody(bodyFile)
+				if err != nil {
+					fmt.Fprintf(stderr, "gc mail send: %v\n", err) //nolint:errcheck // best-effort stderr
+					return errExit
+				}
+				message = body
+			}
 			code := 0
 			if jsonOut {
 				code = cmdMailSendJSON(args, notify, all, from, to, subject, message, true, stdout, stderr)
@@ -1606,8 +1653,10 @@ Use --all to broadcast to all live sessions (excluding sender and "human").`,
 	cmd.Flags().StringVar(&to, "to", "", "recipient address (alternative to positional argument)")
 	cmd.Flags().StringVarP(&subject, "subject", "s", "", "message subject line")
 	cmd.Flags().StringVarP(&message, "message", "m", "", "message body text")
+	cmd.Flags().StringVar(&bodyFile, "body-file", "", `read the message body from this file ("-" for stdin) instead of -m`)
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
 	cmd.MarkFlagsMutuallyExclusive("to", "all")
+	cmd.MarkFlagsMutuallyExclusive("message", "body-file")
 	return cmd
 }
 
