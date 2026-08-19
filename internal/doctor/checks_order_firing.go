@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,31 @@ const (
 	// exists to be a good citizen against the data plane rather than to
 	// protect the check — the wall time it saves is the whole point.
 	orderFiringLastRunConcurrency = 8
+	// orderFiringFloorMinGaps is how many consecutive firings an order must
+	// contribute before its cadence is treated as a measurement rather than
+	// noise. It is sized for the percentile below to mean something: any order
+	// fast enough to be dispatcher-bound clears it inside the event tail many
+	// times over (measured on a busy city: 234-252 gaps per probe). A city too
+	// new or too quiet to reach it gets no floor and the declared intervals
+	// govern, which is the safe default.
+	orderFiringFloorMinGaps = 20
+	// orderFiringFloorPercentile picks the cadence the dispatcher *sustains*
+	// rather than the one it merely beats half the time. Against the median,
+	// half of all gaps exceed the floor by construction, and the 1.5x/3x
+	// thresholds then fire constantly: measured over a busy city's steady
+	// state, a median floor still spent ~3.3% of wall time in blocking
+	// CRITICAL — a false page roughly every 30th doctor run, which is the
+	// failure this floor exists to remove. At p90 that falls to ~0.3% while
+	// every real outage in the same window (42min-6h) stays far above the
+	// threshold. High percentiles also sit below rare multi-hour outage gaps,
+	// so the statistic suppresses noise without suppressing signal.
+	orderFiringFloorPercentile = 90
+	// orderFiringDispatchFloorMax bounds how slow an observed dispatch cycle
+	// may get before the check stops trusting it. A dispatcher that cannot
+	// service any order more often than this is itself the outage the check
+	// exists to report, so past the cap the declared intervals govern again
+	// and the check keeps paging rather than ratifying the stall.
+	orderFiringDispatchFloorMax = 30 * time.Minute
 )
 
 // OrderFiringCurrentLastRunFunc reports the newest persisted run time for an
@@ -179,11 +205,15 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 	var blockingErrors, advisoryErrors int
 	suspendedRigs := orderFiringCurrentSuspendedRigs(c.cfg)
 
+	// Measure what the dispatcher actually achieves before judging anything
+	// against a declared interval it may not be able to honor (gas-t0tf).
+	dispatchFloor := observedDispatchFloor(monitoredOrderIntervals(allOrders, suspendedRigs, cronIntervals), firedEvents)
+
 	// Resolve every order-run lookup the loop below will need up front and in
-	// parallel. The pre-pass shares the cron-interval cache with the loop, so
-	// the expected intervals — and therefore which orders need a lookup — are
-	// identical to what the loop derives for itself.
-	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, now))
+	// parallel. The pre-pass shares the cron-interval cache and the dispatch
+	// floor with the loop, so the expected intervals — and therefore which
+	// orders need a lookup — are identical to what the loop derives for itself.
+	lastRunFor := c.prefetchedLastRunFunc(c.pendingLastRunOrders(allOrders, firedEvents, suspendedRigs, cronIntervals, dispatchFloor, now))
 
 	for _, order := range allOrders {
 		if order.Trigger != "cron" && order.Trigger != "cooldown" {
@@ -203,7 +233,8 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, expected, now)
+		effective := effectiveOrderInterval(expected, dispatchFloor)
+		lastFired, err := c.latestOrderFiredAtUsing(lastRunFor, firedEvents, order, effective, now)
 		if err != nil {
 			worst = worseStatus(worst, StatusError)
 			result.Details = append(result.Details, fmt.Sprintf("%s: cannot read order history: %v", orderDisplayName(order), err))
@@ -213,7 +244,7 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 			blockingErrors++
 			continue
 		}
-		status, severity, detail := classifyOrderFiring(order, now, expected, lastFired, startedAt)
+		status, severity, detail := classifyOrderFiring(order, now, expected, effective, lastFired, startedAt)
 		worst = worseStatus(worst, status)
 		result.Details = append(result.Details, detail)
 		if status != StatusOK {
@@ -386,6 +417,134 @@ func orderFiringCurrentOrderSuspended(suspended map[string]bool, order orders.Or
 		return true
 	}
 	return false
+}
+
+// monitoredOrderIntervals returns the declared interval of every order this
+// check classifies, keyed by scoped name. It applies the same trigger and
+// suspension filters as the classification loop and shares its cron cache, so
+// both derive identical expectations. Orders whose interval cannot be computed
+// are omitted; the loop reports that as its own error.
+func monitoredOrderIntervals(allOrders []orders.Order, suspendedRigs map[string]bool, cronCache map[string]time.Duration) map[string]time.Duration {
+	intervals := make(map[string]time.Duration, len(allOrders))
+	for i := range allOrders {
+		order := allOrders[i]
+		if order.Trigger != "cron" && order.Trigger != "cooldown" {
+			continue
+		}
+		if orderFiringCurrentOrderSuspended(suspendedRigs, order) {
+			continue
+		}
+		interval, err := expectedIntervalForOrder(order, cronCache)
+		if err != nil {
+			continue
+		}
+		intervals[order.ScopedName()] = interval
+	}
+	return intervals
+}
+
+// observedDispatchFloor reports the fastest firing cadence the order
+// dispatcher demonstrably sustains, or zero when the sample proves nothing.
+//
+// Orders are dispatched once per controller tick, and the tick body runs
+// synchronously in the ticker loop — `time.Ticker` coalesces the ticks that
+// arrive while one is running rather than queueing them. The achievable
+// dispatch period is therefore max(patrol_interval, tick duration), and on a
+// busy city the tick duration dominates. An order declaring an interval below
+// that period can never satisfy the staleness thresholds no matter what the
+// operator does, because the interval is usually a pack default rather than
+// city config (gas-t0tf).
+//
+// Only an order that misses its own declared schedule measures the dispatcher:
+// it is perpetually due, so the dispatcher is the only thing that can be
+// holding it back. An order that meets its schedule is rate-limited by its own
+// cooldown and says nothing about the ceiling — counting it would let a slow
+// order manufacture a floor that hides a genuinely broken fast one.
+//
+// The floor is the minimum such cadence, keeping it as small as the evidence
+// allows, and it is computed from historical gaps rather than time-since-last
+// firing. A dispatcher that stops entirely still pages: its gaps stay small
+// while every order's age grows past the threshold.
+func observedDispatchFloor(declared map[string]time.Duration, evts []events.Event) time.Duration {
+	firings := make(map[string][]time.Time, len(declared))
+	for _, event := range evts {
+		if event.Ts.IsZero() {
+			continue
+		}
+		if _, ok := declared[event.Subject]; !ok {
+			continue
+		}
+		firings[event.Subject] = append(firings[event.Subject], event.Ts)
+	}
+
+	var floor time.Duration
+	for name, interval := range declared {
+		if interval <= 0 {
+			continue
+		}
+		cadence, ok := sustainedFiringGap(firings[name])
+		if !ok || cadence < interval+interval/2 {
+			continue
+		}
+		if floor == 0 || cadence < floor {
+			floor = cadence
+		}
+	}
+	if floor > orderFiringDispatchFloorMax {
+		return 0
+	}
+	return floor
+}
+
+// sustainedFiringGap reports the orderFiringFloorPercentile interval between
+// consecutive firings — the cadence this order reliably achieves rather than
+// its typical one. It reports false below orderFiringFloorMinGaps gaps, where
+// the sample is too small for that percentile to mean anything. Timestamps are
+// sorted rather than assumed ordered because the event tail is a merge of
+// whatever the log holds.
+func sustainedFiringGap(firings []time.Time) (time.Duration, bool) {
+	if len(firings) <= orderFiringFloorMinGaps {
+		return 0, false
+	}
+	ordered := make([]time.Time, len(firings))
+	copy(ordered, firings)
+	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Before(ordered[j]) })
+
+	gaps := make([]time.Duration, 0, len(ordered)-1)
+	for i := 1; i < len(ordered); i++ {
+		if gap := ordered[i].Sub(ordered[i-1]); gap > 0 {
+			gaps = append(gaps, gap)
+		}
+	}
+	if len(gaps) < orderFiringFloorMinGaps {
+		return 0, false
+	}
+	sort.Slice(gaps, func(i, j int) bool { return gaps[i] < gaps[j] })
+	index := len(gaps) * orderFiringFloorPercentile / 100
+	if index >= len(gaps) {
+		index = len(gaps) - 1
+	}
+	return gaps[index], true
+}
+
+// effectiveOrderInterval raises a declared interval to the observed dispatch
+// floor, but only for an order the floor genuinely governs.
+//
+// It only ever raises: a declaration coarser than the dispatch cycle is already
+// achievable, and lowering it would let a coarse order that silently stopped
+// read as healthy.
+//
+// The 1.5x margin is the same test that qualifies an order as a cycle probe,
+// applied for the same reason. A declaration within 1.5x of the cycle is
+// already covered by the classifier's own overdue threshold, so flooring it
+// changes no verdict — it only reports a floor the operator cannot act on. In
+// practice the observed cycle lands a second or two above a 5m declaration and
+// every 5m order grew a "declared 5m, floored to ..." row saying nothing.
+func effectiveOrderInterval(declared, floor time.Duration) time.Duration {
+	if floor >= declared+declared/2 {
+		return floor
+	}
+	return declared
 }
 
 func expectedIntervalForOrder(order orders.Order, cronCache map[string]time.Duration) (time.Duration, error) {
@@ -661,7 +820,7 @@ func eventEvidenceSuffices(latest time.Time, expected time.Duration, now time.Ti
 // orders need an authoritative lookup. Orders whose expected interval cannot be
 // computed are skipped: the loop reports that as its own error without ever
 // reaching the lookup.
-func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, now time.Time) []orders.Order {
+func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order, firedEvents []events.Event, suspendedRigs map[string]bool, cronIntervals map[string]time.Duration, dispatchFloor time.Duration, now time.Time) []orders.Order {
 	if c.lastRun == nil {
 		return nil
 	}
@@ -677,6 +836,7 @@ func (c *OrderFiringCurrentCheck) pendingLastRunOrders(allOrders []orders.Order,
 		if err != nil {
 			continue
 		}
+		expected = effectiveOrderInterval(expected, dispatchFloor)
 		if eventEvidenceSuffices(latestOrderFiredAt(firedEvents, order.ScopedName()), expected, now) {
 			continue
 		}
@@ -757,14 +917,28 @@ func latestOrderFiredAt(evts []events.Event, subject string) time.Time {
 	return latest
 }
 
-func classifyOrderFiring(order orders.Order, now time.Time, expected time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
+// orderFiringExpectation renders the interval an order is judged against. When
+// the observed dispatch cycle raised it, both values are shown: the operator
+// needs to see that the declared interval is the one below the cycle, since
+// that is usually a pack default they cannot change. The declared value skips
+// the minute rounding applied to observed ages — a sub-minute declaration is
+// exactly what this row exists to surface, and rounding 30s to "1m" hides it.
+func orderFiringExpectation(declared, effective time.Duration) string {
+	if effective <= declared {
+		return fmt.Sprintf("expected every %s", formatOrderFiringDuration(declared))
+	}
+	return fmt.Sprintf("expected every %s (declared %s, floored to observed dispatch cycle)",
+		formatOrderFiringDuration(effective), formatOrderFiringInterval(declared))
+}
+
+func classifyOrderFiring(order orders.Order, now time.Time, declared, effective time.Duration, lastFired, controllerStarted time.Time) (CheckStatus, CheckSeverity, string) {
 	name := orderDisplayName(order)
 	if lastFired.IsZero() {
 		if controllerStarted.IsZero() {
 			return StatusOK, SeverityBlocking, fmt.Sprintf("%s: never fired (controller start unknown)", name)
 		}
 		uptime := nonNegativeDuration(now.Sub(controllerStarted))
-		if uptime >= expected+expected/2 {
+		if uptime >= effective+effective/2 {
 			// Advisory only for cron: a cron order that has never fired since
 			// controller start may be the cron-scheduler bug (ga-97qngx), not
 			// a real outage. Cooldown never-fired/stale paths remain blocking
@@ -778,13 +952,14 @@ func classifyOrderFiring(order orders.Order, now time.Time, expected time.Durati
 	}
 
 	age := nonNegativeDuration(now.Sub(lastFired))
+	expectation := orderFiringExpectation(declared, effective)
 	switch {
-	case age >= expected*3:
-		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
-	case age >= expected+expected/2:
-		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s (overdue)", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+	case age >= effective*3:
+		return StatusError, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, %s (CRITICAL: stale)", name, formatOrderFiringDuration(age), expectation)
+	case age >= effective+effective/2:
+		return StatusWarning, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, %s (overdue)", name, formatOrderFiringDuration(age), expectation)
 	default:
-		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, expected every %s", name, formatOrderFiringDuration(age), formatOrderFiringDuration(expected))
+		return StatusOK, SeverityBlocking, fmt.Sprintf("%s: last fired %s ago, %s", name, formatOrderFiringDuration(age), expectation)
 	}
 }
 
@@ -814,6 +989,16 @@ func nonNegativeDuration(d time.Duration) time.Duration {
 		return 0
 	}
 	return d
+}
+
+// formatOrderFiringInterval renders a declared interval without the
+// minute-rounding formatOrderFiringDuration applies to observed ages, which
+// would print a 30s declaration as "1m".
+func formatOrderFiringInterval(d time.Duration) string {
+	if d%time.Minute != 0 {
+		return d.String()
+	}
+	return formatOrderFiringDuration(d)
 }
 
 func formatOrderFiringDuration(d time.Duration) string {
