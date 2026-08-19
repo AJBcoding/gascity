@@ -39,6 +39,26 @@ been chosen and gated" and ends at "it is live or it has been rolled back".
 | Supervisor argv | `~/.local/gc-bin/gc supervisor run` | same |
 | KeepAlive | `{Crashed: true, SuccessfulExit: false}` | `plutil -p …/com.gascity.supervisor.plist` |
 
+### There is no deploy-lane fast-forward step
+
+`city.toml` describes the deploy lane `integration/deploy-20260804` as
+advancing "only FROM staging, deliberately". That step **cannot be performed**
+and must not appear in any promotion sequence. Measured 2026-08-19:
+
+```
+integration/deploy-20260804 = eb675829e
+deploy-lane ... staging      = 3 deploy-lane-only / 101 staging-only
+staging is an ancestor of deploy-lane: NO
+deploy-lane is an ancestor of staging: NO
+```
+
+A fast-forward from staging requires the deploy lane to be an ancestor of
+staging; it is not. Its three unique commits (gas-9d4e, gas-ppv, gas-txwt) are
+absent from the lane's full history and are therefore not in the live binary
+either. Promotion builds from the staging lane directly. The deploy lane is
+treated as a vestige for promotion purposes — that reading is an
+interpretation, but the negative it rests on is measured.
+
 The shim is load-bearing:
 
 ```sh
@@ -51,6 +71,49 @@ exec "$HOME/.local/gc-bin/gc" "$@"
 It exists so every `gc` invocation resolves the MySQL-capable `bd` that lives
 beside the binary in `~/.local/gc-bin`. Anything that replaces the shim changes
 which `bd` the city talks to.
+
+## 0b. Train 1 — the concrete sequence
+
+Train 1 promotes **live `f28bf5659` → staging lane `be84c5ea3`**: same lineage,
++66 commits, no merge and no conflicts. Its purpose is to exercise this runbook
+on a small same-lineage delta before Train 2 (the cross-lineage gate merge)
+depends on it. Steps reference the detailed sections below.
+
+| # | Step | Auth |
+| --- | --- | --- |
+| 1 | Gate the candidate: full `make test-fast-parallel` at `be84c5ea3` in a detached worktree; capture the gate's OWN exit code and preserve exit/head/log | — |
+| 2 | Preflight (§3): record live commit + sha256, check free space, check supervisor state | — |
+| 3 | Build (§4) with `CGO_ENABLED=1` + ICU CFLAGS from a **detached** worktree at `be84c5ea3` | — |
+| 4 | Sanity-gate the artifact: `~258 MB` class, `CGO_ENABLED=1` in `go version -m`, reported commit `== be84c5ea3` | — |
+| 5 | Back up live to `gc.bak-pre-train1-<timestamp>`, verify the copy's sha256 (§5) | `[AUTH]` |
+| 6 | Atomic copy into `~/.local/gc-bin/gc`. Never `make install`. Never touch the shim (§5) | `[AUTH]` |
+| 7 | Mixed-version window is now open (§6) — do not walk away | — |
+| 8 | `launchctl kickstart -k gui/$(id -u)/com.gascity.supervisor` (§7) | `[AUTH]` |
+| 9 | Verify: new PID, clean `~/.gc/supervisor.log`, `gc version --json --long` reports `be84c5ea3` | — |
+| 10 | Deploy record (§8) | — |
+| 11 | Soak, then decide on Train 2 | — |
+
+**Build from a detached worktree, never `git checkout staging/gascity-lane`.**
+Checking that ref out in a worktree makes `mol-refinery-patrol`'s ownership gate
+refuse to move it — the starvation `city.toml` documents (gas-jvfa, ~28h and
+four rediscoveries). The lane must remain checked out nowhere:
+
+```sh
+git -C <rig-root> worktree add --detach <path> be84c5ea3
+git worktree list | grep staging/gascity-lane      # must print nothing
+```
+
+**Step 1 is not optional.** The lane head is published and its local ref matches
+the remote exactly, and `.githooks/pre-push` (installed — `core.hooksPath` is
+`.githooks`) ends in `exec make test-fast-parallel`, so the full gate ran at
+that head **unless the push used `--no-verify`**, which the hook documents as a
+bypass. No gate-evidence artifact exists for `be84c5ea3` the way it does for the
+gate tree. "Presumably gated" is not gated, and Train 1's whole purpose is to
+avoid confounding two failure sources.
+
+**Train 2 differences, noted not elaborated:** cross-lineage merge (92/157, real
+conflicts expected), the merged head is a tree nobody has built or tested so it
+needs its own full gate, and no approval carries across the merge.
 
 ## 1. DO NOT RUN `make install`
 
@@ -297,6 +360,28 @@ that state in place for an older binary to misread.
 Nobody should claim rollback safety for a state-changing train until an
 old-binary compatibility gate has been run. See gas-w1t9's sibling scoping work.
 Until then, treat 9a as "restores the code" and NOT as "restores the city".
+
+**Config is RESOLVED and is not a rollback blocker** (measured 2026-08-19 by
+running the live `f28bf5659` binary against a scratch city, never the real one).
+City config fragments are parsed by the same `parseWithMeta` the root
+`city.toml` uses (`compose.go:397`), which calls `CheckUndecodedKeys` — the
+WARNING path. The fatal unknown-key path is wired only into the city's
+`pack.toml` (`compose.go:183`) and the topology load (`pack.go:1268`).
+Empirically, an old binary given a fragment carrying the new keys **exits 0**
+and merely warns:
+
+```
+warning: …/warn-only.fragment.toml: unknown field "beads.shipped_close_warn_only"
+warning: …/warn-only.fragment.toml: unknown field "beads.direct_raw_bd_writes"
+```
+
+So rollback does NOT have to remove the fragment to keep the city loadable.
+**But note the second warning:** *both* keys in the staged fragment are unknown
+to the old binary, so after a rollback the fragment is entirely **inert** — the
+compatibility setting silently stops applying, and the only signal is a stderr
+warning nobody reads. Put that consequence in the rollback record. Do not put
+these keys in `pack.toml` or a topology file, where the same unknown key is
+fatal and would turn a rollback into a city-wide config-load failure.
 
 ## 10. Known drift to resolve before first use
 
