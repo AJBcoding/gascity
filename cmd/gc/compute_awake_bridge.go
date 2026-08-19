@@ -143,6 +143,7 @@ func buildAwakeInputFromReconciler(
 			ContinuationResetPending: strings.TrimSpace(info.ContinuationResetPending) == "true" &&
 				strings.TrimSpace(info.ResetCommittedAt) != "",
 			CurrentlyProcessingBeadID: strings.TrimSpace(info.CurrentlyProcessingBeadID),
+			CanonicalInstanceName:     strings.TrimSpace(info.CanonicalInstanceNameMetadata),
 		}
 		bead.HeldUntil = lifecycle.HeldUntil
 		bead.QuarantinedUntil = lifecycle.QuarantinedUntil

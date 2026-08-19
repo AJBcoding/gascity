@@ -77,6 +77,12 @@ type AwakeSessionBead struct {
 	RestartRequested          bool      // restart_requested metadata is still active
 	ContinuationResetPending  bool      // continuation_reset_pending metadata is set
 	CurrentlyProcessingBeadID string    // work bead the session is currently processing
+	// CanonicalInstanceName is the session's canonical qualified instance name
+	// (canonical_instance_name metadata) — the identity a POOL slot claims work
+	// under. Unlike NamedIdentity it is present on unnamed pool sessions, whose
+	// SessionName is a runtime string ("gastown__polecat-az-wisp-bm7dj") that no
+	// assignee ever equals. Empty when the record has not been stamped.
+	CanonicalInstanceName string
 }
 
 // AwakeWorkBead represents a work bead with an assignee.
@@ -737,6 +743,35 @@ func sessionAssigneeMatches(named []AwakeNamedSession, bead AwakeSessionBead, as
 		return false
 	}
 	if assignee == bead.ID || assignee == bead.SessionName {
+		return true
+	}
+	// Canonical instance name. This is the ONLY identity an unnamed POOL slot
+	// shares with the work it claims: its SessionName is a runtime string
+	// ("gastown__polecat-az-wisp-bm7dj") that no assignee equals, NamedIdentity
+	// is empty, and the configured-named fallback below is gated off for pool
+	// slots — so without this every pool polecat holding claimed work read as
+	// idle and the reconciler drained it mid-task (gas-hz3z).
+	//
+	// This is an early, single-call-site reader of the S19 canonical_instance_name
+	// record, which is otherwise still write-only pending the Stage 5 reader
+	// cutover (internal/session/canonical_identity.go). It is additive: it only
+	// ever ADDS a match, never suppresses one, so no existing decision changes.
+	// Stage 5 should subsume this branch rather than work around it.
+	//
+	// !bead.Drained is load-bearing, NOT defensive padding. Unlike bead.ID and
+	// bead.SessionName — which embed the wisp id and are therefore unique per
+	// generation — the canonical name is a REUSABLE SLOT LABEL: successive
+	// polecats occupying the same slot all carry "gascity/gastown.slit". And a
+	// pool slot never gives it back, because freeCanonicalIdentityMetadata runs
+	// only on the named-session retirement path (RetireNamedSessionPatch), not
+	// on a pool drain. Verified on live beads: az-wisp-uwaps and az-wisp-umdyr
+	// are distinct drained generations of the same slot, and BOTH still carry
+	// canonical_instance_name=gascity/gastown.slit.
+	//
+	// Without this guard, during the window between a slot draining and its bead
+	// closing (~44s observed), a stale generation would match live work and hold
+	// a dead slot open — trading the drain bug for an over-retention bug.
+	if bead.CanonicalInstanceName != "" && !bead.Drained && assignee == bead.CanonicalInstanceName {
 		return true
 	}
 	if bead.NamedIdentity != "" {
