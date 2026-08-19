@@ -117,14 +117,36 @@ type Baseline struct {
 	Expires         string   `toml:"expires"`
 }
 
+// bootstrapPolicy pins test/test-resources.toml field-for-field.
+//
+// Subprocess deltas carried at this revision are attributed separately, and
+// test/test-resources.toml carries the same attribution:
+//
+//	PRE-EXISTING +1 call / +1 file: cmd/gc/landing_git_test.go:42, an
+//	exec.Command("git", ...) inside the helper landingTestGit added by ancestor
+//	commit c5234c4b0. Its owner is not a Go test, so the census records
+//	runnable=false and no Medium row can exempt it; it raises the audit, source
+//	debt, and Small debt subprocess baselines alike. That raise is accepted
+//	permanent debt: the helper is the single exec.Command through which
+//	landing_e2e_test.go drives real git to prove a real remote ref moved, which
+//	is the one thing the landingGitSpy beside it cannot answer. test-resources.toml
+//	records the full disposition, including why tagging it out was refused.
+//
+//	gas-ftv4 +1 call / +1 file: scripts/shipped_close_graduation_test.go:17, an
+//	exec.Command("bash", ...) inside TestShippedCloseGraduationReleaseCheck
+//	added by commit d7b69d9d6. runnable=true, so it is declared as an exact
+//	Medium owner below; it raises only the Count-based audit and source-debt
+//	baselines and leaves the untagged Small subprocess ratchet flat.
 var bootstrapPolicy = Ledger{
 	Version: 2,
 	AuditBaseline: []Baseline{
 		{
-			Scope:           ScopeAll,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   618,
-			BaselineFiles:   177,
+			Scope:    ScopeAll,
+			Resource: ResourceSubprocess,
+			// 618 -> 620 calls, 177 -> 179 files: +1 pre-existing
+			// (landing_git_test.go), +1 gas-ftv4 (shipped_close_graduation_test.go).
+			BaselineCalls:   620,
+			BaselineFiles:   179,
 			ReportedCalls:   495,
 			ReportedFiles:   135,
 			OwnerBead:       "ga-80po0c.2",
@@ -162,10 +184,13 @@ var bootstrapPolicy = Ledger{
 	},
 	Debt: []Baseline{
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   416,
-			BaselineFiles:   119,
+			Scope:    ScopeUntagged,
+			Resource: ResourceSubprocess,
+			// 416 -> 418 calls, 119 -> 121 files: +1 pre-existing
+			// (landing_git_test.go), +1 gas-ftv4 (shipped_close_graduation_test.go).
+			// Both files are untagged, and Count does not subtract Medium owners.
+			BaselineCalls:   418,
+			BaselineFiles:   121,
 			ReportedCalls:   380,
 			ReportedFiles:   98,
 			OwnerBead:       "ga-80po0c.2",
@@ -407,6 +432,28 @@ var bootstrapPolicy = Ledger{
 			MigrationTarget: "P0.1",
 			Expires:         "2026-10-01",
 		},
+		// gas-ftv4's one new subprocess occurrence
+		// (scripts/shipped_close_graduation_test.go:17, added by commit d7b69d9d6).
+		// runnable=true, so it takes an exact Medium owner instead of growing the
+		// untagged Small subprocess ratchet.
+		{
+			PackageDir:      "scripts",
+			PackageName:     "scripts_test",
+			Owner:           "TestShippedCloseGraduationReleaseCheck",
+			Resources:       []Resource{ResourceSubprocess},
+			OwnerBead:       "gas-ftv4",
+			Invariant:       "shipped-close graduation gate proof is a checked Medium owner",
+			ResourceOwner:   "the one bash invocation of scripts/check-shipped-close-graduation.sh is confined to TestShippedCloseGraduationReleaseCheck, which runs the real release gate to prove it refuses a v1.6.0 removal release while stale beads.shipped_close_warn_only migration artifacts remain; the call retires when that compatibility flag graduates",
+			MigrationTarget: "P0.4b",
+			// Aligned to the protected migration window rather than the
+			// ledger's usual horizon: this row retires when
+			// beads.shipped_close_warn_only graduates, and that flag runs
+			// through 2026-12-31 (internal/rollout/registry.go). An earlier
+			// expiry would fail validation in October for a subprocess still
+			// legitimately required. Lifecycle owner: gas-ftv4 /
+			// @gastownhall/gascity-admin through the same date.
+			Expires: "2026-12-31",
+		},
 		{
 			PackageDir:      "internal/doctor",
 			PackageName:     "doctor",
@@ -462,10 +509,15 @@ var bootstrapPolicy = Ledger{
 	},
 	SmallDebt: []Baseline{
 		{
-			Scope:           ScopeUntagged,
-			Resource:        ResourceSubprocess,
-			BaselineCalls:   409,
-			BaselineFiles:   115,
+			Scope:    ScopeUntagged,
+			Resource: ResourceSubprocess,
+			// 409 -> 410 calls, 115 -> 116 files: the PRE-EXISTING occurrence only
+			// (cmd/gc/landing_git_test.go:42, runnable=false, ancestor commit
+			// c5234c4b0). gas-ftv4's occurrence is absent because the scripts_test
+			// TestShippedCloseGraduationReleaseCheck Medium owner removes it from
+			// SmallCount, so this branch leaves the untagged Small total flat.
+			BaselineCalls:   410,
+			BaselineFiles:   116,
 			ReportedCalls:   394,
 			ReportedFiles:   105,
 			OwnerBead:       "ga-80po0c.2.1",
