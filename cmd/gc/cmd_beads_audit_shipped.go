@@ -111,6 +111,24 @@ func (s *shippedAuditSourceSet) closeOwned() []string {
 	return errs
 }
 
+// shippedAuditSources opens every store this audit must read and names each one
+// with the ref its landing evidence is recorded under.
+//
+// # Why the legs are enumerated rather than walked
+//
+// The set is a SUPERSET of the resolver's plan, and that is the reason. A rig
+// whose store fails to open, and one configured with no path at all, never
+// becomes a topology leg — but it is exactly the store an audit has to name as
+// unverified, so it is added here carrying its open error and reported as an
+// errored group. Reading inside storeref.Walk would drop it silently, which is
+// the opposite of what an audit is for. The per-leg error policy is overridden
+// for the same reason: every store that could not be read is REPORTED and makes
+// the report incomplete, because "what I could not verify" is this command's
+// output rather than a degradation of it.
+//
+// What this function does not do is decide the leg set. It takes the legs the
+// resolver names, in the plan the resolver built, and every read then happens in
+// workclose.AuditShipped — the domain owner — over the assembled sources.
 func shippedAuditSources(cityPath string, cfg *config.City) shippedAuditSourceSet {
 	byRef := make(map[string]workclose.AuditStore)
 	byIdentity := make(map[uintptr]string)
@@ -154,12 +172,15 @@ func shippedAuditSources(cityPath string, cfg *config.City) shippedAuditSourceSe
 	plan, err := storeref.Plan(storeref.Census{}, topology)
 	if err != nil {
 		result.errors = append(result.errors, "authoritative store topology: "+err.Error())
+		// A plan that refused hands back no leg, so each binding is named with
+		// no handle at all. AuditShipped never reads a source carrying an open
+		// error, and passing the store anyway would take a probe out of a plan
+		// the resolver had just declined to build.
 		for _, binding := range topology.Bindings {
-			ref := string(binding.Leg.Ref)
-			add(ref, binding.Leg.Store, err, false)
+			add(string(binding.Leg.Ref), nil, err, false)
 		}
 	} else {
-		storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) {
+		storeref.EachLeg(plan, func(leg storeref.Leg, _ storeref.Role, _ storeref.ErrPolicy) { // residency:allow — the audit must also name stores no plan can contain, so its reads cannot run inside Walk
 			ref := censusRef(cfg, leg.Ref, censusRefScoped)
 			add(ref, leg.Store, nil, false)
 		})
