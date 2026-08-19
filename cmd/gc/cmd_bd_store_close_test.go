@@ -2,6 +2,8 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 )
 
 // fileStoreCloseCity configures a stock file-provider city in a temp dir and
@@ -18,6 +21,23 @@ import (
 // through `gc bd`: the pack close command must work here, not only in the
 // direct store composition the backend matrix exercises.
 func fileStoreCloseCity(t *testing.T, seed ...beads.Bead) string {
+	t.Helper()
+	cityDir := fileStoreCloseCityRoot(t, `[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+`)
+	seedFileStoreCloseScope(t, cityDir, seed...)
+	return cityDir
+}
+
+// fileStoreCloseCityRoot writes one file-provider city.toml and isolates the
+// process state every managed-close fixture depends on. It is shared by the
+// city-scoped fixture above and the rig-scoped fixture below: the flag reset,
+// env scrub, and cwd isolation are identical for both, and only the configured
+// scopes differ.
+func fileStoreCloseCityRoot(t *testing.T, cityTOML string) string {
 	t.Helper()
 
 	origCityFlag := cityFlag
@@ -35,20 +55,21 @@ func fileStoreCloseCity(t *testing.T, seed ...beads.Bead) string {
 	clearInheritedBeadsEnv(t)
 
 	cityDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(`[workspace]
-name = "demo"
-
-[beads]
-provider = "file"
-`), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(cityTOML), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// Isolate cwd so an ambient .beads/redirect cannot retarget the scope
 	// (see TestResolveBdScopeTarget for rationale).
 	setCwd(t, cityDir)
 	t.Setenv("GC_CITY_PATH", cityDir)
+	return cityDir
+}
 
-	store, err := openScopeLocalFileStore(cityDir)
+// seedFileStoreCloseScope seeds one scope-local FileStore (<scope>/.gc/beads.json)
+// with the supplied beads, honoring their explicit IDs.
+func seedFileStoreCloseScope(t *testing.T, scopeRoot string, seed ...beads.Bead) {
+	t.Helper()
+	store, err := openScopeLocalFileStore(scopeRoot)
 	if err != nil {
 		t.Fatalf("open seed FileStore: %v", err)
 	}
@@ -62,7 +83,6 @@ provider = "file"
 			t.Fatalf("seed ID = %q, want %q", created.ID, bead.ID)
 		}
 	}
-	return cityDir
 }
 
 // fileStoreCloseBead re-reads one bead through a fresh store handle so
@@ -223,6 +243,248 @@ func TestGcBdFileStoreShippedCloseWithoutLandingEvidenceRefused(t *testing.T) {
 	if persisted := fileStoreCloseBead(t, cityDir, "demo-w3"); persisted.Status == "closed" {
 		t.Fatal("refused shipped close mutated the authoritative store")
 	}
+}
+
+// The positive half of the shipped-close contract on the managed FileStore
+// route. Everything above proves refusals; without the rows below, a canonical
+// store ref this adapter computes WRONG (cmd_bd_store_close.go's
+// workRecordCanonicalStoreRef call) would make every legitimate shipped
+// FileStore close fail while every negative test stayed green, because a wrong
+// ref refuses exactly like missing evidence does. So the evidence here is real
+// and durable — an acknowledged delivery.landed event in the city's own
+// events.jsonl, read back through the production journal — and each near miss
+// differs from the passing case in exactly one bound field.
+
+const (
+	fileStoreLandingEventID = "gcl-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	fileStoreLandedSHA      = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+// fileStoreShippedCommit builds a one-commit repo whose HEAD is reachable on
+// main, so the work-record contract's Git provenance rule is satisfied by a
+// real commit rather than a stub.
+func fileStoreShippedCommit(t *testing.T) (repoDir, commit string) {
+	t.Helper()
+	repoDir = t.TempDir()
+	runGit(t, repoDir, "init", "--initial-branch=main")
+	runGit(t, repoDir, "config", "user.email", "store-close@example.com")
+	runGit(t, repoDir, "config", "user.name", "Store Close")
+	if err := os.WriteFile(filepath.Join(repoDir, "artifact.txt"), []byte("shipped\n"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	runGit(t, repoDir, "add", "artifact.txt")
+	runGit(t, repoDir, "commit", "-m", "shipped work")
+	return repoDir, strings.TrimSpace(runGit(t, repoDir, "rev-parse", "HEAD"))
+}
+
+// fileStoreShippedMetadata is the complete metadata a shipped work record must
+// carry for the landing event seeded by appendFileStoreLandingEvent to
+// corroborate it.
+func fileStoreShippedMetadata(repoDir, commit string) beads.StringMap {
+	return beads.StringMap{
+		beadmeta.WorkOutcomeMetadataKey:          beadmeta.WorkOutcomeShipped,
+		beadmeta.WorkCommitMetadataKey:           commit,
+		beadmeta.WorkBranchMetadataKey:           "main",
+		beadmeta.WorkDirMetadataKey:              repoDir,
+		beadmeta.DeliveryStateMetadataKey:        beadmeta.DeliveryStateLanded,
+		beadmeta.DeliveryEventIDMetadataKey:      fileStoreLandingEventID,
+		beadmeta.DeliverySourceCommitMetadataKey: commit,
+		beadmeta.DeliveryLandedSHAMetadataKey:    fileStoreLandedSHA,
+	}
+}
+
+// appendFileStoreLandingEvent writes the delivery.landed event to the city's
+// real event journal through the durable append path — one acknowledged batch,
+// file and directory synced — so the close gate reads it back exactly as it
+// would in production instead of from an in-memory double.
+func appendFileStoreLandingEvent(t *testing.T, cityDir string, bound events.DeliveryWorkRecordRef) {
+	t.Helper()
+	payload, err := json.Marshal(events.DeliveryLandedPayload{
+		EventID:           fileStoreLandingEventID,
+		Repository:        "https://example.invalid/acme/repo.git",
+		TargetRef:         "refs/heads/main",
+		ObservedLandedSHA: fileStoreLandedSHA,
+		WorkRecords:       []events.DeliveryWorkRecordRef{bound},
+		VerifiedAt:        "2026-08-17T12:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("marshal landing payload: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(cityDir, ".gc"), 0o755); err != nil {
+		t.Fatalf("create city runtime dir: %v", err)
+	}
+	recorder, err := events.NewFileRecorder(filepath.Join(cityDir, ".gc", "events.jsonl"), io.Discard)
+	if err != nil {
+		t.Fatalf("open city event journal: %v", err)
+	}
+	if err := recorder.AppendBatch([]events.Event{{
+		Type:    events.DeliveryLanded,
+		Actor:   "gc.landing",
+		Subject: fileStoreLandingEventID,
+		Payload: payload,
+	}}); err != nil {
+		t.Fatalf("append landing event: %v", err)
+	}
+	if err := recorder.Close(); err != nil {
+		t.Fatalf("close city event journal: %v", err)
+	}
+}
+
+// TestGcBdFileStoreShippedCloseWithExactLandingEvidenceSucceeds is the missing
+// positive: a shipped work record whose durable evidence names THIS store,
+// THIS bead, and THIS commit closes through the real adapter. It is the only
+// row that fails if the adapter's canonical store ref stops matching the ref
+// the landing evidence is written with.
+func TestGcBdFileStoreShippedCloseWithExactLandingEvidenceSucceeds(t *testing.T) {
+	repoDir, commit := fileStoreShippedCommit(t)
+	cityDir := fileStoreCloseCity(t, beads.Bead{
+		ID: "demo-shipped", Title: "shipped work record", Type: "task", Status: "open",
+		Metadata: fileStoreShippedMetadata(repoDir, commit),
+	})
+	appendFileStoreLandingEvent(t, cityDir, events.DeliveryWorkRecordRef{
+		StoreRef: "city:demo", BeadID: "demo-shipped", WorkCommit: commit,
+	})
+
+	var stdout, stderr bytes.Buffer
+	if got := doBd([]string{"close", "demo-shipped"}, &stdout, &stderr); got != 0 {
+		t.Fatalf("doBd(close shipped-with-evidence) = %d, want 0; stderr=%q", got, stderr.String())
+	}
+	if strings.Contains(stderr.String(), "work-record gate") {
+		t.Fatalf("stderr = %q, want no gate violation for exactly bound evidence", stderr.String())
+	}
+	if persisted := fileStoreCloseBead(t, cityDir, "demo-shipped"); persisted.Status != "closed" {
+		t.Fatalf("persisted status = %q, want closed", persisted.Status)
+	}
+}
+
+// TestGcBdFileStoreShippedCloseRefusesNearMissLandingEvidence varies exactly
+// one bound field of the evidence the test above proves sufficient. Each row
+// must be refused through the real adapter: evidence bound to another store,
+// another bead, or another commit is not evidence for this close.
+func TestGcBdFileStoreShippedCloseRefusesNearMissLandingEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		bound func(exact events.DeliveryWorkRecordRef) events.DeliveryWorkRecordRef
+	}{
+		{
+			name: "wrong store ref",
+			bound: func(exact events.DeliveryWorkRecordRef) events.DeliveryWorkRecordRef {
+				exact.StoreRef = "rig:elsewhere"
+				return exact
+			},
+		},
+		{
+			name: "wrong bead id",
+			bound: func(exact events.DeliveryWorkRecordRef) events.DeliveryWorkRecordRef {
+				exact.BeadID = "demo-other"
+				return exact
+			},
+		},
+		{
+			name: "wrong commit",
+			bound: func(exact events.DeliveryWorkRecordRef) events.DeliveryWorkRecordRef {
+				exact.WorkCommit = strings.Repeat("c", 40)
+				return exact
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repoDir, commit := fileStoreShippedCommit(t)
+			cityDir := fileStoreCloseCity(t, beads.Bead{
+				ID: "demo-shipped", Title: "shipped work record", Type: "task", Status: "open",
+				Metadata: fileStoreShippedMetadata(repoDir, commit),
+			})
+			appendFileStoreLandingEvent(t, cityDir, test.bound(events.DeliveryWorkRecordRef{
+				StoreRef: "city:demo", BeadID: "demo-shipped", WorkCommit: commit,
+			}))
+
+			var stdout, stderr bytes.Buffer
+			if got := doBd([]string{"close", "demo-shipped"}, &stdout, &stderr); got == 0 {
+				t.Fatalf("doBd(close with %s) = 0, want refusal; stdout=%q", test.name, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "is not bound to store") {
+				t.Fatalf("stderr = %q, want an unbound-evidence refusal", stderr.String())
+			}
+			if persisted := fileStoreCloseBead(t, cityDir, "demo-shipped"); persisted.Status == "closed" {
+				t.Fatalf("%s closed the record anyway", test.name)
+			}
+		})
+	}
+}
+
+// TestGcBdFileStoreRigScopedShippedCloseBindsRigStoreRef exercises store-ref
+// ROUTING rather than inferring it from the single-scope case: the same close
+// under a rig scope must be checked against "rig:<name>", so evidence bound to
+// the city ref is refused and evidence bound to the rig ref succeeds. Both rows
+// run against the same fixture, which is what makes the pair load-bearing.
+func TestGcBdFileStoreRigScopedShippedCloseBindsRigStoreRef(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		storeRef  string
+		wantClose bool
+	}{
+		{name: "bound to the rig store", storeRef: "rig:" + fileStoreCloseRigName, wantClose: true},
+		{name: "bound to the city store", storeRef: "city:demo", wantClose: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			repoDir, commit := fileStoreShippedCommit(t)
+			cityDir, rigDir := fileStoreCloseRigCity(t, beads.Bead{
+				ID: "wf-1", Title: "rig-scoped shipped work record", Type: "task", Status: "open",
+				Metadata: fileStoreShippedMetadata(repoDir, commit),
+			})
+			appendFileStoreLandingEvent(t, cityDir, events.DeliveryWorkRecordRef{
+				StoreRef: test.storeRef, BeadID: "wf-1", WorkCommit: commit,
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := doBd([]string{"--rig", fileStoreCloseRigName, "close", "wf-1"}, &stdout, &stderr)
+			persisted := fileStoreCloseBead(t, rigDir, "wf-1")
+			if test.wantClose {
+				if code != 0 {
+					t.Fatalf("rig-scoped close = %d, want 0; stderr=%q", code, stderr.String())
+				}
+				if persisted.Status != "closed" {
+					t.Fatalf("persisted status = %q, want closed", persisted.Status)
+				}
+				return
+			}
+			if code == 0 {
+				t.Fatalf("rig-scoped close accepted city-bound evidence; stdout=%q", stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "is not bound to store") {
+				t.Fatalf("stderr = %q, want an unbound-evidence refusal", stderr.String())
+			}
+			if persisted.Status == "closed" {
+				t.Fatal("city-bound evidence closed a rig-scoped work record")
+			}
+		})
+	}
+}
+
+const fileStoreCloseRigName = "workflows"
+
+// fileStoreCloseRigCity is fileStoreCloseCity with one bound rig whose own
+// scope-local FileStore holds the seeded beads, so `gc bd --rig` resolves a rig
+// scope and the managed close computes "rig:<name>" as its canonical store ref.
+func fileStoreCloseRigCity(t *testing.T, seed ...beads.Bead) (cityDir, rigDir string) {
+	t.Helper()
+	cityDir = fileStoreCloseCityRoot(t, `[workspace]
+name = "demo"
+
+[beads]
+provider = "file"
+
+[[rigs]]
+name = "`+fileStoreCloseRigName+`"
+path = "rigs/`+fileStoreCloseRigName+`"
+prefix = "wf"
+`)
+	rigDir = filepath.Join(cityDir, "rigs", fileStoreCloseRigName)
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("create rig dir: %v", err)
+	}
+	seedFileStoreCloseScope(t, rigDir, seed...)
+	return cityDir, rigDir
 }
 
 // TestGcBdFileStoreAlreadyClosedReplayIsIdempotent pins the crash-replay
