@@ -15,6 +15,7 @@
 package herdr
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,11 +76,7 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return nil, fmt.Errorf("herdr %v: %s", args, ee.Stderr)
-		}
-		return nil, fmt.Errorf("herdr %v: %w", args, err)
+		return nil, runFailure(ctx, args, err)
 	}
 	if len(strings.TrimSpace(string(out))) == 0 {
 		return nil, nil // success with no payload (e.g. pane send-keys / pane run)
@@ -92,6 +89,100 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 		return nil, fmt.Errorf("herdr %v: %w", args, env.Error)
 	}
 	return env.Result, nil
+}
+
+// stderrHerdrError extracts herdr's error envelope from a failed verb's stderr.
+// A rejection arrives as the SAME {"error":{code,message}} envelope the success
+// path parses — but on stderr, with a nonzero exit and an empty stdout (herdr
+// 0.7.5). stderr is also where a transport failure's plain text lands (`Error:
+// Os { code: 2, kind: NotFound … }` when the session socket is absent), so the
+// scan is per-line and best-effort: the first line that decodes to an envelope
+// carrying a code wins, and anything else yields nil so the caller keeps the raw
+// stderr as the message. Per-line rather than whole-buffer so a log line printed
+// alongside the envelope cannot blind the parse — and because Output caps
+// ee.Stderr at 32KiB, which makes a truncated envelope simply fail to decode
+// instead of being misread.
+func stderrHerdrError(stderr []byte) *herdrError {
+	for _, line := range bytes.Split(stderr, []byte("\n")) {
+		line = bytes.TrimSpace(line)
+		if len(line) == 0 || line[0] != '{' {
+			continue
+		}
+		var env envelope
+		if err := json.Unmarshal(line, &env); err == nil && env.Error != nil && env.Error.Code != "" {
+			return env.Error
+		}
+	}
+	return nil
+}
+
+// runError is a failed `herdr` exec: the message a human reads, and every cause
+// a program matches on, kept in separate places on purpose.
+//
+// The message is this package's established rendering, unchanged —
+// "herdr [<args>]: <stderr bytes>" verbatim when herdr printed any, otherwise
+// "herdr [<args>]: <cause>". That string is what lands in gc's logs and in CLI
+// output, so growing it a prefix per newly-typed detail would make every
+// consumer of it re-learn the format; the detail goes into Unwrap instead,
+// where errors.Is/errors.As read it and the text does not move.
+type runError struct {
+	msg      string      // exactly what the pre-typed code formatted
+	herdrErr *herdrError // herdr's own error, when stderr carried a decodable envelope
+	execErr  error       // the exec failure as returned (*exec.ExitError, exec.ErrNotFound, …)
+	ctxErr   error       // ctx.Err() at failure time, when the caller's context had already died
+}
+
+func (e *runError) Error() string { return e.msg }
+
+// Unwrap exposes all three causes (Go multi-error unwrapping), so herdrErrorCode
+// finds the code, errors.As recovers the exit status, and errors.Is answers for
+// context.Canceled / context.DeadlineExceeded — none of which appear in the text.
+func (e *runError) Unwrap() []error {
+	causes := make([]error, 0, 3)
+	if e.herdrErr != nil {
+		causes = append(causes, e.herdrErr)
+	}
+	if e.execErr != nil {
+		causes = append(causes, e.execErr)
+	}
+	if e.ctxErr != nil {
+		causes = append(causes, e.ctxErr)
+	}
+	return causes
+}
+
+// runFailure renders a failed `herdr` exec as this package's error, shared by
+// run and runRaw so both classify a rejection identically.
+//
+// A rejection carrying an envelope contributes its typed *herdrError to the
+// chain, so errors.As recovers it and herdrErrorCode resolves the code.
+// Formatting those bytes with %s instead left no *herdrError anywhere in the
+// chain: herdrErrorCode answered "" and every code comparison in the package
+// silently failed to match on the one path a real herdr actually rejects on —
+// which is how the pane-busy retry ladder, the agent_name_taken storm guard,
+// and the timeout / agent_not_found branches came to be dead in production
+// (gas-ao8z). The *exec.ExitError joins it on BOTH stderr shapes, parseable or
+// not, so the exit status never depends on whether herdr happened to emit an
+// envelope.
+//
+// ctx.Err() joins them because os/exec will not report it: when a context dies
+// mid-command, Cmd.Wait sees the killed process first and deliberately prefers
+// its *exec.ExitError over the context watcher's cause, so a canceled verb
+// otherwise comes back as a plain nonzero exit and errors.Is(err,
+// context.Canceled) is false. Callers that bound a Start on a deadline read
+// that distinction to tell "herdr refused" from "we ran out of time".
+func runFailure(ctx context.Context, args []string, err error) error {
+	fail := &runError{execErr: err, ctxErr: ctx.Err()}
+	var ee *exec.ExitError
+	if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+		// herdr's stderr, byte for byte: for a transport failure it is the only
+		// diagnostic there is, and for a rejection it is what the operator saw.
+		fail.msg = fmt.Sprintf("herdr %v: %s", args, ee.Stderr)
+		fail.herdrErr = stderrHerdrError(ee.Stderr)
+		return fail
+	}
+	fail.msg = fmt.Sprintf("herdr %v: %v", args, err)
+	return fail
 }
 
 // agentInfo mirrors herdr's agent object.
@@ -114,7 +205,9 @@ type agentInfo struct {
 // exact wave it exists to survive. Its Duration twin is
 // startupNudgeIdleTimeout. The worst case is three of these end to end
 // (readiness, prompt confirmation, Enter recovery), well inside the
-// reconciler's pendingCreateNeverStartedTimeout of 10m.
+// reconciler's pendingCreateNeverStartedTimeout of 10m — though on the
+// reconciler path [session].startup_timeout (60s by default) is the shorter,
+// live bound; see paneBusyRetries in provider.go for the full deadline stack.
 const startupBootBudgetMS = 60000
 
 // agentStartTimeoutMS bounds herdr's own wait for the launched agent TUI to
@@ -199,11 +292,7 @@ func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
 	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
 	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
-			return "", fmt.Errorf("herdr %v: %s", args, ee.Stderr)
-		}
-		return "", fmt.Errorf("herdr %v: %w", args, err)
+		return "", runFailure(ctx, args, err)
 	}
 	trimmed := strings.TrimSpace(string(out))
 	if strings.HasPrefix(trimmed, "{") {

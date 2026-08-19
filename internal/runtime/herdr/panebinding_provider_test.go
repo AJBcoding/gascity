@@ -54,6 +54,17 @@ agent_get)
 agent_list)
   printf '%s' '{"result":{"agents":[]}}' ;;
 agent_start)
+  if [ -e "$STATE/pane_busy_once" ]; then
+    # The one branch modeled the way a REAL herdr rejects: envelope on stderr,
+    # nonzero exit (0.7.5 writes nothing to stdout in that case). Every other
+    # error here answers on stdout with exit 0, which is the shape gc's own
+    # stdout path already typed correctly — and why the stderr path's lost
+    # error codes went unnoticed for so long (gas-ao8z). Consumed on use, so
+    # the retry lands on a pane herdr now accepts.
+    rm -f "$STATE/pane_busy_once"
+    printf '%s\n' '{"error":{"code":"agent_pane_busy","message":"pane %5 is not an available shell"},"id":"cli:agent:start"}' >&2
+    exit 1
+  fi
   if [ -e "$STATE/name_taken" ]; then
     # A concurrent Start won the name and its agent is live: herdr rejects the
     # launch, agent get then resolves the live holder and its pane probes
@@ -337,6 +348,103 @@ func TestStartMapsSessionNameToValidHerdrName(t *testing.T) {
 	}
 	if names, err := p.ListRunning("Indigo"); err != nil || len(names) != 1 || names[0] != "Indigo--anthony" {
 		t.Fatalf("ListRunning = %v, %v; want [Indigo--anthony]", names, err)
+	}
+}
+
+// The consequence of gas-ao8z, at the level that matters: the pane-busy retry
+// ladder must actually engage when herdr rejects the launch the way a real
+// herdr does — envelope on stderr, nonzero exit. A fresh pane's shell is still
+// sourcing rc files when gc's readiness probe calls it idle, and herdr's own
+// availability check disagrees; the residual agent_pane_busy is what the ladder
+// (paneBusyRetries, 1s/2s/4s) exists to absorb. Untyped, herdrErrorCode
+// returned "" and the loop broke on attempt 0: one `agent start`, Start failed,
+// and the ladder never ran once in production.
+func TestStartRetriesPaneBusyRejectedOnStderr(t *testing.T) {
+	p, session, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, session)
+	setState(t, state, "pane_busy_once")
+
+	if err := p.Start(context.Background(), "gastown__witness", runtime.Config{Command: "claude"}); err != nil {
+		t.Fatalf("Start: %v; want the retry ladder to absorb the pane-busy rejection", err)
+	}
+	calls := fakeCalls(t, state)
+	if n := strings.Count(calls, "agent start gastown__witness"); n != 2 {
+		t.Fatalf("agent start issued %d times; want 2 (the rejection plus exactly one ladder retry):\n%s", n, calls)
+	}
+	// The retry is a real launch, not a bookkeeping success: the binding and
+	// mode Start persists must describe the pane the agent actually landed in.
+	if got, _ := p.GetMeta("gastown__witness", metaBoundMode); got != bindModeAgent {
+		t.Errorf("bound mode after the retried launch = %q; want %q", got, bindModeAgent)
+	}
+}
+
+// The ladder is bounded, not a loop: a pane that stays busy exhausts
+// paneBusyRetries and surfaces herdr's own verdict. This is the cost side of
+// reviving the branch — worst case one Start pays 1s+2s+4s before failing — and
+// it must stay a ceiling.
+func TestStartPaneBusyLadderIsBounded(t *testing.T) {
+	p, session, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, session)
+	// Never consumed: every attempt is rejected on stderr.
+	rewriteFake(t, p, `rm -f "$STATE/pane_busy_once"`, `:`)
+	setState(t, state, "pane_busy_once")
+
+	err := p.Start(context.Background(), "gastown__witness", runtime.Config{Command: "claude"})
+	if herdrErrorCode(err) != "agent_pane_busy" {
+		t.Fatalf("Start = %v; want the exhausted ladder to surface herdr's agent_pane_busy verdict", err)
+	}
+	if n := strings.Count(fakeCalls(t, state), "agent start gastown__witness"); n != paneBusyRetries+1 {
+		t.Errorf("agent start issued %d times; want %d (bounded by paneBusyRetries)", n, paneBusyRetries+1)
+	}
+}
+
+// Cancellation must survive the ladder, and the ATTEMPT is the half that was
+// broken. The backoff already returns ctx.Err() verbatim (the select in
+// provider.go), so a cancel that lands between attempts was always matchable; a
+// cancel that lands while an `agent start` is in flight comes back from os/exec
+// as the killed process's exit status instead, because Cmd.Wait prefers the
+// process error over the context watcher's cause. A reconciler that bounds
+// Start on startup_timeout then reads its own deadline as a herdr refusal —
+// and the ladder widens the window, since a busy pane keeps a Start in flight
+// for minutes.
+func TestStartCancelledDuringPaneBusyRetryAttemptStaysMatchable(t *testing.T) {
+	p, session, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, session)
+	// Attempt 1 is rejected pane-busy, which arms the ladder; the RETRY attempt
+	// blocks until it is killed, so the cancel lands inside `agent start`.
+	rewriteFake(t, p, "agent_start)", "agent_start)\n"+`  if [ -e "$STATE/hang_next" ]; then : > "$STATE/hanging"; exec sleep 5; fi`)
+	rewriteFake(t, p, `rm -f "$STATE/pane_busy_once"`, `rm -f "$STATE/pane_busy_once"; : > "$STATE/hang_next"`)
+	setState(t, state, "pane_busy_once")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// Cancel on the fake's own signal that it has entered the retry attempt,
+	// not on a fixed delay — a delay could drift into the backoff window and
+	// quietly assert the case that already worked.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			if _, err := os.Stat(filepath.Join(state, "hanging")); err == nil {
+				cancel()
+				return
+			}
+			select {
+			case <-done:
+				return
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+	}()
+
+	err := p.Start(ctx, "gastown__witness", runtime.Config{Command: "claude"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v; want errors.Is(context.Canceled) for a cancel during the retry attempt", err)
+	}
+	// Two starts prove the cancel interrupted the RETRY: a cancel during the
+	// backoff would have returned after the first.
+	if n := strings.Count(fakeCalls(t, state), "agent start gastown__witness"); n != 2 {
+		t.Errorf("agent start issued %d times; want 2 (the rejection plus the retry attempt the cancel interrupted)", n)
 	}
 }
 

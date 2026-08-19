@@ -6,8 +6,13 @@ package herdr
 type agentStartOps struct {
 	// getAgent fetches the agent currently holding the contested name.
 	getAgent func() (agentInfo, bool, error)
-	// paneAlive reports whether the holder's pane still runs the agent process.
-	paneAlive func(paneID string) bool
+	// paneAlive reports whether the holder's pane still runs the agent process:
+	// (true, nil) live, (false, nil) confirmed dead, (_, err) uninspectable.
+	// The error is not a detail to log and drop — it is the third answer. A
+	// probe that failed has NOT reported the holder dead, and the caller reaps
+	// a dead holder, so collapsing it into false trades a transport blip for a
+	// closed pane and a killed turn.
+	paneAlive func(paneID string) (bool, error)
 	// closePane reaps a stale holder pane.
 	closePane func(paneID string) error
 	// retryStart re-issues the original agent start after a stale holder is reaped.
@@ -26,8 +31,14 @@ type agentStartOps struct {
 // process is alive it is adopted (returned as-is with adopted=true, no new pane,
 // no retry) so the caller can skip re-priming a running agent; if the holder is
 // a stale pane it is reaped and the start is retried exactly once (adopted=false,
-// a fresh agent). If the holder cannot be inspected, the original error is
-// surfaced rather than guessing.
+// a fresh agent).
+//
+// If the holder cannot be inspected — either lookup fails, or the pane probe
+// fails — the original error is surfaced rather than guessing, and NOTHING is
+// reaped or retried. Both halves of that promise are load-bearing: the reap is
+// destructive (it closes the holder's pane, killing whatever turn is running in
+// it), so it is owed a determinate "this holder is dead", not the absence of a
+// determinate "alive". Only a probe that answered may condemn a pane.
 func resolveAgentNameTaken(startInfo agentInfo, startErr error, ops agentStartOps) (info agentInfo, adopted bool, err error) {
 	if startErr == nil {
 		return startInfo, false, nil
@@ -39,10 +50,14 @@ func resolveAgentNameTaken(startInfo agentInfo, startErr error, ops agentStartOp
 	if gerr != nil || !ok {
 		return agentInfo{}, false, startErr
 	}
-	if ops.paneAlive(existing.PaneID) {
+	alive, perr := ops.paneAlive(existing.PaneID)
+	if perr != nil {
+		return agentInfo{}, false, startErr // uninspectable holder: surface, never reap
+	}
+	if alive {
 		return existing, true, nil // adopt the live holder; no reap, no retry
 	}
-	_ = ops.closePane(existing.PaneID) // reap the stale holder (best effort)
+	_ = ops.closePane(existing.PaneID) // reap the confirmed-stale holder (best effort)
 	fresh, rerr := ops.retryStart()    // bounded: exactly one retry
 	return fresh, false, rerr
 }

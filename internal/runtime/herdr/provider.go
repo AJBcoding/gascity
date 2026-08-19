@@ -544,9 +544,18 @@ func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID st
 	started, startErr := p.c.startAgentKind(ctx, hn, kind, paneID, args)
 	return resolveAgentNameTaken(started, startErr, agentStartOps{
 		getAgent: func() (agentInfo, bool, error) { return p.c.getAgent(ctx, herdrAgentName(name)) },
-		paneAlive: func(holderPane string) bool {
+		paneAlive: func(holderPane string) (bool, error) {
+			// probePane already separates the two failures this turns on: a
+			// pane herdr confirms is gone is (zero, nil) — determinate, and a
+			// dead holder — while a transport failure is (zero, err), which
+			// says nothing about the holder at all. Pass that distinction up
+			// instead of flattening both to "not alive"; the caller reaps what
+			// it is told is dead.
 			probe, perr := p.probePane(ctx, holderPane)
-			return perr == nil && probe.Exists && probe.Busy
+			if perr != nil {
+				return false, perr
+			}
+			return probe.Exists && probe.Busy, nil
 		},
 		closePane:  func(holderPane string) error { return p.c.closePane(ctx, holderPane) },
 		retryStart: func() (agentInfo, error) { return p.c.startAgentKind(ctx, hn, kind, paneID, args) },
@@ -556,6 +565,32 @@ func (p *Provider) startAgentAdopting(ctx context.Context, name, kind, paneID st
 // paneBusyRetries bounds how many agent_pane_busy rejections the kind launch
 // retries after re-waiting for the shell prompt (races between the readiness
 // probe and herdr's own availability check).
+//
+// Three separate budgets, recorded so the next change to this number need not
+// re-derive them — they answer different questions and only the last one is
+// what a production Start actually runs into.
+//
+// Typical cost is the backoff alone: agent_pane_busy is a pre-flight rejection
+// herdr returns immediately, not a wait. One absorbed rejection adds ~1s; a
+// pane that keeps rejecting exhausts the ladder for 1+2+4 = 7s.
+//
+// Code-only ceiling, if no caller imposes a deadline: the initial
+// waitPaneShellReady before the first attempt (≤ paneShellReadyWait, 15s), plus
+// four `agent start` attempts each bounded by agentStartTimeoutMS (60s), plus
+// one more waitPaneShellReady per retry, plus the backoff — 15 + 4×60 + 3×15 +
+// 7 ≈ 307s. It grows as 15 + (n+1)×60 + n×15 + (2^n − 1): n=6 is ~588s, and
+// raising this past 6 breaks the reconciler's 10m pendingCreateNeverStartedTimeout
+// (n=7 is ~727s), the lease covering a pending create that has not yet reached
+// preWakeCommit. The backoff alone dominates only past n=9.
+//
+// What a reconciler-driven Start actually pays: runPreparedStartCandidate wraps
+// the whole provider call in [session].startup_timeout — 60s by default
+// (SessionConfig.StartupTimeoutDuration) — so once preWakeCommit has run that
+// per-start context, not the 10m never-started lease, is the live bound. Under
+// stock config the 307s path is cut off around 60s. Every attempt and every
+// wait here is context-bounded, so the ladder stops there rather than running
+// past it, and the failure comes back matchable as context.DeadlineExceeded
+// (runFailure keeps the context cause in the chain — see client.go).
 const paneBusyRetries = 3
 
 // paneShellReadyWait bounds the wait for a fresh pane's shell to reach its

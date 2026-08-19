@@ -62,63 +62,85 @@ func TestResolveAgentNameTakenNonTakenErrorSurfaces(t *testing.T) {
 	}
 }
 
-// agent_name_taken + the holder's process is alive → adopt it: return the
-// existing agent with adopted=true, do NOT reap, do NOT retry. This is the
-// storm-breaker, and adopted=true tells Start to skip re-priming a live agent.
-func TestResolveAgentNameTakenAdoptsLiveHolder(t *testing.T) {
+// The holder disposition — all three verdicts the pane probe can return, in
+// one place, because the difference between them is the whole safety argument.
+//
+// The reap is destructive: closePane kills whatever turn the holder's pane is
+// running. So it is owed a determinate "this holder is dead", and a probe that
+// FAILED has not delivered one. The closure feeding paneAlive used to collapse
+// a failed probe into "not alive", which reaped on a transport blip; that was
+// unreachable dead code until the stderr-path error typing (gas-ao8z) made
+// agent_name_taken resolvable at all, so it landed with this fix or not at all.
+//
+// Asserting the returned error cannot catch that regression — the original
+// agent_name_taken comes back whether or not the pane was closed on the way.
+// The absence of the closePane and retryStart calls is the real assertion.
+func TestResolveAgentNameTakenHolderDisposition(t *testing.T) {
 	existing := agentInfo{Name: "x", PaneID: "w3F:pW", TabID: "w3F:tE"}
-	reaped, retried := false, false
-	got, adopted, err := resolveAgentNameTaken(agentInfo{}, wrapTaken(), agentStartOps{
-		getAgent:   func() (agentInfo, bool, error) { return existing, true, nil },
-		paneAlive:  func(paneID string) bool { return paneID == "w3F:pW" },
-		closePane:  func(string) error { reaped = true; return nil },
-		retryStart: func() (agentInfo, error) { retried = true; return agentInfo{}, nil },
-	})
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if got != existing {
-		t.Errorf("got %+v; want adopted existing %+v", got, existing)
-	}
-	if !adopted {
-		t.Error("adopted=false for a live holder; want true so Start skips re-delivery")
-	}
-	if reaped {
-		t.Error("closePane called on a live holder; must adopt, not reap")
-	}
-	if retried {
-		t.Error("retryStart called on a live holder; must adopt, not retry")
-	}
-}
-
-// agent_name_taken + the holder is a stale/dead pane → reap it, then start
-// once more (bounded: exactly one retry, no loop). A retried start is a fresh
-// agent, not an adoption, so adopted=false (Start still primes it).
-func TestResolveAgentNameTakenReapsStaleThenRetries(t *testing.T) {
-	stale := agentInfo{Name: "x", PaneID: "w3F:pOLD"}
 	fresh := agentInfo{Name: "x", PaneID: "w3F:pNEW"}
-	var reapedPane string
-	retries := 0
-	got, adopted, err := resolveAgentNameTaken(agentInfo{}, wrapTaken(), agentStartOps{
-		getAgent:   func() (agentInfo, bool, error) { return stale, true, nil },
-		paneAlive:  func(string) bool { return false },
-		closePane:  func(paneID string) error { reapedPane = paneID; return nil },
-		retryStart: func() (agentInfo, error) { retries++; return fresh, nil },
-	})
-	if err != nil {
-		t.Fatalf("unexpected err: %v", err)
-	}
-	if reapedPane != "w3F:pOLD" {
-		t.Errorf("reaped %q; want the stale holder pane w3F:pOLD", reapedPane)
-	}
-	if retries != 1 {
-		t.Errorf("retryStart called %d times; want exactly 1 (bounded, no loop)", retries)
-	}
-	if got != fresh {
-		t.Errorf("got %+v; want fresh start %+v", got, fresh)
-	}
-	if adopted {
-		t.Error("adopted=true after reap+retry; want false (fresh start, not adoption)")
+	probeFailed := errors.New("herdr [pane process-info --pane w3F:pW]: exit status 1: socket hiccup")
+
+	tests := []struct {
+		name        string
+		alive       bool
+		probeErr    error
+		wantInfo    agentInfo
+		wantAdopted bool
+		wantOrigErr bool   // the original agent_name_taken is surfaced
+		wantReaped  string // pane passed to closePane; "" means it must NOT be called
+		wantRetries int
+	}{{
+		// Live holder → adopt it: no new pane, no retry, and adopted=true so
+		// Start skips re-priming an agent that is already working. The
+		// storm-breaker.
+		name: "live holder is adopted", alive: true,
+		wantInfo: existing, wantAdopted: true,
+	}, {
+		// Confirmed-dead holder → reap the stale pane, then start once more.
+		// Bounded: exactly one retry, never a loop. A retried start is a fresh
+		// agent, not an adoption, so adopted=false and Start still primes it.
+		name: "confirmed-dead holder is reaped and retried once", alive: false,
+		wantInfo: fresh, wantReaped: existing.PaneID, wantRetries: 1,
+	}, {
+		// Probe failed → the holder was never condemned. Surface the original
+		// error and touch nothing: a transport blip must not cost a live agent
+		// its pane and its in-flight turn.
+		name: "uninspectable holder is surfaced, never reaped", alive: false, probeErr: probeFailed,
+		wantOrigErr: true,
+	}}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			orig := wrapTaken()
+			var reaped string
+			retries := 0
+			got, adopted, err := resolveAgentNameTaken(agentInfo{}, orig, agentStartOps{
+				getAgent:   func() (agentInfo, bool, error) { return existing, true, nil },
+				paneAlive:  func(string) (bool, error) { return tt.alive, tt.probeErr },
+				closePane:  func(paneID string) error { reaped = paneID; return nil },
+				retryStart: func() (agentInfo, error) { retries++; return fresh, nil },
+			})
+			switch {
+			case tt.wantOrigErr && !errors.Is(err, orig):
+				t.Errorf("err = %v; want the original agent_name_taken surfaced", err)
+			case !tt.wantOrigErr && err != nil:
+				t.Fatalf("unexpected err: %v", err)
+			}
+			if got != tt.wantInfo {
+				t.Errorf("info = %+v; want %+v", got, tt.wantInfo)
+			}
+			if adopted != tt.wantAdopted {
+				t.Errorf("adopted = %v; want %v", adopted, tt.wantAdopted)
+			}
+			// The two destructive calls. Proving they did NOT happen is the
+			// point of the uninspectable case.
+			if reaped != tt.wantReaped {
+				t.Errorf("closePane called with %q; want %q (empty = must not be called at all)", reaped, tt.wantReaped)
+			}
+			if retries != tt.wantRetries {
+				t.Errorf("retryStart called %d times; want %d", retries, tt.wantRetries)
+			}
+		})
 	}
 }
 
