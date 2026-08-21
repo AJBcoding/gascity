@@ -167,6 +167,8 @@ func TestLeakGuardFailsAndReapsLeakedTmuxServer(t *testing.T) {
 		func() {},
 		func() {},
 		func([]DoltProcInfo) {},
+		doltLeakGuardGraceInitialInterval,
+		doltLeakGuardGraceMaxElapsedTime,
 	)
 
 	if code != 1 {
@@ -211,6 +213,8 @@ func TestLeakGuardNeverTouchesTmuxServerOutsideRunRoot(t *testing.T) {
 		func() {},
 		func() {},
 		func([]DoltProcInfo) {},
+		doltLeakGuardGraceInitialInterval,
+		doltLeakGuardGraceMaxElapsedTime,
 	)
 
 	if code != 0 {
@@ -236,6 +240,8 @@ func TestLeakGuardWithoutTmuxSocketRootSkipsTmuxSweep(t *testing.T) {
 		func() {},
 		func() {},
 		func([]DoltProcInfo) {},
+		doltLeakGuardGraceInitialInterval,
+		doltLeakGuardGraceMaxElapsedTime,
 	)
 
 	if code != 0 {
@@ -363,6 +369,8 @@ func TestTmuxLeakGuardCatchesRealLeakedServer(t *testing.T) {
 		func() {},
 		func() {},
 		func([]DoltProcInfo) {},
+		doltLeakGuardGraceInitialInterval,
+		doltLeakGuardGraceMaxElapsedTime,
 	)
 
 	if code != 1 {

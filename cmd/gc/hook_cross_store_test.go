@@ -377,7 +377,7 @@ func TestClaimStoreWithFallbackFallsBackWhenSelectedStoreRerunsEmpty(t *testing.
 		}
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], run)
+	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -404,7 +404,7 @@ func TestClaimStoreWithFallbackUsesSelectedStoreWhenStillReady(t *testing.T) {
 		return `[{"id":"va-1"}]`, nil
 	}
 
-	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], run)
+	out, gotStore, err := claimStoreWithFallback("q", stores, selected, stores[0], "", run)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}

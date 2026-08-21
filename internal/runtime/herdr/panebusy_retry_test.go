@@ -23,8 +23,8 @@ import (
 // The fake rejects the first launch exactly as herdr does (stderr + exit 1) and
 // accepts the second, so a Start that succeeds proves the retry fired.
 func TestStartRetriesPaneBusyRejectedOnStderr(t *testing.T) {
-	p, session, state := newFakeHerdrProvider(t)
-	listenHerdrSocket(t, session)
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
 	setState(t, state, "pane_busy_once")
 
 	cfg := runtime.Config{

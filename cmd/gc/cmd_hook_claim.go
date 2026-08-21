@@ -46,13 +46,28 @@ var hookClaimMutationTimeout = 10 * time.Second
 // began a claim mutation may still run. Past it, the turn that invoked the
 // command is assumed gone and the claim would be born into nothing.
 //
-// 45s is chosen from both sides. An honest query-plus-claim finishes well inside
-// it even loaded — hookWorkQueryTimeout's 60s covers the WHOLE multi-tier probe,
-// and a probe that slow has already outlasted every provider's tool patience —
-// while 45s sits below any realistic provider tool timeout that could orphan the
-// process, and below idleClaimNudgeGrace (90s) so the backstop lane never
-// observes a half-open window.
-var hookClaimWindowDefault = 45 * time.Second
+// It is DERIVED from the work-query budget rather than a flat constant. A fresh
+// `gc hook --claim` first spends up to hookWorkQueryTimeout finding routed work —
+// a loaded multi-rig city's federated probe legitimately runs tens of seconds —
+// and only then reaches the claim CAS, which needs up to hookClaimMutationTimeout.
+// A flat 45s window anchored at invocation start charged that read latency
+// against the claim, so raising hookWorkQueryTimeout was inert on the --claim
+// path: the query now succeeds at ~t=70s but the fence refused the claim at 45s,
+// relocating the starvation from session.work_query_failed to
+// execution.claim_window_expired. Summing the two budgets keeps the turn-binding
+// intent — a claim reaching the CAS later than an honest full-budget
+// query-plus-mutation could is treated as orphaned — while giving a genuinely
+// slow-but-alive read the headroom to claim the work the raise now surfaces.
+//
+// Ceilings: a provider CALLBACK lane is refused earlier by hookClaimNonTurnMarker
+// and never reaches this window, so the 15s callback budget is not the bound here;
+// the bound is the DIRECT turn's patience, which the hookWorkQueryTimeout raise
+// already assumes is at least this budget. The window can now exceed
+// idleClaimNudgeGrace (90s); in the measured worst case (~70s) the claim still
+// lands before the backstop's first nudge, and a pathological slow read only earns
+// the idle-claim backstop's next idempotent (NDI) re-nudge, never a double claim.
+// GC_HOOK_CLAIM_WINDOW (resolveHookClaimWindow) still overrides this default.
+var hookClaimWindowDefault = hookWorkQueryTimeout + hookClaimMutationTimeout
 
 // hookClaimNonTurnEnvMarkers are the environment markers that prove a
 // `gc hook --claim` process is a provider CALLBACK rather than an agent turn.
@@ -148,6 +163,11 @@ type hookClaimOps struct {
 	// (gc.work_branch and/or the durable session back-reference gc.session_id /
 	// gc.session_name) onto the claimed bead in ONE update. Best-effort.
 	StampWorkMeta hookStampWorkMetaFunc
+	// StampSessionClaim records the claimed bead id on the CLAIMING SESSION's own
+	// bead — the reverse direction from StampWorkMeta, and the only route by
+	// which the step's shell can later learn which bead it is running.
+	// Best-effort.
+	StampSessionClaim hookStampSessionClaimFunc
 	// ReadWorkMeta is the post-stamp authoritative readback used only to
 	// establish the durable lifecycle-start emission point.
 	ReadWorkMeta             func(context.Context, string, []string, string, string) (beads.Bead, error)
@@ -190,6 +210,7 @@ type (
 	hookEmitClaimRejectedFunc  func(beadID, existingClaimant, attemptedClaimant string)
 	hookResolveWorkBranchFunc  func(dir string) string
 	hookStampWorkMetaFunc      func(ctx context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error
+	hookStampSessionClaimFunc  func(sessionID, beadID string) error
 	hookPublishRunMapFunc      func(runID, beadID string, sessionKeys ...string) error
 	hookClaimReleaseFunc       func(ctx context.Context, dir string, env []string, beadID, assignee string) (bool, error)
 )
@@ -339,6 +360,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.StampWorkMeta == nil {
 		ops.StampWorkMeta = hookStampWorkMetaWithBdStore
+	}
+	if ops.StampSessionClaim == nil {
+		ops.StampSessionClaim = hookStampSessionCurrentClaim
 	}
 	if ops.PublishRunMap == nil {
 		ops.PublishRunMap = writeRunMap
@@ -758,6 +782,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
+	stampHookSessionCurrentClaim(bead, opts, ops, stderr)
 	publishHookClaimRunMap(bead, opts, ops, stderr)
 	assigned, err := preassignHookContinuationGroup(bead, opts, ops, dir)
 	if err != nil {
@@ -775,6 +800,15 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 			return 1
 		}
+		// stampHookSessionCurrentClaim above advertised this bead as the session's
+		// current claim before the result write; a minted claim is now being given
+		// back, so clear the stamp as part of the same rollback surface as
+		// ops.Release. Clear BEFORE the release (matching the session_beads.go
+		// cascade order) so `gc hook current` can never hand a later formula step a
+		// bead this session no longer owns — the "close somebody else's bead" hazard
+		// this back-channel exists to prevent. The straddle path (F-B) needs no clear
+		// because it returns before the stamp.
+		clearHookSessionCurrentClaim(opts, ops, stderr)
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
 	}
 	return 0
@@ -1032,15 +1066,21 @@ func hookClaimThroughStore(beadID, assignee string, claim func() (beads.Bead, bo
 // bead to its work that the close gate later reads, ADR-0009) plus the durable
 // session back-reference gc.session_id / gc.session_name (#2843) so the dashboard
 // run-detail can resolve which session executed a pool step after the transient
-// Assignee is cleared on close. graphroute leaves pool steps unbound at route time,
-// deferring the session binding to this claim (graphroute.go:200-203).
+// Assignee is cleared on close, plus gc.claimed_at (OBS-001), the write-once claim
+// timestamp that feeds the created→claimed and claimed→started latency-watch
+// transitions. graphroute leaves pool steps unbound at route time, deferring the
+// session binding to this claim (graphroute.go:200-203).
 //
 // The patch is compare-and-skipped against the bead's current metadata and the
 // write is issued only when at least one key actually changes: this runs again on
 // every hook tick via the existing_assignment / ready_assignment adoption paths, so
 // an unconditional write would emit a bead.updated per tick per in-progress bead
-// (the cache-reconcile flood class). Best-effort: a missing repo, detached HEAD,
-// absent session, or write error never blocks the claim.
+// (the cache-reconcile flood class). gc.claimed_at is the one key in this patch
+// that cannot use "differs from current → overwrite" — time.Now() differs from any
+// stored value on every tick by construction, so it would defeat the compare-and-
+// skip guard by itself. hookClaimIdentityPatch instead treats it as write-once:
+// stamped only when absent, never touched again once set. Best-effort: a missing
+// repo, detached HEAD, absent session, or write error never blocks the claim.
 func stampHookClaimIdentity(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) (beads.Bead, bool) {
 	patch := hookClaimIdentityPatch(bead, opts, ops, dir)
 	sessionID := hookClaimSessionID(opts.Env)
@@ -1099,8 +1139,21 @@ func hookClaimLifecycleCandidate(bead beads.Bead, opts hookClaimOptions) bool {
 // session with no worktree still needs its back-reference — but never on control
 // beads, which stay session-free by graphroute's design
 // (ApplyGraphControlRouteBinding), even when a control-dispatcher session claims one
-// through this same hook path. An empty result means every key is already current,
-// so the caller issues no write.
+// through this same hook path.
+//
+// gc.claimed_at (OBS-001) is a fourth, differently-shaped entry: unlike the three
+// keys above, it is WRITE-ONCE, stamped only when absent from the bead's current
+// metadata and never touched again. A naive claimed_at = now() would differ from
+// the stored value on every tick by construction and defeat the compare-and-skip
+// protection the rest of this function relies on (see stampHookClaimIdentity's doc
+// comment on the flood-class risk). It is also unconditional across control and
+// non-control beads alike: a claim timestamp answers "when was this claimed",
+// which is meaningful regardless of session identity, so it is not gated on
+// IsControlKind, GC_SESSION_ID, or a resolvable worktree branch the way the other
+// three keys are.
+//
+// An empty result means every key is already current, so the caller issues no
+// write.
 func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) map[string]string {
 	patch := map[string]string{}
 	if branch := strings.TrimSpace(ops.ResolveWorkBranch(dir)); branch != "" &&
@@ -1116,6 +1169,9 @@ func hookClaimIdentityPatch(bead beads.Bead, opts hookClaimOptions, ops hookClai
 			strings.TrimSpace(bead.Metadata[beadmeta.SessionNameMetadataKey]) != sessionName {
 			patch[beadmeta.SessionNameMetadataKey] = sessionName
 		}
+	}
+	if strings.TrimSpace(bead.Metadata[beadmeta.ClaimedAtMetadataKey]) == "" {
+		patch[beadmeta.ClaimedAtMetadataKey] = time.Now().UTC().Format(time.RFC3339)
 	}
 	return patch
 }
@@ -1139,12 +1195,74 @@ func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, ass
 	_ = executionevent.EmitLifecycle(rec, hookClaimBdStore(dir, env, assignee), events.ExecutionStepStarted, step, eventActor())
 }
 
+// stampHookSessionCurrentClaim records the claimed bead id on the CLAIMING
+// SESSION's own bead (beadmeta.CurrentClaimBeadIDMetadataKey), the reverse
+// direction from stampHookClaimIdentity's work-bead back-reference.
+//
+// It exists because a claimed step id is otherwise UNREACHABLE from the step's
+// own shell: GC_BEAD_ID / GC_TRIGGER_BEAD_ID are set only in the dispatch
+// condition-script environment (internal/convergence/condition.go), never in a
+// pool session, so a formula step that must close the bead it is running had no
+// way to name it and silently skipped its own close — work that did nothing
+// reported green. `gc hook current` reads this stamp back and closes that gap.
+//
+// Unlike the work-bead session back-reference this is stamped for CONTROL beads
+// too: that exclusion exists because a control step must stay session-free by
+// graphroute's design, which is a statement about the WORK bead's metadata. A
+// control-dispatcher session running a control step needs to name its own bead
+// exactly as much as any other worker does.
+//
+// Best-effort: the write is guarded and compare-and-skipped inside
+// session.Store.SetCurrentClaim, and a failure is reported on stderr but never
+// fails the claim. The loud refusal for a step that cannot name its bead belongs
+// at the point of use, not here.
+func stampHookSessionCurrentClaim(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+	sessionID := hookClaimSessionID(opts.Env)
+	beadID := strings.TrimSpace(bead.ID)
+	if sessionID == "" || beadID == "" {
+		return
+	}
+	if err := ops.StampSessionClaim(sessionID, beadID); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: recording current claim %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
+	}
+}
+
+// clearHookSessionCurrentClaim removes the session-side current-claim stamp when
+// a claim this invocation recorded is being given back, so a released bead is
+// never left advertised as the session's current claim. It is the inverse of
+// stampHookSessionCurrentClaim and deliberately routes the clear through the same
+// ops.StampSessionClaim seam — an empty bead id, which session.Store.SetCurrentClaim
+// treats as a clear — so it reaches the SAME relocation-aware session front door the
+// stamp used. Clearing through the store-cascade helper instead
+// (clearSessionCurrentClaim, sessionFrontDoor(store)) would risk missing a relocated
+// session binding the stamp wrote to.
+//
+// Best-effort with the stamp's own error handling: a failure is reported on stderr
+// but changes no exit code, because on this path the compensating action is
+// ops.Release and the stamp clear is part of that same rollback surface — the caller
+// clears BEFORE releasing so a freed bead is never simultaneously claimable by
+// another seat and still named by this session (the ordering session_beads.go's
+// cascade already relies on).
+func clearHookSessionCurrentClaim(opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
+	sessionID := hookClaimSessionID(opts.Env)
+	if sessionID == "" {
+		return
+	}
+	if err := ops.StampSessionClaim(sessionID, ""); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: clearing current claim on session %s: %v\n", sessionID, err) //nolint:errcheck
+	}
+}
+
 // publishHookClaimRunMap publishes the claimed bead's resolved run ID for the
 // external proxy correlation path. It deliberately does not decorate the
 // session bead: bd's fuzzy ID resolver can redirect a post-claim update to a
 // prefix-colliding session if the intended session disappears concurrently.
 // The run map is independent, best-effort telemetry and preserves useful
-// correlation without issuing that unsafe second store mutation.
+// correlation without issuing that unsafe second store mutation. (The one
+// session-bead write the claim does make, stampHookSessionCurrentClaim, goes
+// through the session front door's exact-id/session-bead-validated
+// SetCurrentClaim, which refuses the fuzzy redirect this comment describes
+// rather than risking it.)
 func publishHookClaimRunMap(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, stderr io.Writer) {
 	sessionBeadID := hookClaimSessionID(opts.Env)
 	if sessionBeadID == "" {

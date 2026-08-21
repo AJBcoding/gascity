@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/agent"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -583,6 +584,137 @@ mode = "always"
 	}
 	if found["repo/gs.watcher"] != "repo--gs__watcher" {
 		t.Fatalf("watcher session_name = %q, want %q", found["repo/gs.watcher"], "repo--gs__watcher")
+	}
+}
+
+// A named session resolved against a concrete bound work-step bead gets the
+// full startup kickoff contract seeded at bead-creation time (AC1, AC3): the
+// progress-binding key plus a pending kickoff state, ready for the backstop
+// in startup_kickoff_nudge.go to pick up.
+func TestSyncSessionBeads_SeedsStartupKickoffMetadataForBoundNamedSession(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	ds := map[string]TemplateParams{
+		"session-a": {
+			TemplateName:            "agent-a",
+			InstanceName:            "agent-a",
+			ConfiguredNamedIdentity: "agent-a",
+			ConfiguredNamedMode:     "on_demand",
+			BoundStepID:             "work-a",
+			Command:                 "claude",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d: %+v", len(all), all)
+	}
+	b := all[0]
+	if got := b.Metadata[beadmeta.BoundStepIDMetadataKey]; got != "work-a" {
+		t.Fatalf("%s = %q, want work-a", beadmeta.BoundStepIDMetadataKey, got)
+	}
+	if got := b.Metadata[startupKickoffStateKey]; got != startupKickoffStatePending {
+		t.Fatalf("startup_kickoff_state = %q, want %q", got, startupKickoffStatePending)
+	}
+	wantStartedAt := clk.Now().UTC().Format(time.RFC3339)
+	if got := b.Metadata[startupKickoffStartedAtKey]; got != wantStartedAt {
+		t.Fatalf("startup_kickoff_started_at = %q, want %q", got, wantStartedAt)
+	}
+	if got := b.Metadata[startupKickoffAttemptsKey]; got != "0" {
+		t.Fatalf("startup_kickoff_attempts = %q, want 0", got)
+	}
+	if got, ok := b.Metadata[startupKickoffLastNudgeAtKey]; ok && got != "" {
+		t.Fatalf("startup_kickoff_last_nudge_at = %q, want absent or empty", got)
+	}
+}
+
+// AC4: a named session with no concrete bound step (e.g. an always-mode
+// session awake only on default demand) is explicitly out of v1 scope — it
+// must not receive the kickoff backstop's tracking state, since there is no
+// clean forward-progress signal to bind to yet.
+func TestSyncSessionBeads_SkipsStartupKickoffMetadataWithoutBoundStep(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	ds := map[string]TemplateParams{
+		"session-a": {
+			TemplateName:            "agent-a",
+			InstanceName:            "agent-a",
+			ConfiguredNamedIdentity: "agent-a",
+			ConfiguredNamedMode:     "always",
+			Command:                 "claude",
+		},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d: %+v", len(all), all)
+	}
+	b := all[0]
+	if got := b.Metadata[namedSessionMetadataKey]; got != "true" {
+		t.Fatalf("named_session = %q, want true", got)
+	}
+	for _, key := range []string{
+		beadmeta.BoundStepIDMetadataKey,
+		startupKickoffStateKey,
+		startupKickoffStartedAtKey,
+		startupKickoffAttemptsKey,
+		startupKickoffLastNudgeAtKey,
+	} {
+		if got, ok := b.Metadata[key]; ok && got != "" {
+			t.Fatalf("%s = %q, want absent without a bound step", key, got)
+		}
+	}
+}
+
+// AC2: pool-managed session beads never receive the named/direct kickoff
+// state, regardless of any bound work bead they happen to be servicing —
+// the pool's own idle-claim-nudge backstop (idle_nudge.go) owns them.
+func TestSyncSessionBeads_PoolManagedSessionNeverGetsStartupKickoffMetadata(t *testing.T) {
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 4, 18, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+
+	ds := map[string]TemplateParams{
+		"session-a": {TemplateName: "polecat", InstanceName: "pack/worker-1", PoolSlot: 1},
+	}
+
+	var stderr bytes.Buffer
+	syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), nil, clk, &stderr, false)
+	if stderr.Len() > 0 {
+		t.Fatalf("unexpected stderr: %s", stderr.String())
+	}
+
+	all := allSessionBeads(t, store)
+	if len(all) != 1 {
+		t.Fatalf("expected 1 bead, got %d: %+v", len(all), all)
+	}
+	b := all[0]
+	for _, key := range []string{
+		beadmeta.BoundStepIDMetadataKey,
+		startupKickoffStateKey,
+		startupKickoffStartedAtKey,
+		startupKickoffAttemptsKey,
+		startupKickoffLastNudgeAtKey,
+	} {
+		if got, ok := b.Metadata[key]; ok && got != "" {
+			t.Fatalf("%s = %q, want absent on a pool-managed bead", key, got)
+		}
 	}
 }
 
@@ -1510,6 +1642,167 @@ func TestReopenClosedConfiguredNamedSessionBeadFailsWhenMetadataBatchFails(t *te
 	}
 	if got.Metadata["close_reason"] != "suspended" {
 		t.Fatalf("close_reason = %q, want suspended: the reopen clears close_reason, so it must survive a failed write", got.Metadata["close_reason"])
+	}
+}
+
+func TestReopenClosedConfiguredNamedSessionBeadSeedsStartupKickoffMetadataForNewBoundStep(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 11, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	// The closed bead carries a prior binding's terminal state (confirmed
+	// against an old step, two nudge attempts already spent) — reopening
+	// bound to a new step must reset all four, not inherit them.
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":                  sessionName,
+			"alias":                         "refinery",
+			"template":                      "refinery",
+			"state":                         "suspended",
+			"close_reason":                  "suspended",
+			namedSessionMetadataKey:         "true",
+			namedSessionIdentityMetadata:    "refinery",
+			namedSessionModeMetadata:        "on_demand",
+			beadmeta.BoundStepIDMetadataKey: "old-step-1",
+			startupKickoffStateKey:          startupKickoffStateConfirmed,
+			startupKickoffStartedAtKey:      now.Add(-10 * time.Minute).UTC().Format(time.RFC3339),
+			startupKickoffAttemptsKey:       "2",
+			startupKickoffLastNudgeAtKey:    now.Add(-5 * time.Minute).UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	extraMeta := startupKickoffReopenMetadata("new-step-2", now)
+	reopened, sn, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "refinery", sessionName, "active", now, extraMeta, &stderr,
+	)
+	if !ok {
+		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if sn != sessionName {
+		t.Fatalf("reopen session name = %q, want %q", sn, sessionName)
+	}
+	if got := reopened.Metadata[beadmeta.BoundStepIDMetadataKey]; got != "new-step-2" {
+		t.Fatalf("%s = %q, want %q", beadmeta.BoundStepIDMetadataKey, got, "new-step-2")
+	}
+	if got := reopened.Metadata[startupKickoffStateKey]; got != startupKickoffStatePending {
+		t.Fatalf("%s = %q, want %q", startupKickoffStateKey, got, startupKickoffStatePending)
+	}
+	if got, want := reopened.Metadata[startupKickoffStartedAtKey], now.UTC().Format(time.RFC3339); got != want {
+		t.Fatalf("%s = %q, want %q", startupKickoffStartedAtKey, got, want)
+	}
+	if got := reopened.Metadata[startupKickoffAttemptsKey]; got != "0" {
+		t.Fatalf("%s = %q, want %q", startupKickoffAttemptsKey, got, "0")
+	}
+
+	stored, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", closed.ID, err)
+	}
+	if got := stored.Metadata[startupKickoffStateKey]; got != startupKickoffStatePending {
+		t.Fatalf("stored %s = %q, want %q", startupKickoffStateKey, got, startupKickoffStatePending)
+	}
+	if got := stored.Metadata[beadmeta.BoundStepIDMetadataKey]; got != "new-step-2" {
+		t.Fatalf("stored %s = %q, want %q", beadmeta.BoundStepIDMetadataKey, got, "new-step-2")
+	}
+}
+
+func TestReopenClosedConfiguredNamedSessionBeadClearsStaleStartupKickoffMetadataWhenUnbound(t *testing.T) {
+	cityPath := t.TempDir()
+	store := beads.NewMemStore()
+	now := time.Date(2026, 5, 1, 11, 0, 0, 0, time.UTC)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "refinery", StartCommand: "true", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Template: "refinery", Mode: "on_demand"},
+		},
+	}
+	sessionName := config.NamedSessionRuntimeName(cfg.Workspace.Name, cfg.Workspace, "refinery")
+	closed, err := store.Create(beads.Bead{
+		Title:  "refinery",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel},
+		Metadata: map[string]string{
+			"session_name":                  sessionName,
+			"alias":                         "refinery",
+			"template":                      "refinery",
+			"state":                         "suspended",
+			"close_reason":                  "suspended",
+			namedSessionMetadataKey:         "true",
+			namedSessionIdentityMetadata:    "refinery",
+			namedSessionModeMetadata:        "on_demand",
+			beadmeta.BoundStepIDMetadataKey: "old-step-1",
+			startupKickoffStateKey:          startupKickoffStateConfirmed,
+			startupKickoffStartedAtKey:      now.Add(-10 * time.Minute).UTC().Format(time.RFC3339),
+			startupKickoffAttemptsKey:       "2",
+			startupKickoffLastNudgeAtKey:    now.Add(-5 * time.Minute).UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		t.Fatalf("create closed canonical bead: %v", err)
+	}
+	if err := store.Close(closed.ID); err != nil {
+		t.Fatalf("close canonical bead: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	extraMeta := startupKickoffReopenMetadata("", now)
+	reopened, sn, ok := reopenClosedConfiguredNamedSessionBead(
+		cityPath, store, cfg, "test-city", "refinery", sessionName, "active", now, extraMeta, &stderr,
+	)
+	if !ok {
+		t.Fatalf("reopenClosedConfiguredNamedSessionBead failed: %s", stderr.String())
+	}
+	if sn != sessionName {
+		t.Fatalf("reopen session name = %q, want %q", sn, sessionName)
+	}
+	for _, key := range []string{
+		beadmeta.BoundStepIDMetadataKey,
+		startupKickoffStateKey,
+		startupKickoffStartedAtKey,
+		startupKickoffAttemptsKey,
+		startupKickoffLastNudgeAtKey,
+	} {
+		if got := reopened.Metadata[key]; got != "" {
+			t.Fatalf("%s = %q, want empty when reopened unbound", key, got)
+		}
+	}
+
+	stored, err := store.Get(closed.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", closed.ID, err)
+	}
+	for _, key := range []string{
+		beadmeta.BoundStepIDMetadataKey,
+		startupKickoffStateKey,
+		startupKickoffStartedAtKey,
+		startupKickoffAttemptsKey,
+		startupKickoffLastNudgeAtKey,
+	} {
+		if got := stored.Metadata[key]; got != "" {
+			t.Fatalf("stored %s = %q, want empty when reopened unbound", key, got)
+		}
 	}
 }
 
@@ -3437,7 +3730,7 @@ func TestSyncSessionBeads_StalePoolSnapshotReusesVisibleOwner(t *testing.T) {
 			t.Fatalf("new bead %s reused visible owner bead %s session_name %q", b.ID, owner.ID, ownerSessionName)
 		}
 		if b.ID != owner.ID && b.Metadata["pool_slot"] == "2" {
-			if got, want := b.Metadata["session_name"], PoolSessionName(template, b.ID); got != want {
+			if got, want := b.Metadata["session_name"], poolIdentitySessionName(b.Metadata["agent_name"], template); got != want {
 				t.Fatalf("new pool bead session_name = %q, want %q", got, want)
 			}
 		}
@@ -3475,7 +3768,7 @@ func TestSyncSessionBeads_FinalizesPoolSessionNameUnderAliasLock(t *testing.T) {
 	if len(all) != 1 {
 		t.Fatalf("session bead count = %d, want 1", len(all))
 	}
-	if got, want := all[0].Metadata["session_name"], PoolSessionName(template, all[0].ID); got != want {
+	if got, want := all[0].Metadata["session_name"], poolIdentitySessionName(alias, template); got != want {
 		t.Fatalf("session_name = %q, want %q", got, want)
 	}
 }
@@ -4427,26 +4720,6 @@ func TestSyncSessionBeads_PreservesStablePoolAliasConflictMetadataWhenAliasLockF
 	}
 	if !strings.Contains(stderr.String(), "locking alias") {
 		t.Fatalf("stderr %q does not mention alias lock failure", stderr.String())
-	}
-}
-
-func TestCreatePoolSessionBead_MetadataFailureLeavesReachablePlaceholder(t *testing.T) {
-	store := &failingPoolSessionNameStore{MemStore: beads.NewMemStore()}
-	template := "pack/worker"
-
-	if _, err := createPoolSessionBead(sessionFrontDoor(store), template, time.Date(2026, 4, 28, 12, 0, 0, 0, time.UTC), poolSessionCreateIdentity{}); err == nil {
-		t.Fatal("createPoolSessionBead returned nil error, want session_name metadata failure")
-	}
-
-	all := allSessionBeads(t, store)
-	if len(all) != 1 {
-		t.Fatalf("created %d session beads, want 1 failed-create bead", len(all))
-	}
-	if got := strings.TrimSpace(all[0].Metadata["session_name"]); got == "" {
-		t.Fatalf("failed pool bead session_name is empty: %+v", all[0])
-	}
-	if got, final := all[0].Metadata["session_name"], PoolSessionName(template, all[0].ID); got == final {
-		t.Fatalf("failed pool bead session_name = final name %q even though SetMetadata failed", got)
 	}
 }
 
