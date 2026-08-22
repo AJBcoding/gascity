@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/testutil"
 	zcodeadapter "github.com/gastownhall/gascity/internal/worker/adapters/zcode"
 )
 
@@ -949,7 +950,13 @@ func TestExportMirrorAccumulatesTurns(t *testing.T) {
 	if export.Info.ID != "sess_mirror" {
 		t.Fatalf("info.id = %q, want sess_mirror", export.Info.ID)
 	}
-	if export.Info.Directory != h.workDir {
+	// Canonicalize both sides: the adapter reports the directory as the kernel
+	// resolves it, which on macOS is the /private/var real path, while h.workDir
+	// carries the /var symlink form t.TempDir() hands out. Comparing the raw
+	// strings fails on Darwin for a path that is the same file — testutil's own
+	// doc names this case ("/tmp and /var can be reported through /private
+	// aliases"). Pre-existing on upstream, not merge-induced.
+	if testutil.CanonicalPath(export.Info.Directory) != testutil.CanonicalPath(h.workDir) {
 		t.Fatalf("info.directory = %q, want %q", export.Info.Directory, h.workDir)
 	}
 	if len(export.Messages) != 2 {
