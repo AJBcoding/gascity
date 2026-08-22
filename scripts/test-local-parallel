@@ -428,7 +428,20 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    # NOT `bash -lc`. A login shell sources /etc/profile, and on macOS that
+    # runs path_helper, which REPLACES PATH with the bare system default —
+    # discarding the PATH="${PATH}" this very allowlist just passed. The
+    # allowlist and a login shell cannot both be right about the environment,
+    # and the allowlist is the one with an opinion worth keeping.
+    #
+    # gas-2ypy: internal/worker/adapters/zcode forwards os.Getenv("PATH") into
+    # the adapter subprocess it drives, so the stripped PATH reached the child,
+    # no turn could start, and 11 tests failed deterministically here while
+    # passing standalone. They were read as flaky-under-load for days and kept
+    # the merge gate permanently red. Same tree, same host, same load, only the
+    # wrapper varying: `bash -c` ok in 6.5s, `bash -lc` 11 failures.
+    # Guarded by scripts/test-local-parallel-env.sh.
+    bash -c "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?
