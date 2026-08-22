@@ -61,6 +61,31 @@ tree you happen to be reading; and never judge publication with a blanket
 (`herdr-src`) whose fetched refs satisfy it (gas-6wq, gas-6tc). Off-machine
 remotes: ajb, mckean, origin, sarendipitee, upstream, zpriddy.
 
+### Publishing: origin is unwritable, ajb is the write target
+
+`origin` and `upstream` both point at `github.com/gastownhall/gascity`, which
+this account cannot write. Reads succeed — `git fetch origin` and
+`git ls-remote origin` both work — so origin looks healthy right up to the push:
+`remote: Permission to gastownhall/gascity.git denied to AJBcoding.` … `403`.
+
+The writable remote is **`ajb`** (`github.com/AJBcoding/gascity`). Name it
+explicitly: `remote.pushDefault` is unset, so a bare `git push` targets origin.
+`herdr-src` is a local path remote, not an off-machine publication target.
+
+That read/write asymmetry is the trap. **Never use "is it on origin?" as the
+oracle for whether work is published** — `ls-remote origin`, or `git status`
+reporting "up to date with origin", interrogates a remote nobody can publish
+to. That inference produced a false at-risk-of-loss escalation (gas-24sz; see
+gas-6wq for the `herdr-src` variant of the same mistake).
+
+**gas-fztq** fixed this at the formula level, so do not push at a remote name
+you picked. `mol-polecat-work`'s `submit-and-exit` resolves the branch's own
+remote — off-machine ones only, so `herdr-src` is never elected — publishes
+there, and records it as `metadata.publish_remote`, which is where the refinery
+then fetches the branch from. Resolution is fail-closed: two equally plausible
+remotes name no home, so the step refuses rather than guess. Break a tie once,
+by hand, with `gc bd update <id> --set-metadata publish_remote=<remote>`.
+
 ### Upstream alignment rules
 
 - Keep `upstream/main` easy to merge. Prefer new files, small adapters,
@@ -568,8 +593,10 @@ bd close <id>         # Complete work
 4. **PUSH TO REMOTE** - This is MANDATORY:
    ```bash
    git pull --rebase
-   git push
-   git status  # MUST show "up to date with origin"
+   git push ajb HEAD   # NOT origin: it is unwritable — see "Publishing" above
+   # Verify against the remote you actually pushed to, never against origin:
+   git ls-remote ajb "refs/heads/$(git branch --show-current)" | awk '{print $1}'
+   git rev-parse HEAD   # the two MUST match
    ```
    NOTE: gascity Dolt is LOCAL-ONLY (no remote). Do NOT run `bd dolt push`,
    `bd dolt pull`, or `bd dolt remote add` here -- they fail and re-introduce
