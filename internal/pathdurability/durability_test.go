@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -237,6 +238,17 @@ func TestClassifyFailsOpen(t *testing.T) {
 // TestClassifyOnRealFilesystem exercises the real syscall probes rather than the
 // fake mount table, so a bug in the platform file cannot hide behind the double.
 func TestClassifyOnRealFilesystem(t *testing.T) {
+	// The real probes are Linux-only: probe_other.go (//go:build !linux) returns
+	// errUnsupported for both deviceID and filesystemType, and Classify turns
+	// that into Unknown by design — "so non-Linux builds never refuse a path".
+	// Unknown is therefore the CORRECT answer off Linux, not a defect, so the
+	// CityDevice assertion below only means anything where the syscalls exist.
+	// The tmpfs subtest already assumes Linux explicitly (/dev/shm); this makes
+	// the whole test honest about it instead of failing the suite on Darwin.
+	if runtime.GOOS != "linux" {
+		t.Skipf("real durability probes are Linux-only; Classify correctly reports Unknown on %s", runtime.GOOS)
+	}
+
 	cityRoot := t.TempDir()
 
 	t.Run("same device as the city root", func(t *testing.T) {

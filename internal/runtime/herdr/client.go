@@ -639,8 +639,7 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 // confirmed empirically (`XDG_CONFIG_HOME=X herdr --help` prints
 // "Config: X/herdr/config.toml" regardless of $HOME; with XDG_CONFIG_HOME
 // unset it falls back to "$HOME/.config/herdr/…") to be standard XDG Base
-// Directory precedence, i.e. exactly os.UserConfigDir() on this platform. A
-// plain os.UserHomeDir()+".config" join (the prior implementation) silently
+// Directory precedence. A plain os.UserHomeDir()+".config" join silently
 // ignores XDG_CONFIG_HOME, so it diverges from herdr's own resolution in any
 // environment that sets XDG_CONFIG_HOME while pointing $HOME elsewhere —
 // this fleet's agent sandboxes do exactly that. The result: this client
@@ -649,11 +648,40 @@ func (c *client) ensurePlacement(ctx context.Context, wsLabel, tabLabel, cwd str
 // retry launches a redundant herdr server contending for the same pane
 // ("agent_pane_busy") — ga-nqlb8q.
 func (c *client) socketPath() string {
-	configDir, _ := os.UserConfigDir()
+	configDir := herdrConfigDir()
 	if c.session == "" || c.session == "default" {
 		return filepath.Join(configDir, "herdr", "herdr.sock")
 	}
 	return filepath.Join(configDir, "herdr", "sessions", c.session, "herdr.sock")
+}
+
+// herdrConfigDir resolves XDG config precedence the way herdr itself does, and
+// the way gc already does when it builds an agent's environment
+// (internal/processenv.Provider uses this exact fallback pair): the value of
+// $XDG_CONFIG_HOME when set, otherwise $HOME/.config.
+//
+// Deliberately NOT os.UserConfigDir(). That call implements XDG precedence only
+// on Linux; on Darwin it returns $HOME/Library/Application Support and ignores
+// XDG_CONFIG_HOME entirely, which reintroduces the exact ga-nqlb8q failure the
+// comment above describes — on the platform this fleet runs on. Measured
+// 2026-08-21 on the live host: the running herdr server binds
+// ~/.config/herdr/sessions/anthony/herdr.sock, while os.UserConfigDir()
+// resolved to an empty ~/Library/Application Support/herdr that the test run
+// had just created. gc would have dialed the latter and concluded every
+// healthy agent's runtime was missing.
+//
+// Keeping this in one place matters: panebinding_provider_test.go's
+// listenHerdrSocket must resolve through socketPath() rather than
+// reconstructing the path, because a second copy drifts (ga-nqlb8q: it did).
+func herdrConfigDir() string {
+	if v := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); v != "" {
+		return v
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config")
 }
 
 // serverAlive reports whether the session-server is actually accepting
