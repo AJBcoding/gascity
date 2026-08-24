@@ -71,7 +71,8 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			strings.HasPrefix(entry, "PUSH_GATE_MAX_WAIT_SECONDS=") ||
 			strings.HasPrefix(entry, "PUSH_GATE_POLL_SECONDS=") ||
 			strings.HasPrefix(entry, "PUSH_GATE_UNRELATED_SENTINEL=") ||
-			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG=") {
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG=") ||
+			strings.HasPrefix(entry, "GC_TEST_LOCAL_LOADAVG_FILE=") {
 			continue
 		}
 		baseEnv = append(baseEnv, entry)
@@ -85,6 +86,11 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 		cgroup    string
 		limit     string
 		current   string
+		// sysctlLoadavg, when set, hides procfs and answers the load probe from a
+		// fake sysctl instead — the Darwin path, where /proc/loadavg does not
+		// exist. Empty means "unparsable", i.e. no load source at all.
+		sysctlLoadavg string
+		darwinProbe   bool
 	}{
 		{name: "large host uses automatic ceiling", cpus: "192", memoryKiB: "536870912", wantJobs: "16"},
 		{name: "memory constrains fanout", cpus: "16", memoryKiB: "12582912", wantJobs: "3"},
@@ -96,6 +102,28 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 		{name: "hybrid cgroup falls through to v1 memory controller", cpus: "16", wantJobs: "3", cgroup: "hybrid", limit: "12884901888", current: "0"},
 		{name: "exhausted cgroup forces one job", cpus: "16", wantJobs: "1", cgroup: "v2", limit: "4294967296", current: "4294967296"},
 		{name: "explicit override wins", cpus: "192", memoryKiB: "536870912", makeArgs: []string{"LOCAL_TEST_JOBS=7"}, wantJobs: "7"},
+
+		// The load-aware reduction must survive on a host without procfs.
+		// detect_cpus already falls through nproc -> getconf -> sysctl; the load
+		// probe shipped reading /proc/loadavg only, so on macOS — the only OS this
+		// city runs on — the reduction silently never ran and the gate fanned out
+		// at full width onto an already-saturated host (gas-ppv).
+		{
+			name: "darwin saturated host sheds fanout", cpus: "16", memoryKiB: "268435456", wantJobs: "2",
+			darwinProbe: true, sysctlLoadavg: "{ 34.00 30.00 28.00 }",
+		},
+		{
+			name: "darwin partly busy host sheds proportionally", cpus: "16", memoryKiB: "268435456", wantJobs: "4",
+			darwinProbe: true, sysctlLoadavg: "{ 12.00 11.00 10.00 }",
+		},
+		{
+			name: "darwin idle host keeps the full ceiling", cpus: "16", memoryKiB: "268435456", wantJobs: "16",
+			darwinProbe: true, sysctlLoadavg: "{ 0.20 0.30 0.40 }",
+		},
+		{
+			name: "no readable load source leaves the budget unreduced", cpus: "16", memoryKiB: "268435456", wantJobs: "16",
+			darwinProbe: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -104,12 +132,17 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			args = append(args, "test-fast-parallel")
 			cmd := exec.Command("make", args...)
 			cmd.Dir = repoRoot
-			// This table exercises the cpu/memory/cgroup axes only; pin loadavg=0
-			// so a live host's real /proc/loadavg can't shrink the expected job
-			// count out from under an unrelated case (ga-04m84s).
+			// The cpu/memory/cgroup cases pin loadavg=0 so a live host's real
+			// /proc/loadavg can't shrink the expected job count out from under an
+			// unrelated case (ga-04m84s). The darwinProbe cases deliberately do the
+			// opposite: they leave the value unset and drive the probe itself.
+			loadavg := "GC_TEST_LOCAL_LOADAVG=0"
+			if tt.darwinProbe {
+				loadavg = "GC_TEST_LOCAL_LOADAVG="
+			}
 			cmd.Env = append(append([]string(nil), baseEnv...),
 				"GC_TEST_LOCAL_CPUS="+tt.cpus,
-				"GC_TEST_LOCAL_LOADAVG=0",
+				loadavg,
 				"GC_PUSH_GATE_NO_CAP=1",
 				"PUSH_GATE_MAX_CONCURRENT=7",
 				"PUSH_GATE_MAX_WAIT_SECONDS=13",
@@ -121,6 +154,9 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 			}
 			if tt.cgroup != "" {
 				cmd.Env = append(cmd.Env, localTestCgroupEnv(t, tt.cgroup, tt.limit, tt.current)...)
+			}
+			if tt.darwinProbe {
+				cmd.Env = append(cmd.Env, localTestDarwinLoadEnv(t, tt.sysctlLoadavg)...)
 			}
 			out, err := cmd.CombinedOutput()
 			if err != nil {
@@ -152,6 +188,30 @@ func TestTestFastParallelUsesSanitizedEnvironmentAndMachineAwareConcurrency(t *t
 				t.Fatalf("test-fast-parallel must keep unrelated ambient variables out of TEST_ENV:\n%s", command)
 			}
 		})
+	}
+}
+
+// localTestDarwinLoadEnv models a host with no procfs, where the load probe has
+// to reach sysctl. Pointing the procfs read at a path that does not exist makes
+// the case deterministic on Linux CI too, where a real /proc/loadavg would
+// otherwise answer first and hide the regression. A loadavg of "" leaves sysctl
+// unable to answer, standing in for a host with no load source at all.
+func localTestDarwinLoadEnv(t *testing.T, loadavg string) []string {
+	t.Helper()
+	bin := t.TempDir()
+	body := "#!/usr/bin/env bash\n"
+	if loadavg != "" {
+		body += "if [[ \"$*\" == *vm.loadavg* ]]; then printf '%s\\n' " + shellSingleQuote(loadavg) + "; exit 0; fi\n"
+	} else {
+		body += "if [[ \"$*\" == *vm.loadavg* ]]; then exit 1; fi\n"
+	}
+	// Anything else the probe's neighbors ask for must still get a real answer.
+	body += "exec /usr/sbin/sysctl \"$@\"\n"
+	writeExecutable(t, filepath.Join(bin, "sysctl"), body)
+
+	return []string{
+		"GC_TEST_LOCAL_LOADAVG_FILE=" + filepath.Join(t.TempDir(), "absent-procfs"),
+		"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"),
 	}
 }
 
