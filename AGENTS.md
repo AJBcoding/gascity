@@ -38,18 +38,23 @@ When working here, assume three codebases matter:
 ### Which branch to base on (read this before branching)
 
 This machine runs ONE repository with many worktrees — the operative object
-is the branch, not the directory. The deployed `gc` is built from the
-**deploy lineage**: `integration/deploy-*` (currently
-`integration/deploy-20260804`), which extends `feat/mysql-first-class-backend`
-and carries ~15 mysql-first-class commits plus deployed fixes that are NOT
-on upstream main. A fix has TWO legitimate bases depending on target
-(az-fuag, az-szn2):
+is the branch, not the directory. The deployed `gc` is built and installed
+from the **deploy lineage**, which is `staging/gascity-lane` — the gascity
+rig's `default_branch`, published to `ajb`. It carries the mysql-first-class
+commits plus deployed fixes that are NOT on upstream main. The older
+`integration/deploy-*` branches are retired and are no longer the lineage:
+measured 2026-08-22, `integration/deploy-20260804` (eb675829e) is **not** an
+ancestor of the lane, holds 3 commits the lane never took, and trails it by
+197 (those three strandings are tracked in az-rks8). Local `main`
+(c41b280266) is dated 2026-05-31. A fix has TWO legitimate bases depending on
+target (az-fuag, az-szn2):
 
-- **Deployable to this city** → base on the current `integration/deploy-*`
-  tip. Basing on `main`/`origin/main` produces correct-looking but
-  undeployable fixes — the tree you would read has no mysql backend while
-  the binary you are debugging has one. This has happened; it cost a
-  same-day retraction (az-szn2).
+- **Deployable to this city** → base on a freshly-fetched
+  `ajb/staging/gascity-lane` tip. Basing on `main`/`origin/main` — or on a
+  retired `integration/deploy-*` — produces correct-looking but undeployable
+  fixes: the tree you would read has no mysql backend while the binary you are
+  debugging has one. This has happened; it cost a same-day retraction
+  (az-szn2).
 - **Contributable upstream** → base on `origin/main` (the gas-13l pattern:
   port the commit, do not merge the fork branch).
 
@@ -60,6 +65,27 @@ tree you happen to be reading; and never judge publication with a blanket
 `--remotes` — the repo has carried a self-referential path remote
 (`herdr-src`) whose fetched refs satisfy it (gas-6wq, gas-6tc). Off-machine
 remotes: ajb, mckean, origin, sarendipitee, upstream, zpriddy.
+
+**The landed oracle: fetch the lane, then test against the lane.** Never put
+`HEAD` or local `main` on the right-hand side of `git merge-base --is-ancestor`.
+`HEAD` is usually the feature branch you are standing on, so the test asks
+whether a commit is an ancestor of its own branch and answers TRUE for anything
+you just wrote; local `main` answers about a tree from May. Name the lane, and
+fetch it first — a stale remote-tracking ref reports landed work as missing:
+
+```bash
+git -C ~/code/gascity fetch ajb staging/gascity-lane
+git -C ~/code/gascity merge-base --is-ancestor <sha> ajb/staging/gascity-lane
+```
+
+Then read that answer for what it is: **reachability, not landing.** The lane
+takes patches by cherry-pick, so landed work arrives under a NEW sha and the
+original stays unreachable forever. `git cherry ajb/staging/gascity-lane
+<branch>` is the landing test — `-` means the patch is already on the lane, `+`
+means it is genuinely absent. Measured 2026-08-22: c2605b303 is not an ancestor
+of the lane, yet `git cherry` prints `- c2605b303`, because its patch-identical
+twin landed at 1d0155ec1. Judged by `--is-ancestor` alone that work looks lost,
+and the reflex is to redo it.
 
 ### Publishing: origin is unwritable, ajb is the write target
 
