@@ -69,8 +69,8 @@ const (
 	executionClaimNudgeCountKey    = "execution_claim_nudge_count"
 	executionClaimNudgeAtKey       = "execution_claim_nudge_at"
 	// executionClaimNudgeStalledKey latches the one-shot escalation so the
-	// typed event and the drain request fire once per stalled claim rather than
-	// once per tick for as long as the claim is held.
+	// typed event fires once per stalled claim rather than once per tick for as
+	// long as the claim is held.
 	executionClaimNudgeStalledKey = "execution_claim_nudge_stalled"
 )
 
@@ -79,9 +79,11 @@ const (
 // the bounded attempts are spent.
 //
 // work/workStores/workStoreRefs are the reconciler's index-aligned assigned-work
-// snapshot; requestDrain is the existing drain request (drainOps.setDrain), taken
-// as a function so this file needs no reconciler wiring of its own. A partial
-// snapshot is not evidence of a stall, so it disables the predicate for that tick.
+// snapshot; requestDrain is the existing drain request (drainOps.setDrain),
+// taken as a function so this file needs no reconciler wiring of its own. It
+// reports true only when a new tracked drain was accepted; false means a drain
+// was already active and the request was an idempotent no-op. A partial snapshot
+// is not evidence of a stall, so it disables the predicate for that tick.
 func nudgeStalledPoolExecution(
 	sp runtime.Provider,
 	cfg *config.City,
@@ -93,7 +95,7 @@ func nudgeStalledPoolExecution(
 	snapshotPartial bool,
 	now time.Time,
 	rec events.Recorder,
-	requestDrain func(sessionBead beads.Bead) error,
+	requestDrain func(sessionBead beads.Bead) (bool, error),
 	stdout io.Writer,
 ) {
 	if sp == nil || cfg == nil || store == nil || snapshotPartial {
@@ -188,7 +190,7 @@ type poolExecutionBackstop struct {
 	sp           runtime.Provider
 	now          time.Time
 	rec          events.Recorder
-	requestDrain func(sessionBead beads.Bead) error
+	requestDrain func(sessionBead beads.Bead) (bool, error)
 	claims       executionClaimSnapshot
 }
 
@@ -280,31 +282,28 @@ func (p poolExecutionBackstop) reserve(store beads.Store, s *beads.Bead, target 
 	return writeExecutionClaimMarker(store, s, target, attempts, now, stdout)
 }
 
-// exhausted turns a spent attempt budget into one observable fact and one drain
-// request, latched so both happen exactly once for this claim however many ticks
-// the session survives.
+// exhausted turns a spent attempt budget into one observable fact and an
+// idempotent tracked drain request. The event is latched before emission so it
+// remains one-shot; the drain is intentionally not latched in metadata because
+// the drain tracker is in-memory and must be re-requested after a controller
+// restart.
 func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io.Writer) {
-	if strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]) != "" {
-		return
-	}
 	beadID := strings.TrimSpace(s.Metadata[executionClaimNudgeWorkKey])
 	if beadID == "" {
 		return
 	}
 	sessName := strings.TrimSpace(s.Metadata["session_name"])
-	// Latch FIRST. A failed event write or a failed drain must not leave the
-	// escalation armed to repeat on every subsequent tick; the marker itself is
-	// the durable record that this claim was escalated, and the operator sees the
-	// failure on stdout.
-	if !writeSessionMetadata(store, s, map[string]string{
-		executionClaimNudgeStalledKey: p.now.UTC().Format(time.RFC3339),
-	}, "execution-claim-nudge", stdout) {
-		return
+	if strings.TrimSpace(s.Metadata[executionClaimNudgeStalledKey]) == "" {
+		// Latch the event FIRST. A failed event write must not leave the
+		// escalation armed to repeat on every subsequent tick; the marker itself
+		// is the durable record that this claim was escalated.
+		if !writeSessionMetadata(store, s, map[string]string{
+			executionClaimNudgeStalledKey: p.now.UTC().Format(time.RFC3339),
+		}, stdout) {
+			return
+		}
+		p.emitStepStalled(s, beadID, atoiOr0(s.Metadata[executionClaimNudgeCountKey]))
 	}
-	p.emitStepStalled(s, beadID, atoiOr0(s.Metadata[executionClaimNudgeCountKey]))
-	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
-		"execution-claim-nudge: %s still holds %s unexecuted after %d attempts; draining (%s)\n",
-		sessName, beadID, idleClaimNudgeMaxAttempts, executionStalledDrainReason)
 	if p.requestDrain == nil || sessName == "" {
 		return
 	}
@@ -313,8 +312,15 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdou
 	// touches it, and it holds in_progress work, so the wake machinery keeps it
 	// alive by design. The tracked drain is what turns "we gave up nudging" into
 	// stop -> close -> dead-assignee reopen -> the row is claimable again.
-	if err := p.requestDrain(*s); err != nil {
+	accepted, err := p.requestDrain(*s)
+	if err != nil {
 		fmt.Fprintf(stdout, "execution-claim-nudge: draining %s failed: %v\n", sessName, err) //nolint:errcheck // best-effort
+		return
+	}
+	if accepted {
+		fmt.Fprintf(stdout, //nolint:errcheck // best-effort
+			"execution-claim-nudge: %s still holds %s unexecuted after %d attempts; draining (%s)\n",
+			sessName, beadID, idleClaimNudgeMaxAttempts, executionStalledDrainReason)
 	}
 }
 
@@ -353,7 +359,7 @@ func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstop
 		executionClaimNudgeStoreRefKey: target.StoreRef,
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
-	}, "execution-claim-nudge", stdout)
+	}, stdout)
 }
 
 // clearExecutionClaimMarker wipes the state machine — including the escalation
@@ -382,7 +388,7 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 	for _, key := range keys {
 		kvs[key] = ""
 	}
-	if !writeSessionMetadata(store, s, kvs, "execution-claim-nudge", stdout) {
+	if !writeSessionMetadata(store, s, kvs, stdout) {
 		return
 	}
 	for _, key := range keys {
@@ -392,9 +398,9 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 
 // writeSessionMetadata persists a marker patch and mirrors it into the in-memory
 // session bead so the rest of this tick reads the just-written values.
-func writeSessionMetadata(store beads.Store, s *beads.Bead, kvs map[string]string, label string, stdout io.Writer) bool {
+func writeSessionMetadata(store beads.Store, s *beads.Bead, kvs map[string]string, stdout io.Writer) bool {
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
-		fmt.Fprintf(stdout, "%s: marking %s failed: %v\n", label, s.ID, err) //nolint:errcheck // best-effort
+		fmt.Fprintf(stdout, "execution-claim-nudge: marking %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
 		return false
 	}
 	if s.Metadata == nil {
@@ -423,14 +429,13 @@ func writeSessionMetadata(store beads.Store, s *beads.Bead, kvs map[string]strin
 // It re-reads the session through the front door rather than trusting the
 // backstop's snapshot: the drain carries the session's generation, and acting on
 // a stale generation is how a drain lands on the wrong incarnation.
-func (cr *CityRuntime) requestExecutionStalledDrain(sessionBead beads.Bead) error {
+func (cr *CityRuntime) requestExecutionStalledDrain(sessionBead beads.Bead) (bool, error) {
 	if cr == nil || cr.sessionDrains == nil {
-		return fmt.Errorf("no drain tracker configured for %q", sessionBead.ID)
+		return false, fmt.Errorf("no drain tracker configured for %q", sessionBead.ID)
 	}
 	info, err := sessionFrontDoor(cr.sessionsBeadStore()).Get(sessionBead.ID)
 	if err != nil {
-		return fmt.Errorf("reading session %q before draining: %w", sessionBead.ID, err)
+		return false, fmt.Errorf("reading session %q before draining: %w", sessionBead.ID, err)
 	}
-	beginSessionDrainInfo(info, cr.sp, cr.sessionDrains, executionStalledDrainReason, clock.Real{}, defaultDrainTimeout)
-	return nil
+	return beginSessionDrainInfo(info, cr.sp, cr.sessionDrains, executionStalledDrainReason, clock.Real{}, defaultDrainTimeout), nil
 }
