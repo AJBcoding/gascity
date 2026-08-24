@@ -1,0 +1,46 @@
+{
+  "seq": 0,
+  "beads": [
+    {
+      "id": "gas-ot20-subject",
+      "title": "closed with reason by the new binary",
+      "status": "closed",
+      "issue_type": "task",
+      "created_at": "2026-08-19T14:21:35.419996-07:00",
+      "updated_at": "2026-08-19T14:21:35.555038-07:00",
+      "metadata": {
+        "close_reason": "refinery said \"ok\\yes\": 100%% — verdict ✅ n=1",
+        "gc.work_outcome": "no-op",
+        "pre_existing_key": "must survive too"
+      }
+    },
+    {
+      "id": "gas-ot20-bystander",
+      "title": "untouched bystander",
+      "status": "open",
+      "issue_type": "task",
+      "created_at": "2026-08-19T14:21:35.420474-07:00",
+      "updated_at": "2026-08-19T14:21:35.420474-07:00",
+      "metadata": {
+        "bystander_key": "bystander value"
+      }
+    },
+    {
+      "id": "gas-ot20-oldwrite",
+      "title": "old binary mutates this one",
+      "status": "open",
+      "issue_type": "task",
+      "created_at": "2026-08-19T14:21:35.420728-07:00",
+      "updated_at": "2026-08-19T14:21:35.420728-07:00",
+      "metadata": {
+        "untouched": "before"
+      }
+    }
+  ],
+  "revisions": {
+    "gas-ot20-bystander": 1,
+    "gas-ot20-oldwrite": 1,
+    "gas-ot20-subject": 2
+  },
+  "revisions_sealed": true
+}
