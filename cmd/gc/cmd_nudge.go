@@ -89,6 +89,13 @@ const (
 
 var errNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
 
+// errNudgeStrandedInComposer is the cause recorded when the transport accepted
+// a queued nudge but the delivery probe still finds it waiting in the target's
+// input box. It is an ordinary delivery failure, so it takes the normal
+// retry-then-dead-letter path: a later pass may land once the composer clears,
+// and an item that never lands ends up visible as dead rather than acked.
+var errNudgeStrandedInComposer = errors.New("queued nudge was accepted by the transport but never submitted: it is still sitting in the target's input box")
+
 var (
 	// Test seams for cmd_nudge_test.go. Tests that replace these package
 	// variables must stay serial; do not use t.Parallel in those tests.
@@ -1548,6 +1555,25 @@ func tryDeliverQueuedNudgesByPoller(target nudgeTarget, store, sessStore beads.S
 		// pass retries promptly instead of waiting out the in-flight lease.
 		relErr := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items))
 		return false, errors.Join(bookkeepErr, relErr)
+	}
+	// handle.Nudge returning Delivered is the TRANSPORT's acceptance, not the
+	// agent's receipt — the same distinction the direct leg draws before it
+	// prints "Nudged" (gas-jfy6, gas-q4jk). Acking here on acceptance alone is
+	// what let a payload the TUI stranded in the composer be marked "injected"
+	// and vanish from the queue, leaving `gc nudge status` reading 0/0/0 while
+	// nothing had been submitted (gas-r21h).
+	//
+	// Only a probe that RAN and found the payload still pending is evidence of
+	// a stranding. A transport with no probe yields Probed=false and keeps the
+	// pre-existing ack behavior, so unprobed transports are not regressed into
+	// permanent retry.
+	if confirmation := confirmNudgeDelivery(sp, target, msg); confirmation.Probed && !confirmation.Confirmed {
+		cause := fmt.Errorf("%w (%s)", errNudgeStrandedInComposer, confirmation.Observed)
+		telemetry.RecordNudge(context.Background(), target.agentKey(), cause)
+		if recErr := recordQueuedNudgeFailureWithStore(target.cityPath, beads.NudgesStore{Store: deliveryStore}, queuedNudgeIDs(items), cause, time.Now()); recErr != nil {
+			return false, errors.Join(bookkeepErr, recErr)
+		}
+		return false, bookkeepErr
 	}
 	telemetry.RecordNudge(context.Background(), target.agentKey(), nil)
 	stampLastNudgeDeliveredAt(deliverySessFront, target.sessionID, time.Now())

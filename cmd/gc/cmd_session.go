@@ -2638,8 +2638,16 @@ func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Send a text message to a running session",
 		Long: `Send text input to a running session via the runtime provider.
 
-The message is delivered as text content to the session's input. This is
-equivalent to typing the message into the session's terminal.
+The message is delivered as text content to the session's input — the
+equivalent of typing it into the session's terminal. Typing is not
+submitting: some TUIs hold pasted input in the composer until something
+presses Enter, so nudge verifies afterwards that the text actually left the
+input box and reports NOT DELIVERED (exit 1) when it did not.
+
+To hand a running agent an instruction it will definitely act on, prefer
+"gc session submit", which delivers AND submits, and takes an --intent
+(default, follow_up, interrupt_now) so the runtime can decide whether to
+wake, inject immediately, or queue.
 
 Accepts a session ID or session alias. Multi-word messages are
 joined automatically.`,

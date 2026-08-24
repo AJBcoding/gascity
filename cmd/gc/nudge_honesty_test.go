@@ -2,13 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -118,5 +122,68 @@ func TestManagedNudgeWakeReportsASkippedWake(t *testing.T) {
 	}
 	if !strings.Contains(warnings.String(), "no session store") {
 		t.Fatalf("warnings = %q, want the missing precondition named", warnings.String())
+	}
+}
+
+// TestTryDeliverQueuedNudgesByPollerDoesNotAckAStrandedPayload: the queued leg
+// must commit on submission, not on the provider's nudge return.
+//
+// The direct leg (runSessionNudge) already probes the composer before it says
+// "Nudged" (gas-jfy6, gas-q4jk). The queued leg did not: it acked on
+// result.Delivered — acceptance — so a payload the TUI stranded in the input box
+// was marked "injected", left Pending/InFlight, and `gc nudge status` read
+// 0 pending / 0 in_flight / 0 dead. That is the exact evidence pattern from the
+// original incident: three crew nudged, every indicator clean, no lane started
+// for four hours (gas-r21h, from kit-fxm8).
+//
+// A stranded payload must stay visible in the queue. Acking it is the lie.
+func TestTryDeliverQueuedNudgesByPollerDoesNotAckAStrandedPayload(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "review the deploy logs", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{WorkDir: dir}, ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := mgr.Start(context.Background(), info.ID, "", runtime.Config{WorkDir: dir}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{info.SessionName: idleSince}
+
+	// The TUI accepted the keys and left them in the composer — the collapsed
+	// paste placeholder an operator sees via `gc session peek`.
+	fake.SetPeekOutput(info.SessionName, "assistant: standing by\n> [Pasted text #13 +7 lines]")
+
+	target := nudgeTarget{
+		cityPath:    dir,
+		agent:       config.Agent{Name: "worker"},
+		sessionID:   info.ID,
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: info.SessionName,
+	}
+	obs := worker.LiveObservation{Running: true, LastActivity: &idleSince}
+
+	delivered, err := tryDeliverQueuedNudgesByPoller(target, store, store, fake, 3*time.Second, obs)
+	if err != nil {
+		t.Fatalf("tryDeliverQueuedNudgesByPoller: %v", err)
+	}
+	if delivered {
+		t.Fatal("delivered = true for a payload still sitting in the composer; the queued leg reported a delivery it did not make")
+	}
+
+	pending, inFlight, dead, err := listQueuedNudges(dir, "worker", time.Now())
+	if err != nil {
+		t.Fatalf("listQueuedNudges: %v", err)
+	}
+	if len(pending)+len(inFlight)+len(dead) == 0 {
+		t.Fatal("queue reads 0 pending / 0 in_flight / 0 dead after a stranded delivery: `gc nudge status` shows clean while the message was never submitted")
 	}
 }
