@@ -2,9 +2,11 @@ package sling
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -18,9 +20,8 @@ func routeStampSetup(t *testing.T) (SlingOpts, SlingDeps, beads.Bead) {
 	runner := newFakeRunner()
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "test"},
-		Rigs:      []config.Rig{{Name: "myrig", Path: "/myrig", Prefix: "gc"}},
 	}
-	a := config.Agent{Name: "polecat", Dir: "myrig", MaxActiveSessions: intPtr(2)}
+	a := config.Agent{Name: "polecat", MaxActiveSessions: intPtr(2)}
 	deps := testDeps(cfg, runtime.NewFake(), runner.run)
 	bead, err := deps.Store.Create(beads.Bead{Title: "landed work", Type: "task"})
 	if err != nil {
@@ -168,7 +169,7 @@ func TestDoSling_StampFailureAbortsRoute(t *testing.T) {
 func TestDoSling_StampsBranchOnAlreadyRoutedBead(t *testing.T) {
 	opts, deps, bead := routeStampSetup(t)
 	// Simulate the earlier, stampless sling: routed to this pool, unclaimed.
-	if err := deps.Store.SetMetadata(bead.ID, "gc.routed_to", "myrig/polecat"); err != nil {
+	if err := deps.Store.SetMetadata(bead.ID, "gc.routed_to", "polecat"); err != nil {
 		t.Fatalf("SetMetadata(gc.routed_to): %v", err)
 	}
 	opts.Branch = "polecat/gc-108"
@@ -190,6 +191,119 @@ func TestDoSling_StampsBranchOnAlreadyRoutedBead(t *testing.T) {
 	}
 	if got.Metadata["branch"] != "polecat/gc-108" {
 		t.Errorf("metadata.branch = %q, want polecat/gc-108 (stamp must land even when routing is idempotent)", got.Metadata["branch"])
+	}
+}
+
+func TestDoSling_BranchTargetInFlightRefusalLeavesMetadataUnchanged(t *testing.T) {
+	opts, deps, bead := routeStampSetup(t)
+	opts.Branch = "polecat/gc-new"
+	opts.TargetBranch = "integration/new"
+	opts.NoConvoy = true
+	status := "in_progress"
+	assignee := "other-worker"
+	if err := deps.Store.Update(bead.ID, beads.UpdateOpts{
+		Status:   &status,
+		Assignee: &assignee,
+		Metadata: map[string]string{
+			beadBranchMetadataKey: "polecat/gc-old",
+			beadTargetMetadataKey: "integration/old",
+		},
+	}); err != nil {
+		t.Fatalf("seed in-flight bead: %v", err)
+	}
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	var conflict *InFlightConflictError
+	if !errors.As(err, &conflict) {
+		t.Fatalf("DoSling = %v, want *InFlightConflictError", err)
+	}
+	got, getErr := deps.Store.Get(bead.ID)
+	if getErr != nil {
+		t.Fatalf("store.Get(%s): %v", bead.ID, getErr)
+	}
+	if got.Metadata[beadBranchMetadataKey] != "polecat/gc-old" {
+		t.Errorf("metadata.branch = %q, want unchanged polecat/gc-old", got.Metadata[beadBranchMetadataKey])
+	}
+	if got.Metadata[beadTargetMetadataKey] != "integration/old" {
+		t.Errorf("metadata.target = %q, want unchanged integration/old", got.Metadata[beadTargetMetadataKey])
+	}
+	if got.Metadata[beadmeta.RoutedToMetadataKey] != "" {
+		t.Errorf("gc.routed_to = %q, want unset after refusal", got.Metadata[beadmeta.RoutedToMetadataKey])
+	}
+}
+
+func TestDoSling_BranchTargetScopeRefusalLeavesMetadataUnchanged(t *testing.T) {
+	opts, deps, bead := routeStampSetup(t)
+	opts.Branch = "polecat/gc-new"
+	opts.TargetBranch = "integration/new"
+	opts.NoFormula = true
+	opts.ScopeKind = "rig"
+	opts.ScopeRef = "myrig"
+	if err := deps.Store.Update(bead.ID, beads.UpdateOpts{Metadata: map[string]string{
+		beadBranchMetadataKey: "polecat/gc-old",
+		beadTargetMetadataKey: "integration/old",
+	}}); err != nil {
+		t.Fatalf("seed metadata: %v", err)
+	}
+
+	_, err := DoSling(opts, deps, deps.Store)
+
+	if err == nil || !strings.Contains(err.Error(), "--scope-kind/--scope-ref") {
+		t.Fatalf("DoSling = %v, want scope refusal", err)
+	}
+	got, getErr := deps.Store.Get(bead.ID)
+	if getErr != nil {
+		t.Fatalf("store.Get(%s): %v", bead.ID, getErr)
+	}
+	if got.Metadata[beadBranchMetadataKey] != "polecat/gc-old" {
+		t.Errorf("metadata.branch = %q, want unchanged polecat/gc-old", got.Metadata[beadBranchMetadataKey])
+	}
+	if got.Metadata[beadTargetMetadataKey] != "integration/old" {
+		t.Errorf("metadata.target = %q, want unchanged integration/old", got.Metadata[beadTargetMetadataKey])
+	}
+}
+
+func TestDoSling_BranchTargetCustomSlingQueryRefusesBeforeMutation(t *testing.T) {
+	runner := newFakeRunner()
+	cfg := &config.City{Workspace: config.Workspace{Name: "test"}}
+	a := config.Agent{Name: "worker", MaxActiveSessions: intPtr(1), SlingQuery: "custom-dispatch {}"}
+	deps := testDeps(cfg, runtime.NewFake(), runner.run)
+	bead, err := deps.Store.Create(beads.Bead{
+		Title: "custom route",
+		Type:  "task",
+		Metadata: map[string]string{
+			beadBranchMetadataKey: "polecat/gc-old",
+			beadTargetMetadataKey: "integration/old",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	_, err = DoSling(SlingOpts{
+		Target:        a,
+		BeadOrFormula: bead.ID,
+		NoFormula:     true,
+		Branch:        "polecat/gc-new",
+		TargetBranch:  "integration/new",
+	}, deps, deps.Store)
+
+	if err == nil || !strings.Contains(err.Error(), "custom sling_query") {
+		t.Fatalf("DoSling = %v, want custom sling_query refusal", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("runner calls = %d, want 0", len(runner.calls))
+	}
+	got, getErr := deps.Store.Get(bead.ID)
+	if getErr != nil {
+		t.Fatalf("store.Get(%s): %v", bead.ID, getErr)
+	}
+	if got.Metadata[beadBranchMetadataKey] != "polecat/gc-old" {
+		t.Errorf("metadata.branch = %q, want unchanged polecat/gc-old", got.Metadata[beadBranchMetadataKey])
+	}
+	if got.Metadata[beadTargetMetadataKey] != "integration/old" {
+		t.Errorf("metadata.target = %q, want unchanged integration/old", got.Metadata[beadTargetMetadataKey])
 	}
 }
 

@@ -2,12 +2,17 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	slingcore "github.com/gastownhall/gascity/internal/sling"
 )
 
 // TestSlingBranchTargetFlagsStampRoutedBead wires the whole CLI chain for
@@ -95,5 +100,150 @@ func TestSlingBranchFlagRejectedWithFormula(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "--branch/--target") {
 		t.Errorf("stderr = %q, want to mention --branch/--target", stderr.String())
+	}
+}
+
+type recordingRouteMutationStore struct {
+	beads.Store
+	updates     []beads.UpdateOpts
+	setMetadata []string
+	updateErr   error
+}
+
+func (s *recordingRouteMutationStore) Update(id string, opts beads.UpdateOpts) error {
+	s.updates = append(s.updates, cloneRouteUpdateOpts(opts))
+	if s.updateErr != nil {
+		return s.updateErr
+	}
+	return s.Store.Update(id, opts)
+}
+
+func (s *recordingRouteMutationStore) SetMetadata(id, key, value string) error {
+	s.setMetadata = append(s.setMetadata, key+"="+value)
+	return s.Store.SetMetadata(id, key, value)
+}
+
+func cloneRouteUpdateOpts(opts beads.UpdateOpts) beads.UpdateOpts {
+	cloned := opts
+	if opts.Metadata != nil {
+		cloned.Metadata = make(map[string]string, len(opts.Metadata))
+		for k, v := range opts.Metadata {
+			cloned.Metadata[k] = v
+		}
+	}
+	return cloned
+}
+
+func TestCliBeadRouterBuiltInRouteAppliesRouteContractAtomically(t *testing.T) {
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs:      []config.Rig{{Name: "alpha", Path: "/alpha"}},
+		Agents: []config.Agent{{
+			Name:              "refinery",
+			Dir:               "alpha",
+			MaxActiveSessions: intPtr(1),
+		}},
+		NamedSessions: []config.NamedSession{{
+			Template: "refinery",
+			Dir:      "alpha",
+			Mode:     "always",
+		}},
+	}
+	mem := beads.NewMemStore()
+	bead, err := mem.Create(beads.Bead{Title: "route atomically", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	store := &recordingRouteMutationStore{Store: mem}
+	deps := slingDeps{CityName: "test-city", CityPath: "/city", Cfg: cfg, Store: store}
+	router := cliBeadRouter{deps: &deps}
+
+	err = router.Route(context.Background(), slingcore.RouteRequest{
+		BeadID:   bead.ID,
+		Target:   "alpha/refinery",
+		Assignee: "alpha/refinery",
+		Metadata: map[string]string{
+			"branch": "polecat/FE-9",
+			"target": "release/1.2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if len(store.setMetadata) != 0 {
+		t.Fatalf("SetMetadata calls = %v, want none; routing contract must be one Update", store.setMetadata)
+	}
+	if len(store.updates) != 1 {
+		t.Fatalf("Update calls = %d, want 1", len(store.updates))
+	}
+	update := store.updates[0]
+	if update.Assignee == nil || *update.Assignee != "alpha/refinery" {
+		t.Fatalf("Update.Assignee = %v, want alpha/refinery", update.Assignee)
+	}
+	for key, want := range map[string]string{
+		beadmeta.RoutedToMetadataKey: "alpha/refinery",
+		"branch":                     "polecat/FE-9",
+		"target":                     "release/1.2",
+	} {
+		if got := update.Metadata[key]; got != want {
+			t.Fatalf("Update.Metadata[%q] = %q, want %q; full update=%#v", key, got, want, update.Metadata)
+		}
+	}
+	got, getErr := store.Get(bead.ID)
+	if getErr != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, getErr)
+	}
+	if got.Assignee != "alpha/refinery" {
+		t.Fatalf("Assignee = %q, want alpha/refinery", got.Assignee)
+	}
+	for key, want := range map[string]string{
+		beadmeta.RoutedToMetadataKey: "alpha/refinery",
+		"branch":                     "polecat/FE-9",
+		"target":                     "release/1.2",
+	} {
+		if got := got.Metadata[key]; got != want {
+			t.Fatalf("metadata[%q] = %q, want %q", key, got, want)
+		}
+	}
+}
+
+func TestCliBeadRouterBuiltInRouteUpdateFailureLeavesNoPartialState(t *testing.T) {
+	mem := beads.NewMemStore()
+	bead, err := mem.Create(beads.Bead{Title: "route atomically", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	updateErr := errors.New("update failed")
+	store := &recordingRouteMutationStore{Store: mem, updateErr: updateErr}
+	deps := slingDeps{CityName: "test-city", CityPath: "/city", Cfg: &config.City{Workspace: config.Workspace{Name: "test-city"}}, Store: store}
+	router := cliBeadRouter{deps: &deps}
+
+	err = router.Route(context.Background(), slingcore.RouteRequest{
+		BeadID:   bead.ID,
+		Target:   "refinery",
+		Assignee: "refinery",
+		Metadata: map[string]string{
+			"branch": "polecat/FE-9",
+			"target": "release/1.2",
+		},
+	})
+
+	if !errors.Is(err, updateErr) {
+		t.Fatalf("Route error = %v, want %v", err, updateErr)
+	}
+	if len(store.setMetadata) != 0 {
+		t.Fatalf("SetMetadata calls = %v, want none before failing Update", store.setMetadata)
+	}
+	got, getErr := store.Get(bead.ID)
+	if getErr != nil {
+		t.Fatalf("Get(%s): %v", bead.ID, getErr)
+	}
+	if got.Assignee != "" {
+		t.Fatalf("Assignee = %q, want unchanged empty", got.Assignee)
+	}
+	for _, key := range []string{beadmeta.RoutedToMetadataKey, "branch", "target"} {
+		if got.Metadata[key] != "" {
+			t.Fatalf("metadata[%q] = %q, want unset after failed atomic route", key, got.Metadata[key])
+		}
 	}
 }

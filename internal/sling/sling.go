@@ -119,7 +119,7 @@ type SourceWorkflowStore struct {
 type RouteRequest struct {
 	BeadID   string
 	Target   string            // qualified agent name
-	Metadata map[string]string // gc.routed_to, pool label, etc.
+	Metadata map[string]string // additional route metadata to persist atomically with gc.routed_to
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
