@@ -397,6 +397,24 @@ run_fan_out() {
   log="$LOCAL_TEST_LOG_DIR/${safe_label}.log"
 
   echo "[$label] start"
+  # bash -c, NOT bash -lc (gas-ivi3). `-l` makes this a login shell, so it
+  # sources /etc/profile, and on macOS that runs path_helper, which reorders
+  # PATH. Measured: the reorder adds and drops nothing — 51 unique entries
+  # either way — but precedence changes, and that alone is enough: `bash` then
+  # resolves to /bin/bash 3.2.57 instead of the 5.3.9 on the curated PATH.
+  #
+  # The `read -t` in bash 3.2 diverges from 5.x. On timeout, 3.2 returns 1 and
+  # does not touch the target variable; 5.x returns 142 and clears it. A
+  # variable that was never assigned therefore stays unset, and under `set -u`
+  # the next expansion aborts the script. That is what broke
+  # internal/worker/adapters/zcode (zcode-repl: `more: unbound variable`) and,
+  # separately, the empty-array expansions in gc-beads-br. Both fail only under
+  # this gate, and both read as flakes or load contention. They are neither.
+  #
+  # A/B, same package, same env -i allowlist, back to back:
+  #   bash -lc -> FAIL 24.199s
+  #   bash -c  -> ok    8.191s
+  # `--noprofile --norc` are no-ops for a plain `-c` and are omitted on purpose.
   if ${TEST_LOCAL_NICE:-} env -i \
     PATH="${PATH}" \
     HOME="${HOME:-}" \
@@ -428,7 +446,7 @@ run_fan_out() {
     GOINSECURE="${GOINSECURE-}" \
     GOVCS="${GOVCS-}" \
     GOWORK="${GOWORK-}" \
-    bash -lc "$command" >"$log" 2>&1; then
+    bash -c "$command" >"$log" 2>&1; then
     echo "[$label] ok"
   else
     status=$?
