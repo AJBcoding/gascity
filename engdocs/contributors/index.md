@@ -21,6 +21,10 @@ description: The shortest path for new contributors to get productive in Gas Cit
 - [Release Gate Criteria Conventions](release-gate-criteria-conventions.md)
   when signing off the "Tests pass" criterion on a `release-gates/*.md`
   deploy gate — it must cite the CI jobs `ci-required` actually gates on
+- [Check Exit Code Conventions](check-exit-code-conventions.md) when writing
+  or calling a `scripts/check-*.sh` — `0` ran-clean, `1` ran-finding, `2`
+  could-not-run, and a caller must escalate a `2` to the instrument's owner
+  rather than reporting it as a failure
 - [`CONTRIBUTING.md`](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 - [`TESTING.md`](https://github.com/gastownhall/gascity/blob/main/TESTING.md)
 
