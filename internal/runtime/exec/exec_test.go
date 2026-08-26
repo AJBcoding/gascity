@@ -1538,12 +1538,25 @@ func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
 	interruptFile := filepath.Join(dir, "interrupted")
+	// Readiness must prove the foreground CHILD exists, not merely that the
+	// shell reached the line before it. Writing the marker in the shell and
+	// then forking `sleep` leaves a window where the marker is visible but no
+	// child has been forked yet: an interrupt delivered to the process group in
+	// that window reaches only the shell, which records the trap as pending and
+	// then blocks in wait() for the sleep it forks a moment later — a sleep that
+	// never received the signal. The trap stays pending for the full 30s, so
+	// WaitDelay force-kills the shell before it can run, the marker is never
+	// written and the sleep is orphaned. That is a defect in the readiness
+	// signal, not in cancellation, and it made this test fail ~13% of runs.
+	//
+	// Writing the marker inside the subshell and exec-ing sleep over it makes
+	// the marker mean "a foreground child is in the process group", which is the
+	// precondition this test intends to establish.
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
     trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    ( : > "%s"; exec sleep 30 )
     ;;
   *) exit 2 ;;
 esac
