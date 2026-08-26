@@ -325,23 +325,30 @@ func provedRuntimeScoped(constructor SymbolRef, file, test, scope string, allowe
 }
 
 // runtimeWaiverExpiry dates every remaining runtime.Provider waiver owned by
-// runtimeContractWaiverOwner. The prior 2026-08-12 date lapsed and turned the
-// whole ledger check red, so this is a renewal, not a first grant.
+// runtimeContractWaiverOwner. The 2026-08-12 date lapsed, then the 2026-08-26
+// renewal of it lapsed too, each time turning the whole ledger check red for
+// every unrelated change in the repo. This is the third renewal.
 //
-// Each gap was re-checked against cmd/gc/runtime_registry.go at renewal: all
-// eight constructors are still live registrations, and none has gained a
-// runnable full contract, so none was retired as stale. The subprocess
-// default-directory composition is the one that could be contracted instead of
-// renewed, and it was.
+// The previous renewal asked that the next one say out loud whether this is
+// debt. It is. ga-80po0c.3's only open child, ga-80po0c.3.3, was last touched
+// 2026-07-18 and is still in_progress — 39 days without movement, against a
+// two-week horizon chosen specifically to put the question back in front of the
+// owner while the context was fresh. That did not happen, and a third short
+// horizon has no reason to work better than the second. The lapse is not
+// telling the owner anything; it is telling everyone else that main is red.
 //
-// Two weeks, deliberately, and not the 90-day maxWaiverHorizon the validator
-// permits. ga-80po0c.3's only open child has not moved since 2026-07-18, and
-// the same nine waivers already lapsed once and were extended — not
-// re-decided — to this date to unblock an unrelated PR. A long horizon would
-// hide a stalled track behind a green run; a short one puts the question back
-// in front of the owner while the context is still fresh. Renewing again
-// without contracts landing is debt, and the next renewal should say so.
-var runtimeWaiverExpiry = time.Date(2026, time.August, 26, 0, 0, 0, 0, time.UTC)
+// Each gap was re-checked against cmd/gc/runtime_registry.go at this renewal,
+// as at the last: all eight constructors are still live registrations, and none
+// has gained a runnable full contract, so none is retired as stale. Note that
+// exec and ssh register through RegisterPrefix("exec:"/"ssh:", ...) rather than
+// by bare name, so a name grep alone will not find them.
+//
+// Two weeks again, still well inside the 90-day maxWaiverHorizon. Renewing on
+// the same terms is the only change that does not either hide the stall behind
+// a long horizon or keep the repo red on the owner's behalf. The real fix is
+// either landing the contracts or retiring the claim that they are coming;
+// escalate to ga-80po0c.3 rather than renew a fourth time.
+var runtimeWaiverExpiry = time.Date(2026, time.September, 9, 0, 0, 0, 0, time.UTC)
 
 func waivedRuntime(constructor SymbolRef, reason string) ContractClaim {
 	return ContractClaim{
