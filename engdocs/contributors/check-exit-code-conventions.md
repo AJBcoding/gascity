@@ -171,6 +171,14 @@ exit=2
 Every path above is pinned by `scripts/test-check-census-owner-liveness.sh`
 (16 cases, hermetic — PATH is rebuilt per case from symlinked coreutils plus
 `gc`/`bd` stubs, which is what makes "the tool is missing" testable at all).
+Run it directly with `bash scripts/test-check-census-owner-liveness.sh`; it
+is deliberately not wrapped in a `go test` file, because a Go test that
+exec's it adds a new subprocess call site to `internal/testpolicy/
+resourcecensus`'s untagged and all-source baselines (verified: wrapping it
+grew both the `Small`/untagged and `all`/untagged subprocess counts by one
+call and one file). Reusing an existing exec helper doesn't avoid this — the
+resource census attributes the subprocess call site itself, not just its
+occurrence count, so a new call site through a shared helper still counts.
 
 **This conversion changed no patrol's report.** The script had no caller: no
 order file, no Makefile target, no cron entry — its own release gate
