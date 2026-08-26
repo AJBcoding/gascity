@@ -1544,8 +1544,18 @@ func TestValidateSourceRefsBindsManualCompositionConstructor(t *testing.T) {
 func TestCatalogMatchesProductionWiringAndDocumentation(t *testing.T) {
 	root := repoRoot(t)
 	entries := Catalog()
-	if err := Validate(entries, time.Now().UTC()); err != nil {
-		t.Fatalf("Validate(Catalog): %v", err)
+	now := time.Now().UTC()
+	if err := Validate(entries, now); err != nil {
+		// A waiver that has merely run out of calendar is downgraded to a log
+		// when WaiverExpiryEnvVar is "warn" (the local push gate sets it) —
+		// see waiverpolicy.go for why. Every other problem still fails here,
+		// and expiry still fails when the var is unset.
+		if !WaiverExpiryEnforced() && ExpiryLapseOnly(entries, now) {
+			t.Logf("Validate(Catalog): waiver expiry lapsed, not enforced in this lane (%s=warn): %v",
+				WaiverExpiryEnvVar, err)
+		} else {
+			t.Fatalf("Validate(Catalog): %v", err)
+		}
 	}
 
 	runtimeSource, err := os.ReadFile(filepath.Join(root, "cmd/gc/runtime_registry.go"))

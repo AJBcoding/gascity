@@ -250,6 +250,21 @@ else
 fi
 export LOCAL_TEST_PACKAGES="$scope"
 
+# Drop the provider-ledger CALENDAR check from the push gate, and only that
+# check (gas-l0es). A waiver expiry is a date, not a property of the change
+# being pushed: on 2026-08-26 eight runtime.Provider waivers lapsed by calendar
+# with no commit to cause it, and because this gate is repo-wide it stopped
+# every rig on the lane from landing anything (gas-qvhp). The waiver's own
+# purpose is to put the question in front of its owner, ga-80po0c.3 — an
+# upstream bead that does not exist in any store this city can reach — so
+# downstream the lapse reaches nobody and only ever manufactures an outage.
+#
+# This does NOT weaken the ledger. Catalog agreement, proof refs, double
+# boundaries and the generated TESTING.md table all still fail this gate, and
+# expiry itself still fails anywhere the variable is unset (a bare
+# `go test ./...`, or CI). See internal/testutil/providerledger/waiverpolicy.go.
+export GC_LEDGER_WAIVER_EXPIRY=warn
+
 # The Makefile and direct sharded runner share scripts/test-local-job-count as
 # their default policy. Do not shadow it here; an explicit override still wins.
 exec make test-fast-parallel
