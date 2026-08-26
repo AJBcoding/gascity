@@ -854,6 +854,104 @@ func TestPrepareStartCandidate_UsesAssignedWorkSnapshotForTaskWorkDir(t *testing
 	}
 }
 
+func TestPrepareStartCandidate_IgnoresForeignGitTaskWorkDirForRigSession(t *testing.T) {
+	base := beads.NewMemStore()
+	store := &taskWorkDirLiveListCountingStore{Store: base}
+	cityPath := t.TempDir()
+	rigRoot := filepath.Join(cityPath, "rigs", "frontend")
+	sessionWorkDir := filepath.Join(cityPath, ".gc", "worktrees", "frontend", "polecats", "worker-1")
+	foreignWorkDir := filepath.Join(sessionWorkDir, "worktrees", "task-from-city")
+	cityCommonDir := filepath.Join(cityPath, ".git")
+	mkdirGitDir(t, rigRoot)
+	mkdirLinkedGitWorktree(t, foreignWorkDir, cityCommonDir)
+	if err := os.MkdirAll(sessionWorkDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(sessionWorkDir): %v", err)
+	}
+	session, err := store.Create(beads.Bead{
+		Title:  "worker",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:frontend/worker-1"},
+		Metadata: map[string]string{
+			"template":     "worker",
+			"session_name": "custom-worker-1",
+			"pool_slot":    "1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := store.Create(beads.Bead{
+		Title: "task",
+		Metadata: map[string]string{
+			"work_dir": foreignWorkDir,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := "in_progress"
+	assignee := session.ID
+	if err := store.Update(task.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+	task, err = store.Get(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepared, err := prepareStartCandidateForCity(startCandidate{
+		info: sessiontest.SeedBead(t, session),
+		tp: TemplateParams{
+			TemplateName: "frontend/worker",
+			SessionName:  "custom-worker-1",
+			WorkDir:      sessionWorkDir,
+			RigName:      "frontend",
+			RigRoot:      rigRoot,
+		},
+		order: 0,
+	}, cityPath, "", &config.City{
+		Rigs: []config.Rig{
+			{Name: "frontend", Path: rigRoot},
+		},
+		Agents: []config.Agent{
+			{Name: "worker", Dir: "frontend", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(2)},
+		},
+	}, nil, store, &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}, nil, newAssignedTaskWorkDirResolver(cityPath, []beads.Bead{task}))
+	if err != nil {
+		t.Fatalf("prepareStartCandidateForCity: %v", err)
+	}
+	if prepared.cfg.WorkDir != sessionWorkDir {
+		t.Fatalf("prepared.cfg.WorkDir = %q, want rig session workdir %q", prepared.cfg.WorkDir, sessionWorkDir)
+	}
+	if store.liveInProgressAssigneeLists != 0 {
+		t.Fatalf("live in-progress assignee List calls = %d, want 0 with snapshot resolver", store.liveInProgressAssigneeLists)
+	}
+}
+
+func mkdirGitDir(t *testing.T, repo string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s/.git): %v", repo, err)
+	}
+}
+
+func mkdirLinkedGitWorktree(t *testing.T, workDir, commonDir string) {
+	t.Helper()
+	adminDir := filepath.Join(commonDir, "worktrees", filepath.Base(workDir))
+	if err := os.MkdirAll(adminDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(linked git admin): %v", err)
+	}
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(linked workdir): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(workDir, ".git"), []byte("gitdir: "+adminDir+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.git): %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(adminDir, "commondir"), []byte(commonDir+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(commondir): %v", err)
+	}
+}
+
 func TestPrepareStartCandidateReloadsOverridesBeforeWake(t *testing.T) {
 	store := beads.NewMemStore()
 	session, err := store.Create(beads.Bead{
