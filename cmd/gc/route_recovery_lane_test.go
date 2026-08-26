@@ -198,10 +198,20 @@ func TestRouteRecoveryDeltaReadCountDoesNotScaleWithCandidates(t *testing.T) {
 	if eight != 1 {
 		t.Fatalf("8 candidates cost %d read(s), want exactly 1 batched re-verify", eight)
 	}
-	// Control: a single candidate takes the Get fast path, which is one read
-	// too — so the equality above is not the trivial "every count is zero".
-	if one := readsFor(1); one != 1 {
-		t.Fatalf("1 candidate cost %d read(s), want 1", one)
+	// Control: the equality above is not the trivial "every count is zero".
+	//
+	// A single candidate costs TWO reads, one more than eight do. That inversion
+	// is deliberate and is the gas-t3zl trade: admission for every batch size is
+	// decided by one raw-filtered live List, and a lone candidate then takes one
+	// extra Live.Get for the authoritative row. The batch cannot pay that Get —
+	// per-bead re-verification is the whole thing this lane exists to avoid — but
+	// a batch of one can, and must, because that is the parked-bead case where a
+	// folded status previously let a deferred bead through as live demand.
+	//
+	// If this ever needs to return to one read, the fix is a raw status on
+	// beads.Bead, not dropping the Get.
+	if one := readsFor(1); one != 2 {
+		t.Fatalf("1 candidate cost %d read(s), want 2 (filtered List + authoritative Get)", one)
 	}
 }
 
@@ -897,5 +907,101 @@ func TestRouteRecoveryDeltaCountsCandidatesItCouldNotResolve(t *testing.T) {
 	}
 	if _, present := clean.fields()["dropped"]; present {
 		t.Fatalf("clean delta trace fields = %v, want no dropped key", clean.fields())
+	}
+}
+
+// foldedStatusStore models the one divergence that matters to
+// liveOpenCandidates: Get answers with Gas City's FOLDED status while List
+// filters on bd's RAW status.
+//
+// That is not a contrivance, it is the shipped behavior. mapBdStatus collapses
+// every bd status that is not closed or in_progress to "open" (bdstore.go), so a
+// bead that is deferred, blocked, review or testing decodes as open on the way
+// out of Get. List(Status:"open") never sees the folded value because the store
+// filters before decoding.
+//
+// beads.Bead carries no raw status field, so a Go-side status check on a Get
+// result CANNOT distinguish the two — which is why the fix has to filter in the
+// store rather than compare harder here (gas-t3zl).
+type foldedStatusStore struct {
+	beads.Store
+	bead beads.Bead
+	gets int
+}
+
+// Get returns the bead with its status already folded to "open", as a real
+// bd-backed store does for a deferred bead.
+func (s *foldedStatusStore) Get(id string) (beads.Bead, error) {
+	s.gets++
+	if id != s.bead.ID {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	folded := s.bead
+	folded.Status = "open"
+	return folded, nil
+}
+
+// List applies the raw filter, so a bead whose true status is not open is
+// excluded no matter what the folded value would have been.
+func (s *foldedStatusStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status != "" && q.Status != s.bead.Status {
+		return nil, nil
+	}
+	if len(q.IDs) > 0 && !slices.Contains(q.IDs, s.bead.ID) {
+		return nil, nil
+	}
+	return []beads.Bead{s.bead}, nil
+}
+
+// TestLiveOpenCandidatesRejectsNonOpenRegardlessOfBatchSize pins the asymmetry
+// gas-t3zl found: a batch of one must reach the same verdict as a batch of two.
+//
+// Before the fix the single-candidate path took a Get and compared the folded
+// status in Go, so a deferred bead read as open and was handed back as a live
+// route-restore candidate — while the very same bead in a batch of two was
+// correctly filtered out by the store. A parked bead is exactly the
+// single-candidate case, which is why this only ever bit the one-bead park.
+func TestLiveOpenCandidatesRejectsNonOpenRegardlessOfBatchSize(t *testing.T) {
+	for _, raw := range []string{"deferred", "blocked", "review", "testing"} {
+		t.Run(raw, func(t *testing.T) {
+			store := &foldedStatusStore{
+				bead: beads.Bead{ID: "gas-park", Status: raw},
+			}
+
+			single, _, err := liveOpenCandidates(store, []string{"gas-park"})
+			if err != nil {
+				t.Fatalf("liveOpenCandidates(single) error = %v", err)
+			}
+			if len(single) != 0 {
+				t.Fatalf("liveOpenCandidates(single) on a %s bead = %d candidate(s), want 0 — "+
+					"a non-open bead must never be offered as a live route-restore candidate", raw, len(single))
+			}
+
+			batch, _, err := liveOpenCandidates(store, []string{"gas-park", "gas-other"})
+			if err != nil {
+				t.Fatalf("liveOpenCandidates(batch) error = %v", err)
+			}
+			if len(batch) != len(single) {
+				t.Fatalf("batch verdict = %d candidate(s), single verdict = %d — "+
+					"batch size must not change whether a %s bead is admitted", len(batch), len(single), raw)
+			}
+		})
+	}
+}
+
+// TestLiveOpenCandidatesAdmitsOpenBead guards the fix from over-correcting: a
+// genuinely open bead must still come back, and still in one round trip.
+func TestLiveOpenCandidatesAdmitsOpenBead(t *testing.T) {
+	store := &foldedStatusStore{bead: beads.Bead{ID: "gas-live", Status: "open"}}
+
+	got, trips, err := liveOpenCandidates(store, []string{"gas-live"})
+	if err != nil {
+		t.Fatalf("liveOpenCandidates error = %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "gas-live" {
+		t.Fatalf("liveOpenCandidates = %v, want the open bead gas-live", got)
+	}
+	if trips != 2 {
+		t.Fatalf("round trips = %d, want 2 — one filtered List to admit, one Live.Get for the authoritative row", trips)
 	}
 }

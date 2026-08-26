@@ -778,32 +778,52 @@ func (l *routeRecoveryLane) backstopLeg(leg planeLeg) routeRecoveryReport {
 //
 // One query for the whole set is the point: the scan it replaces issued one Get
 // per candidate, and against a remote ledger a batch of 33 Gets is 33 sequential
-// round trips. A single candidate stays a Get, which is strictly cheaper than a
-// filtered List on a backend that cannot push the IN-list down.
+// round trips.
+//
+// Admission is ALWAYS decided by a live, raw-filtered List, at every batch size.
+// That is the gas-t3zl fix: the single-candidate path used to take a Get and
+// compare the status in Go, which cannot work. mapBdStatus folds every bd status
+// that is not closed or in_progress down to "open", so a deferred, blocked,
+// review or testing bead decoded as open and was handed back as a live
+// candidate. beads.Bead carries no raw status field, so the comparison cannot be
+// repaired where it was written — only the store can filter on the raw value.
+// A parked bead is exactly the one-candidate case, which is why this only ever
+// bit the single-bead park.
+//
+// The List goes through the Live handle rather than store.List directly, because
+// liveStoreReader.List reads backing.List and so bypasses a CachingStore. A
+// plain store.List could admit a bead that predates a cross-process claim, which
+// is the ga-bgu hazard the old single path used Live specifically to dodge — the
+// old BATCH path had that exposure and nobody had filed it.
+//
+// A single candidate then takes one extra Live.Get. Admission has already been
+// decided by then; the Get is there because a store whose List answers from a
+// scan snapshot can still be behind on the row itself, and restoreRoute needs
+// the authoritative one to honor the open+unassigned guard (ga-bgu, ga-sa0).
+// A batch does not pay it: the whole point of one List for the set is that a
+// batch of 33 must not become 33 sequential round trips.
 //
 // It returns the number of store round trips it made so the caller can budget.
 func liveOpenCandidates(store beads.Store, ids []string) ([]beads.Bead, int, error) {
 	if store == nil || len(ids) == 0 {
 		return nil, 0, nil
 	}
-	if len(ids) == 1 {
-		bead, err := beads.HandlesFor(store).Live.Get(ids[0])
-		if err != nil {
-			if errors.Is(err, beads.ErrNotFound) {
-				return nil, 1, nil
-			}
-			return nil, 1, err
-		}
-		if bead.Status != "open" {
-			return nil, 1, nil
-		}
-		return []beads.Bead{bead}, 1, nil
-	}
-	rows, err := store.List(beads.ListQuery{IDs: ids, Status: "open", Live: true})
+	live := beads.HandlesFor(store).Live
+	rows, err := live.List(beads.ListQuery{IDs: ids, Status: "open"})
 	if err != nil {
 		return nil, 1, err
 	}
-	return rows, 1, nil
+	if len(ids) != 1 || len(rows) == 0 {
+		return rows, 1, nil
+	}
+	fresh, err := live.Get(rows[0].ID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return nil, 2, nil
+		}
+		return nil, 2, err
+	}
+	return []beads.Bead{fresh}, 2, nil
 }
 
 // routeRestoreOutcome is what one candidate's re-verify decided.
