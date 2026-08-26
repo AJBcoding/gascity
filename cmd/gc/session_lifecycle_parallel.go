@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"os"
 	"path/filepath"
 	"runtime/debug"
 	"sort"
@@ -21,6 +22,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/shellquote"
@@ -1265,10 +1267,73 @@ func resolvePreparedTaskWorkDir(
 ) string {
 	if workDirResolver != nil {
 		if workDir := workDirResolver(candidate, cfg); workDir != "" {
-			return workDir
+			if taskWorkDirCompatibleWithRig(candidate, workDir) {
+				return workDir
+			}
+			return ""
 		}
 	}
-	return resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
+	workDir := resolveTaskWorkDir(cityPath, store, taskWorkDirAssignees(candidate, cfg)...)
+	if !taskWorkDirCompatibleWithRig(candidate, workDir) {
+		return ""
+	}
+	return workDir
+}
+
+func taskWorkDirCompatibleWithRig(candidate startCandidate, workDir string) bool {
+	workDir = strings.TrimSpace(workDir)
+	rigRoot := strings.TrimSpace(candidate.tp.RigRoot)
+	if workDir == "" || rigRoot == "" {
+		return true
+	}
+	workCommon, ok := gitCommonDirForWorkTree(workDir)
+	if !ok {
+		return true
+	}
+	rigCommon, ok := gitCommonDirForWorkTree(rigRoot)
+	if !ok {
+		return true
+	}
+	return pathutil.SamePath(workCommon, rigCommon)
+}
+
+func gitCommonDirForWorkTree(workDir string) (string, bool) {
+	gitPath := filepath.Join(workDir, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", false
+	}
+	if info.IsDir() {
+		return gitPath, true
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", false
+	}
+	line := strings.TrimSpace(string(data))
+	const gitDirPrefix = "gitdir:"
+	if !strings.HasPrefix(strings.ToLower(line), gitDirPrefix) {
+		return "", false
+	}
+	adminDir := strings.TrimSpace(line[len(gitDirPrefix):])
+	if adminDir == "" {
+		return "", false
+	}
+	if !filepath.IsAbs(adminDir) {
+		adminDir = filepath.Join(workDir, adminDir)
+	}
+	commonDirData, err := os.ReadFile(filepath.Join(adminDir, "commondir"))
+	if err != nil {
+		return adminDir, true
+	}
+	commonDir := strings.TrimSpace(string(commonDirData))
+	if commonDir == "" {
+		return adminDir, true
+	}
+	if !filepath.IsAbs(commonDir) {
+		commonDir = filepath.Join(adminDir, commonDir)
+	}
+	return commonDir, true
 }
 
 // generatedPreStartPrefixes are the exact command prefixes
