@@ -193,6 +193,34 @@ func (p *Provider) boundSessionNames() []string {
 	return names
 }
 
+// boundPaneSessions maps bound pane id -> gc session name for every sidecar
+// entry that has both. It is the pane-keyed twin of boundSessionNames, and it
+// exists because herdr >=0.7.4 clears an agent's NAME when the pane occupant
+// changes: anything that keys off the live registry loses the session the pane
+// belongs to, while the binding written at Start still knows it.
+func (p *Provider) boundPaneSessions() map[string]string {
+	entries, err := os.ReadDir(p.metaDir)
+	if err != nil {
+		return nil
+	}
+	bound := make(map[string]string, len(entries))
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		name, err := readMetaFile(filepath.Join(p.metaDir, e.Name(), sanitize(metaBoundName)))
+		if err != nil || name == "" {
+			continue
+		}
+		pane, err := readMetaFile(filepath.Join(p.metaDir, e.Name(), sanitize(metaBoundPane)))
+		if err != nil || pane == "" {
+			continue
+		}
+		bound[pane] = name
+	}
+	return bound
+}
+
 // readMetaFile reads one sidecar value ("" when absent).
 func readMetaFile(path string) (string, error) {
 	b, err := os.ReadFile(path)

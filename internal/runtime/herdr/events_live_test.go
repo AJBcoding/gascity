@@ -72,9 +72,18 @@ func TestSessionEventsLive(t *testing.T) {
 	})
 
 	// Forced status change on evt-a's pane must arrive attributed.
-	a, ok, err := p.c.getAgent(ctx, "evt-a")
-	if err != nil || !ok {
-		t.Fatalf("getAgent evt-a: ok=%v err=%v", ok, err)
+	//
+	// Resolve the pane the way every production call site does, through
+	// resolveBinding's two tiers, rather than through a bare name lookup.
+	// herdr >=0.7.4 CLEARS an agent's name when the pane occupant changes, so
+	// `agent get`/`agent list` go dark on a still-live agent and a name-keyed
+	// read returns ok=false with a nil error. That is what the pane-binding
+	// sidecar exists for (see bindPlacement: "so every later name-keyed op
+	// survives the name clear"); a test that skips it is asserting a herdr
+	// behavior the adapter deliberately stopped depending on.
+	paneA, _, err := resolveBinding(p.lookupOps(ctx, "evt-a"))
+	if err != nil || paneA == "" {
+		t.Fatalf("resolveBinding evt-a: pane=%q err=%v", paneA, err)
 	}
 	report := func(pane, state string) {
 		t.Helper()
@@ -84,7 +93,7 @@ func TestSessionEventsLive(t *testing.T) {
 			t.Fatalf("pane report-agent %s %s: %v: %s", pane, state, err, out)
 		}
 	}
-	report(a.PaneID, "working")
+	report(paneA, "working")
 	ev := waitForEvent(t, ch, 10*time.Second, func(ev runtime.SessionEvent) bool {
 		return ev.Kind == runtime.SessionEventAgentStatus && ev.Session == "evt-a"
 	})
@@ -99,16 +108,16 @@ func TestSessionEventsLive(t *testing.T) {
 		t.Fatalf("Start evt-b: %v", err)
 	}
 	t.Cleanup(func() { _ = p.Stop("evt-b") })
-	b, ok, err := p.c.getAgent(ctx, "evt-b")
-	if err != nil || !ok {
-		t.Fatalf("getAgent evt-b: ok=%v err=%v", ok, err)
+	paneB, _, err := resolveBinding(p.lookupOps(ctx, "evt-b"))
+	if err != nil || paneB == "" {
+		t.Fatalf("resolveBinding evt-b: pane=%q err=%v", paneB, err)
 	}
 	// The resubscribe cycle emits a fresh resync; wait for it so the report
 	// below races nothing.
 	waitForEvent(t, ch, 15*time.Second, func(ev runtime.SessionEvent) bool {
 		return ev.Kind == runtime.SessionEventResync
 	})
-	report(b.PaneID, "blocked")
+	report(paneB, "blocked")
 	ev = waitForEvent(t, ch, 10*time.Second, func(ev runtime.SessionEvent) bool {
 		return ev.Kind == runtime.SessionEventAgentStatus && ev.Session == "evt-b"
 	})

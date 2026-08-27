@@ -108,7 +108,15 @@ func (p *Provider) SubscribeSessionEvents(ctx context.Context) (<-chan runtime.S
 // backoff. Failures are logged once per streak, not per retry.
 func (p *Provider) runSessionEventStream(ctx context.Context, ch chan runtime.SessionEvent) {
 	defer close(ch)
-	s := &sessionEventStream{c: p.c, ch: ch}
+	s := &sessionEventStream{
+		c:          p.c,
+		ch:         ch,
+		boundPanes: p.boundPaneSessions,
+		paneAlive: func(paneID string) bool {
+			probe, err := p.probePane(ctx, paneID)
+			return err == nil && probe.Exists
+		},
+	}
 	backoff := sessionEventMinBackoff
 	for {
 		if ctx.Err() != nil {
@@ -157,6 +165,16 @@ type sessionEventStream struct {
 	// the current cycle; a known agent pane missing from it forces a
 	// resubscribe. Removals are lazy — herdr just never fires for a gone pane
 	// — so only additions cycle the connection.
+	// boundPanes returns the sidecar's pane id -> gc session name map. The
+	// registry tier alone cannot attribute a pane whose agent name herdr has
+	// cleared; the binding written at Start survives that. nil in unit tests
+	// that drive the stream without a Provider.
+	boundPanes func() map[string]string
+	// paneAlive reports whether a pane still exists. Only the per-pane
+	// agent-status filter is gated on it: herdr rejects the WHOLE
+	// events.subscribe with pane_not_found if any filtered pane is gone, so
+	// one stale binding would otherwise kill the stream permanently.
+	paneAlive  func(paneID string) bool
 	subscribed map[string]bool
 	// pendingResync records that events were dropped on a full channel; the
 	// loss is surfaced as a SessionEventResync once the consumer drains.
@@ -188,6 +206,12 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 			s.subscribed[a.PaneID] = true
 			subs = append(subs, subscribeSub{Type: "pane.agent_status_changed", PaneID: a.PaneID})
 		}
+	}
+
+	// The binding sidecar OUTRANKS the registry here; see mergeBoundPanes.
+	for _, pane := range s.mergeBoundPanes() {
+		s.subscribed[pane] = true
+		subs = append(subs, subscribeSub{Type: "pane.agent_status_changed", PaneID: pane})
 	}
 
 	// cctx scopes the connection and its reader goroutine to this cycle:
@@ -274,6 +298,13 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 					resubscribe = true
 				}
 			}
+			// A pane whose agent name herdr already cleared is invisible to the
+			// loop above, so without this a session started mid-cycle never
+			// grows the filter set: no resubscribe, no fresh resync, and its
+			// status events never arrive.
+			if len(s.mergeBoundPanes()) > 0 {
+				resubscribe = true
+			}
 			if resubscribe {
 				return true, nil
 			}
@@ -284,6 +315,46 @@ func (s *sessionEventStream) runCycle(ctx context.Context) (resubscribe bool, er
 			}
 		}
 	}
+}
+
+// mergeBoundPanes overlays the binding sidecar onto paneNames and returns the
+// LIVE bound panes this cycle has no agent-status filter for.
+//
+// It OUTRANKS the registry. herdr >=0.7.4 clears an agent's name when the pane
+// occupant changes, and any third party may re-report a different agent on the
+// same pane (`herdr pane report-agent --agent X`). Either way the registry
+// stops naming the gc session that owns the pane: a cleared-name agent is
+// skipped entirely by the registry loops — so that pane gets no subscription
+// and its events never arrive — and a re-reported one arrives attributed to the
+// foreign name. The binding written at Start is the only durable record of
+// which gc session owns a pane, which is what paneNames is documented to hold.
+func (s *sessionEventStream) mergeBoundPanes() []string {
+	if s.boundPanes == nil {
+		return nil
+	}
+	var unsubscribed []string
+	for pane, name := range s.boundPanes() {
+		if pane == "" || name == "" {
+			continue
+		}
+		// Attribution is unconditional: a binding outlives its pane, and a
+		// pane_exited/pane_closed for an agent herdr has already reaped must
+		// still name the session it belonged to. Those arrive on the
+		// unfiltered broadcast subscriptions, so naming a dead pane here
+		// costs nothing.
+		s.paneNames[pane] = name
+		if s.subscribed[pane] {
+			continue
+		}
+		// The per-pane status filter is different: herdr validates it. Probe
+		// before asking, or a binding whose pane is gone takes the whole
+		// subscribe down with pane_not_found on every cycle, forever.
+		if s.paneAlive != nil && !s.paneAlive(pane) {
+			continue
+		}
+		unsubscribed = append(unsubscribed, pane)
+	}
+	return unsubscribed
 }
 
 // handleFrame translates one wire frame into a SessionEvent. It reports

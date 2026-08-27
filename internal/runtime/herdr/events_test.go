@@ -492,3 +492,53 @@ func TestSessionEventStreamCtxCancelClosesChannel(t *testing.T) {
 		}
 	}
 }
+
+// TestMergeBoundPanesGatesSubscriptionOnLivenessNotAttribution pins the two
+// halves of the sidecar overlay, which pull in opposite directions.
+//
+// ATTRIBUTION must be unconditional: a binding outlives its pane, and the
+// pane_exited/pane_closed for an agent herdr already reaped arrives on the
+// unfiltered broadcast subscriptions and must still name its session.
+//
+// SUBSCRIPTION must not be: herdr validates the per-pane agent-status filter
+// and rejects the ENTIRE events.subscribe with pane_not_found if any filtered
+// pane is gone. Subscribing a stale binding therefore kills the whole stream
+// on every cycle, permanently — strictly worse than the missing-attribution
+// bug the overlay exists to fix.
+func TestMergeBoundPanesGatesSubscriptionOnLivenessNotAttribution(t *testing.T) {
+	s := &sessionEventStream{
+		paneNames:  map[string]string{},
+		subscribed: map[string]bool{"w2:p1": true},
+		boundPanes: func() map[string]string {
+			return map[string]string{
+				"w1:p1": "live-sess",    // live, unsubscribed -> subscribe
+				"w9:p9": "reaped-sess",  // pane gone          -> attribute only
+				"w2:p1": "already-sess", // live, subscribed   -> no repeat
+			}
+		},
+		paneAlive: func(paneID string) bool { return paneID != "w9:p9" },
+	}
+
+	got := s.mergeBoundPanes()
+	if len(got) != 1 || got[0] != "w1:p1" {
+		t.Fatalf("mergeBoundPanes() = %v, want exactly [w1:p1]: only a live, not-yet-subscribed bound pane may join the filter set", got)
+	}
+	for pane, want := range map[string]string{
+		"w1:p1": "live-sess",
+		"w9:p9": "reaped-sess",
+		"w2:p1": "already-sess",
+	} {
+		if s.paneNames[pane] != want {
+			t.Errorf("paneNames[%q] = %q, want %q; attribution is unconditional even for a pane that is gone", pane, s.paneNames[pane], want)
+		}
+	}
+}
+
+// TestMergeBoundPanesWithoutProviderIsInert guards the unit-test construction
+// path: a stream built without a Provider has no sidecar and must not panic.
+func TestMergeBoundPanesWithoutProviderIsInert(t *testing.T) {
+	s := &sessionEventStream{paneNames: map[string]string{}, subscribed: map[string]bool{}}
+	if got := s.mergeBoundPanes(); got != nil {
+		t.Fatalf("mergeBoundPanes() = %v, want nil when no sidecar is wired", got)
+	}
+}
