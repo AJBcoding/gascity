@@ -263,6 +263,37 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	// holder: it is a live, already-primed agent whose winning Start already ran
 	// session_setup and delivered its prime; re-running here would double
 	// session_setup and inject the startup prime into a working session.
+	// Dismiss startup dialogs BEFORE anything is delivered, and before the
+	// readiness wait — a modal is not a readiness problem and waiting longer
+	// does not clear it.
+	//
+	// herdr omitted DialogProvider from its first cut and degraded to no-op
+	// (capabilities.go), so a herdr agent launched into a directory it has not
+	// seen sits on a workspace-trust modal — Claude's "Quick safety check",
+	// codex's "Do you trust the contents of this directory?" — while herdr
+	// reports agent_status idle AND interactive_ready true AND a quiescent
+	// state_change_seq. Nothing in the runtime's own signals distinguishes that
+	// from a session waiting at an empty prompt.
+	//
+	// The next keystroke then ANSWERS the modal. Measured on both TUIs with
+	// production argv (gas-vs0e): the startup turn selected "1. Yes, I trust
+	// this folder", was consumed, and `agent prompt --wait` reported CONFIRMED
+	// because dismissing the dialog is itself a state change. The payload
+	// reached neither the composer nor the transcript.
+	//
+	// Every polecat gets a fresh worktree, which is by definition a directory
+	// the agent has not seen, which is why polecats are the affected
+	// population. permission_mode=unrestricted does NOT suppress it:
+	// --dangerously-skip-permissions was passed in the trial and the trust
+	// dialog appeared anyway.
+	//
+	// Best-effort and idempotent, matching tmux's Step 3 (tmux/adapter.go): a
+	// session with no dialog is unaffected, and a failure here must not fail a
+	// Start that is otherwise live.
+	if !adopted && info.PaneID != "" && runtime.ShouldAcceptStartupDialogs(cfg) {
+		p.dismissDialogsOnPane(ctx, info.PaneID, runtime.StartupDialogTimeout())
+	}
+
 	startupText := startupDeliveryText(cfg)
 	if !adopted && info.PaneID != "" && (startupText != "" || hasSessionSetup(cfg)) {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its

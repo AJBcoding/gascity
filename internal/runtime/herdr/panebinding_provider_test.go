@@ -108,6 +108,45 @@ agent_prompt)
     : > "$STATE/prompted"
     printf '%s' '{"result":{"type":"agent_prompted"}}'
   fi ;;
+pane_send-keys)
+  # The workspace-trust modal is answered by Enter (option 1 pre-selected).
+  if [ -e "$STATE/trust_dialog" ] || [ -e "$STATE/trust_dialog_codex" ]; then
+    case "$*" in *Enter*) : > "$STATE/trust_answered" ;; esac
+  fi
+  printf '%s' '{"result":{"type":"ok"}}' ;;
+pane_read)
+  # A pane parked on the workspace-trust modal, verbatim from a live Claude
+  # Code boot in an untrusted directory (gas-vs0e). herdr reports this pane as
+  # idle + interactive_ready, which is exactly why the runtime's own signals
+  # cannot be the thing that decides delivery is safe.
+  if [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trust_answered" ]; then
+    printf '%s' ' Quick safety check: Is this a project you created or one you trust?
+
+ Claude Code'"'"'ll be able to read, edit, and execute files here.
+
+ > 1. Yes, I trust this folder
+   2. No, exit
+
+ Enter to confirm - Esc to cancel'
+    exit 0
+  fi
+  # The codex renderer of the same modal, also verbatim from a live boot. Its
+  # wording shares no phrase with Claude'"'"'s, which is the point of pinning both.
+  if [ -e "$STATE/trust_dialog_codex" ] && [ ! -e "$STATE/trust_answered" ]; then
+    printf '%s' '  Do you trust the contents of this directory? Working with untrusted contents comes with
+  higher risk of prompt injection. Trusting the directory allows project-local config,
+  hooks, and exec policies to load.
+
+ > 1. Yes, continue
+   2. No, quit
+
+   Press enter to continue'
+    exit 0
+  fi
+  # No dialog: an ordinary empty composer. Pane reads are used by Peek
+  # elsewhere and must stay inert for tests that do not opt in.
+  printf '%s' 'some earlier transcript output
+> ' ;;
 pane_run)
   : > "$STATE/busy"
   printf '%s' "$4" | sed -e 's|^exec /bin/sh -c ||' -e "s/^'//" -e "s/'\$//" > "$STATE/rawcmd"
