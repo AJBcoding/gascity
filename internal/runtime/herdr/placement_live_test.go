@@ -40,9 +40,15 @@ func TestEnsurePlacementLiveSingleTabRecycle(t *testing.T) {
 
 	ctx := context.Background()
 	cwd := t.TempDir()
-	wsID, oldTab, _, err := c.workspaceCreate(ctx, "placews", cwd, nil)
+	// upstream dropped wsID from workspaceCreate's returns; the workspace id
+	// is resolved by label instead, the same way client.go does it.
+	oldTab, _, err := c.workspaceCreate(ctx, "placews", cwd, nil)
 	if err != nil {
 		t.Fatalf("workspace create: %v", err)
+	}
+	wsID, err := c.findWorkspace(ctx, "placews")
+	if err != nil || wsID == "" {
+		t.Fatalf("find workspace after create = (%q, %v); want a live workspace id", wsID, err)
 	}
 	if err := c.tabRename(ctx, oldTab, "witness"); err != nil {
 		t.Fatalf("tab rename: %v", err)

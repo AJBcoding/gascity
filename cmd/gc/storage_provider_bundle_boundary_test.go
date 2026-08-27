@@ -40,6 +40,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/storebinding"
+	"github.com/gastownhall/gascity/internal/testpolicy/resourcecensus"
 )
 
 const (
@@ -405,22 +406,13 @@ func stripLineComment(line string) string {
 func anyGoWorkFile(t *testing.T, root string) bool {
 	t.Helper()
 	found := false
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+	err := filepath.WalkDir(root, func(_ string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
 		if entry.IsDir() {
-			if path != root {
-				_, statErr := os.Stat(filepath.Join(path, ".git"))
-				if statErr == nil {
-					return filepath.SkipDir
-				}
-				if !os.IsNotExist(statErr) {
-					return statErr
-				}
-			}
 			switch entry.Name() {
-			case ".git", "node_modules", "vendor", "testdata", ".claude":
+			case ".git", "node_modules", "vendor", "testdata", ".claude", "worktrees":
 				return filepath.SkipDir
 			}
 			return nil
@@ -458,70 +450,40 @@ func moduleRoot(t *testing.T) string {
 }
 
 // moduleGoFiles lists every non-test Go file in the module, module-relative.
+// It lists git-tracked files rather than walking the filesystem so an
+// untracked nested git worktree checked out under root — the common
+// gitignored worktrees/<bead> pool-slot pattern — never contributes
+// duplicate source to the scan. testdata is excluded, matching the walk this
+// replaced.
 func moduleGoFiles(t *testing.T, root string) []string {
 	t.Helper()
-	var files []string
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			if path != root {
-				_, statErr := os.Stat(filepath.Join(path, ".git"))
-				if statErr == nil {
-					return filepath.SkipDir
-				}
-				if !os.IsNotExist(statErr) {
-					return statErr
-				}
-			}
-			switch entry.Name() {
-			case ".git", "node_modules", "vendor", "testdata", ".claude":
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(entry.Name(), ".go") || strings.HasSuffix(entry.Name(), "_test.go") {
-			return nil
-		}
-		rel, relErr := filepath.Rel(root, path)
-		if relErr != nil {
-			return relErr
-		}
-		files = append(files, filepath.ToSlash(rel))
-		return nil
-	})
+	tracked, err := resourcecensus.TrackedGoFiles(root)
 	if err != nil {
-		t.Fatalf("walking the module: %v", err)
+		t.Fatalf("listing tracked Go files: %v", err)
+	}
+	files := make([]string, 0, len(tracked))
+	for _, rel := range tracked {
+		if strings.HasSuffix(rel, "_test.go") || moduleScanUnderTestdata(rel) {
+			continue
+		}
+		files = append(files, rel)
 	}
 	sort.Strings(files)
 	return files
 }
 
-func TestModuleGoFilesSkipsNestedGitWorktrees(t *testing.T) {
-	root := t.TempDir()
-	writeModuleFixtureFile(t, root, "cmd/gc/storage_provider_bundle.go", "package main\n")
-	writeModuleFixtureFile(t, root, "worktrees/gas-zjqk/.git", "gitdir: ../.git/worktrees/gas-zjqk\n")
-	writeModuleFixtureFile(t, root, "worktrees/gas-zjqk/cmd/gc/storage_provider_bundle.go", "package main\n")
-
-	files := moduleGoFiles(t, root)
-	if !slices.Contains(files, "cmd/gc/storage_provider_bundle.go") {
-		t.Fatalf("moduleGoFiles skipped the root module source: %v", files)
+// moduleScanUnderTestdata reports whether rel is under a testdata directory.
+// git tracks testdata by convention, unlike node_modules, vendor, .claude,
+// and .git, which this module never tracks — so testdata is the one
+// directory the prior filesystem walk excluded that a tracked-files listing
+// does not.
+func moduleScanUnderTestdata(rel string) bool {
+	for _, segment := range strings.Split(rel, "/") {
+		if segment == "testdata" {
+			return true
+		}
 	}
-	if slices.Contains(files, "worktrees/gas-zjqk/cmd/gc/storage_provider_bundle.go") {
-		t.Fatalf("moduleGoFiles scanned nested worktree source: %v", files)
-	}
-}
-
-func writeModuleFixtureFile(t *testing.T, root, rel, content string) {
-	t.Helper()
-	path := filepath.Join(root, filepath.FromSlash(rel))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("creating fixture dir for %s: %v", rel, err)
-	}
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatalf("writing fixture file %s: %v", rel, err)
-	}
+	return false
 }
 
 func parseModuleFile(t *testing.T, root, rel string) *ast.File {

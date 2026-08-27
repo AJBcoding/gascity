@@ -201,6 +201,12 @@ const controlRootCanceledCloseReason = "control closed: workflow root canceled v
 // a cancellation, a skip teardown, or a missing-root orphan close.
 const controlRootSettledCloseReason = "control closed: workflow root already settled"
 
+// scopeAbortSkippedCloseReason is stamped on every member closed by a scope
+// abort. It is prose rather than a token because bd's validation.on-close=error
+// validator rejects a close whose reason is shorter than 20 characters, and
+// BdStore.CloseAll forwards this value as --reason.
+const scopeAbortSkippedCloseReason = "scope member skipped: an earlier member of the same scope failed"
+
 // closeOrphanedControl is the root-state gate every control bead passes through
 // before its kind-specific processing: it reports handled=true when the bead's
 // workflow root is in a state that makes further work invalid. Three states
@@ -1521,13 +1527,17 @@ func loadDownDepsForScopeSkip(store beads.Store, ids []string) (map[string][]bea
 	}
 	if batch, ok := store.(scopeSkipDepBatchLister); ok {
 		deps, err := batch.DepListBatch(ids)
-		if err != nil {
-			return nil, fmt.Errorf("batch listing scope skip deps: %w", err)
+		// A wrapper forwards this method so the capability is not silently lost, so a
+		// capability miss arrives as this sentinel: fall back to the per-anchor reads.
+		if !errors.Is(err, beads.ErrDepListBatchUnsupported) {
+			if err != nil {
+				return nil, fmt.Errorf("batch listing scope skip deps: %w", err)
+			}
+			if deps == nil {
+				deps = make(map[string][]beads.Dep, len(ids))
+			}
+			return deps, nil
 		}
-		if deps == nil {
-			deps = make(map[string][]beads.Dep, len(ids))
-		}
-		return deps, nil
 	}
 	depsByID := make(map[string][]beads.Dep, len(ids))
 	for _, id := range ids {
@@ -1540,29 +1550,31 @@ func loadDownDepsForScopeSkip(store beads.Store, ids []string) (map[string][]bea
 	return depsByID, nil
 }
 
-type scopeSkipBatchUpdater interface {
-	UpdateAll(ids []string, opts beads.UpdateOpts) (int, error)
-}
-
+// skipScopeMembers closes the given scope members as skipped.
+//
+// It closes rather than updates, and that is load-bearing. Two blockers are
+// legitimately still open when this runs, both by design: the control driving
+// the abort, which skipOpenScopeMembers excludes from the pending set and whose
+// close the caller owns, and a failed subject's own scope-check, which
+// preserveScopeCheckForSubject keeps open as the idempotent replay path. Real bd
+// refuses an unforced "update --status closed" on a bead with an open blocker
+// (beads #5206), so the update path could not close either shape — that was
+// ga-4ote2. Reordering does not help, because the preserved control must stay
+// open.
+//
+// CloseAll emits "bd close --force" (bdCloseArgs, bdstore.go), which is bd's
+// escape hatch for closes that do not assert completion — and a skip is exactly
+// that: this work will never run, as opposed to this work finished. CloseAll
+// also writes the metadata before closing (setMetadataBatchAll), so
+// gc.outcome=skipped survives, and it is on the Store interface, so every store
+// takes the same path with no capability probing.
 func skipScopeMembers(store beads.Store, ids []string) (int, error) {
-	status := "closed"
-	opts := beads.UpdateOpts{
-		Status:   &status,
-		Metadata: map[string]string{beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped},
-	}
-	if batch, ok := store.(scopeSkipBatchUpdater); ok {
-		updated, err := batch.UpdateAll(ids, opts)
-		if err != nil {
-			return updated, fmt.Errorf("closing skipped scope beads %v: %w", ids, err)
-		}
-		return updated, nil
-	}
-	closed := 0
-	for _, id := range ids {
-		if err := store.Update(id, opts); err != nil {
-			return closed, fmt.Errorf("closing bead %q: %w", id, err)
-		}
-		closed++
+	closed, err := store.CloseAll(ids, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
+		"close_reason":              scopeAbortSkippedCloseReason,
+	})
+	if err != nil {
+		return closed, fmt.Errorf("closing skipped scope beads %v: %w", ids, err)
 	}
 	return closed, nil
 }
