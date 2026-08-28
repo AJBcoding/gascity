@@ -40,6 +40,21 @@ func runGit(t *testing.T, dir string, args ...string) {
 	}
 }
 
+// runGitAllowFail runs a git command in dir and returns its combined output
+// and error instead of failing the test. Use it where the command is expected
+// to fail (deleting a symref that may not exist) or where the failure IS the
+// assertion (a precondition that origin/HEAD is unset). It strips git env vars
+// exactly like runGit, so a leaked GIT_DIR cannot make such an assertion read
+// the wrong repository.
+func runGitAllowFail(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = sanitizeGitEnv(os.Environ())
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
 func TestSanitizeGitEnvStripsGitLocatingVariables(t *testing.T) {
 	in := []string{
 		"PATH=/usr/bin",
@@ -259,7 +274,7 @@ func TestDefaultBranch_OriginHEADUnsetWithMasterRef(t *testing.T) {
 				runGit(t, clone, "update-ref", "refs/remotes/origin/"+ref, "HEAD")
 			}
 			// Defensive: ensure no origin/HEAD symref lingers from clone.
-			_ = exec.Command("git", "-C", clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD").Run()
+			_, _ = runGitAllowFail(t, clone, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
 
 			g := New(clone)
 			got, err := g.DefaultBranch()
@@ -349,8 +364,8 @@ func TestProbeDefaultBranchFrom_UsesUpstreamHEADWhenOriginHEADIsUnset(t *testing
 
 	// origin exists and has a tracking ref, but no HEAD symref.
 	runGit(t, clone, "update-ref", "refs/remotes/origin/main", "HEAD")
-	_ = exec.Command("git", "-C", clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD").Run()
-	if out, err := exec.Command("git", "-C", clone, "symbolic-ref", "refs/remotes/origin/HEAD").CombinedOutput(); err == nil {
+	_, _ = runGitAllowFail(t, clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD")
+	if out, err := runGitAllowFail(t, clone, "symbolic-ref", "refs/remotes/origin/HEAD"); err == nil {
 		t.Fatalf("precondition: origin/HEAD must be unset, got %q", out)
 	}
 

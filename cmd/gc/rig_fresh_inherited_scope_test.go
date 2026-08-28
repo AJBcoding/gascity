@@ -142,3 +142,18 @@ func TestScopeSkipsManagedDoltForInitStillValidatesAScopeWithItsOwnConfig(t *tes
 		t.Fatalf("scopeSkipsManagedDoltForInit error = %v, want the rig-scope endpoint-origin validation failure", err)
 	}
 }
+
+// A city whose binding is partial — some but not all of backend /
+// storage_endpoint / storage_database — is broken config. The fresh-rig
+// inheritance arm surfaces that as a hard error rather than silently taking
+// the managed-Dolt lane, matching what the configured-inherited arm already
+// does for the same city.
+func TestScopeSkipsManagedDoltForInitFailsClosedOnAPartialCityBinding(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath, rigPath := writeFreshInheritedCity(t, `{"database":"beads","backend":"mysql","storage_endpoint":"opaque-remote"}`)
+
+	_, err := scopeSkipsManagedDoltForInit(cityPath, rigPath)
+	if err == nil || !strings.Contains(err.Error(), "partial beads storage binding") {
+		t.Fatalf("scopeSkipsManagedDoltForInit error = %v, want a partial-binding refusal", err)
+	}
+}
