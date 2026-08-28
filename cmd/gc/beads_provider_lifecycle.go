@@ -617,7 +617,7 @@ func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 		// This decides dispatch only. The rig is deliberately left unpinned:
 		// an inherited scope resolves the city's binding on each use rather
 		// than carrying a copy that would go stale when the city moves.
-		if !ok {
+		if !ok && !scopeHasOwnConfigYAML(dir) {
 			return scopeHasCompleteStorageBinding(scopeMetadataJSONPath(cityPath))
 		}
 		resolved, err := contract.ResolveScopeConfigState(fsys.OSFS{}, cityPath, dir, "")
@@ -633,6 +633,16 @@ func scopeSkipsManagedDoltForInit(cityPath, dir string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// scopeHasOwnConfigYAML reports whether the scope has written its own
+// .beads/config.yaml. A fresh `gc rig add` has not — it writes that file only
+// after this gate runs — so the inheritance shortcut stays scoped to a
+// directory with no config of its own, and a scope that DOES carry one still
+// goes through ResolveScopeConfigState's endpoint-origin validation.
+func scopeHasOwnConfigYAML(dir string) bool {
+	_, err := fsys.OSFS{}.Stat(filepath.Join(dir, ".beads", "config.yaml"))
+	return err == nil
 }
 
 // scopeHasCompleteStorageBinding recognizes the opaque workspace binding

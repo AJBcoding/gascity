@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -108,5 +109,36 @@ func TestInitAndHookDirLeavesAFreshInheritedRigUnpinned(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(rigPath, ".beads", "metadata.json")); !os.IsNotExist(err) {
 		t.Fatalf("fresh inherited rig should not be pinned with local metadata, stat err = %v", err)
+	}
+}
+
+// TestScopeSkipsManagedDoltForInitStillValidatesAScopeWithItsOwnConfig pins
+// the boundary of the inheritance shortcut above. "No metadata.json" is not
+// on its own evidence of a freshly-created rig: a scope that has already
+// written its own .beads/config.yaml has chosen something, and a config
+// declaring managed_city is invalid at rig scope. That must still surface as
+// a hard error rather than being waved through as inheritance, so the
+// shortcut stays scoped to a directory carrying no config of its own — which
+// is exactly the state `gc rig add` is in when this gate runs.
+func TestScopeSkipsManagedDoltForInitStillValidatesAScopeWithItsOwnConfig(t *testing.T) {
+	t.Setenv("GC_BEADS", "bd")
+	cityPath, rigPath := writeFreshInheritedCity(t, `{"database":"beads","backend":"mysql","storage_endpoint":"opaque-remote","storage_database":"anthony_beads"}`)
+
+	// The rig carries its own config declaring an origin that is invalid at
+	// rig scope, but still has no metadata.json of its own.
+	if err := os.MkdirAll(filepath.Join(rigPath, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigPath, ".beads", "config.yaml"), []byte("issue_prefix: fresh\ngc.endpoint_origin: managed_city\ngc.endpoint_status: verified\ndolt.auto-start: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := scopeSkipsManagedDoltForInit(cityPath, rigPath)
+	if err == nil {
+		t.Fatal("scopeSkipsManagedDoltForInit returned no error for a rig scope declaring managed_city; " +
+			"the endpoint-origin validation was skipped because the scope has no metadata.json")
+	}
+	if !strings.Contains(err.Error(), "endpoint origin is invalid for rig scope") {
+		t.Fatalf("scopeSkipsManagedDoltForInit error = %v, want the rig-scope endpoint-origin validation failure", err)
 	}
 }

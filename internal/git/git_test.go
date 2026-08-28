@@ -329,6 +329,45 @@ func TestProbeDefaultBranch_FromNonOriginRemoteHEAD(t *testing.T) {
 	}
 }
 
+// The multi-remote probe consults every remote's HEAD, not just origin's, so
+// a repo whose origin has no HEAD set but which also tracks an upstream reads
+// the mainline from upstream rather than guessing from the checked-out
+// branch. This is the arm that widened: before, an unset origin/HEAD fell
+// straight through to the current branch and would have registered
+// "fix/some-feature" as the rig's mainline.
+func TestProbeDefaultBranchFrom_UsesUpstreamHEADWhenOriginHEADIsUnset(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	clone := t.TempDir()
+	runGit(t, clone, "clone", bare, ".")
+	runGit(t, clone, "config", "user.email", "test@test.com")
+	runGit(t, clone, "config", "user.name", "Test")
+	runGit(t, clone, "commit", "--allow-empty", "-m", "init")
+	runGit(t, clone, "remote", "add", "upstream", bare)
+	runGit(t, clone, "checkout", "-b", "fix/some-feature")
+
+	// origin exists and has a tracking ref, but no HEAD symref.
+	runGit(t, clone, "update-ref", "refs/remotes/origin/main", "HEAD")
+	_ = exec.Command("git", "-C", clone, "symbolic-ref", "-d", "refs/remotes/origin/HEAD").Run()
+	if out, err := exec.Command("git", "-C", clone, "symbolic-ref", "refs/remotes/origin/HEAD").CombinedOutput(); err == nil {
+		t.Fatalf("precondition: origin/HEAD must be unset, got %q", out)
+	}
+
+	// upstream does have a HEAD, pointing at its own mainline.
+	runGit(t, clone, "update-ref", "refs/remotes/upstream/trunk", "HEAD")
+	runGit(t, clone, "symbolic-ref", "refs/remotes/upstream/HEAD", "refs/remotes/upstream/trunk")
+
+	g := New(clone)
+	branch, remote := g.ProbeDefaultBranchFrom()
+	if branch != "trunk" {
+		t.Errorf("ProbeDefaultBranchFrom() branch = %q, want %q (upstream/HEAD, not the checked-out feature branch)", branch, "trunk")
+	}
+	if remote != "upstream" {
+		t.Errorf("ProbeDefaultBranchFrom() remote = %q, want %q", remote, "upstream")
+	}
+}
+
 // origin stays the preferred remote when several are configured.
 func TestProbeDefaultBranch_PrefersOriginOverOtherRemotes(t *testing.T) {
 	bare := t.TempDir()
