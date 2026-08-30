@@ -2839,6 +2839,35 @@ func TestAgentTemplateIdentitiesEquivalent(t *testing.T) {
 	}
 }
 
+// TestLegacyUnboundSessionBeadResolvesForPoolClassification pins the widened
+// resolver's nearest downstream consumers. A pool session bead persisted under
+// the legacy unbound identity now resolves to the imported binding agent, so
+// pool eligibility and excess must be computed against the canonical template
+// rather than treated as unknown.
+func TestLegacyUnboundSessionBeadResolvesForPoolClassification(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{
+		{Name: "refinery", Dir: "gascity", BindingName: "gastown", MaxActiveSessions: intPtr(1)},
+	}}
+	const canonical = "gascity/gastown.refinery"
+	sess := beads.Bead{
+		ID: "sess-legacy", Type: sessionBeadType, Status: "open",
+		Metadata: map[string]string{
+			"template": "gascity/refinery", "session_name": "refinery-gc-1", "state": "active",
+			poolManagedMetadataKey: boolMetadata(true),
+		},
+	}
+	// With demand, the legacy-identity bead is config-eligible under the
+	// canonical template.
+	if agent, ok := sessionWithinDesiredConfig(sess, cfg, map[string]int{canonical: 1}); !ok {
+		t.Errorf("legacy unbound session bead should be config-eligible under the imported binding agent (agent=%#v)", agent)
+	}
+	// With zero demand it is now classifiable as excess, where it previously
+	// resolved to no agent and was never excess.
+	if !isPoolExcess(sess, cfg, map[string]int{canonical: 0}) {
+		t.Error("legacy unbound pool session bead should be excess when canonical demand is zero")
+	}
+}
+
 // --- isKnownStateInfo tests (Phase 0b: forward compatibility) ---
 
 func TestIsKnownState_KnownStates(t *testing.T) {

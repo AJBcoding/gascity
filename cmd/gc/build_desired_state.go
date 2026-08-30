@@ -5125,10 +5125,9 @@ func canonicalizeLegacyBoundAssignedWork(cfg *config.City, workBeads []beads.Bea
 // unassigned work has no live owner to strand, so rewriting its route can only
 // make it discoverable. Idempotent by design: it writes only when the canonical
 // identity differs from the persisted route, so steady-state reconciles perform
-// no writes, and a route that is already canonical, resolves to no configured
-// agent, or still matches a configured bound agent is left untouched. A write
-// failure is logged and skipped — recovery is best-effort and must never block
-// reconciliation.
+// no writes, and a route that is already canonical or resolves to no configured
+// agent is left untouched. A write failure is logged and skipped — recovery is
+// best-effort and must never block reconciliation.
 func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []beads.Bead, workStores []beads.Store, stderr io.Writer) {
 	if cfg == nil || len(workBeads) != len(workStores) {
 		return
@@ -5145,6 +5144,12 @@ func canonicalizeLegacyBoundUnassignedRoutedWork(cfg *config.City, workBeads []b
 		if routedTo == "" {
 			continue
 		}
+		// No cheap pre-filter here: the import direction's legacy form is a bare
+		// "dir/name" with no binding-separator dot to key on, so every open routed
+		// bead must reach normalizeAgentTemplateIdentity. The former dot filter kept
+		// the per-bead agent scan off the steady-state backlog; if that cost bites,
+		// narrow it by config shape (any agent with a BindingName) rather than by
+		// route spelling.
 		canonicalRouted := normalizeAgentTemplateIdentity(cfg, routedTo)
 		if canonicalRouted == "" || canonicalRouted == routedTo {
 			continue
