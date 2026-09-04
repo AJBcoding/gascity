@@ -375,27 +375,33 @@ func evaluateOptInRalphIteration(store beads.Store, bead, iteration beads.Bead, 
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
 	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr, reason: checkResult.Stderr}
+	disposition, err := classifyRalphCheckDisposition(checkResult, policy)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: %w", bead.ID, err)
+	}
+	eval.disposition = disposition
+	return eval, nil
+}
+
+func classifyRalphCheckDisposition(checkResult convergence.GateResult, policy ralphExitCodePolicy) (attemptDisposition, error) {
 	switch checkResult.Outcome {
 	case convergence.GatePass:
-		eval.disposition = attemptPass
+		return attemptPass, nil
 	case convergence.GateError, convergence.GateTimeout:
-		eval.disposition = attemptPending
+		return attemptPending, nil
 	case convergence.GateFail:
 		if checkResult.ExitCode != nil {
 			if _, ok := policy.continueCodes[*checkResult.ExitCode]; ok {
-				eval.disposition = attemptContinue
-				return eval, nil
+				return attemptContinue, nil
 			}
 			if _, ok := policy.pendingCodes[*checkResult.ExitCode]; ok {
-				eval.disposition = attemptPending
-				return eval, nil
+				return attemptPending, nil
 			}
 		}
-		eval.disposition = attemptHardFail
+		return attemptHardFail, nil
 	default:
-		return attemptEvaluation{}, fmt.Errorf("%s: unsupported ralph check outcome %q", bead.ID, checkResult.Outcome)
+		return attemptPass, fmt.Errorf("unsupported ralph check outcome %q", checkResult.Outcome)
 	}
-	return eval, nil
 }
 
 func parseRalphExitCodePolicy(metadata map[string]string) (ralphExitCodePolicy, bool, error) {

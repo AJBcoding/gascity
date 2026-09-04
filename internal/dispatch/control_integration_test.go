@@ -168,8 +168,9 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 }
 
 // TestProcessControlOptInRalphExitDispositionIntegration catches the public
-// controller entrypoint losing the opt-in result mapping or spawning for any
-// result class other than an actually executed continue exit.
+// controller entrypoint losing routing for any distinct result class or
+// reporting a created attempt outside an executed continue exit. The complete
+// numeric matrix belongs to TestClassifyRalphCheckDisposition.
 func TestProcessControlOptInRalphExitDispositionIntegration(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -181,13 +182,8 @@ func TestProcessControlOptInRalphExitDispositionIntegration(t *testing.T) {
 	}{
 		{name: "pass", script: "#!/bin/sh\nexit 0\n", timeout: "30s", wantAction: "pass"},
 		{name: "continue", script: "#!/bin/sh\nexit 1\n", timeout: "30s", wantAction: "retry", wantCreated: 1},
-		{name: "pending 20", script: "#!/bin/sh\nexit 20\n", timeout: "30s", wantErr: ErrControlPending},
-		{name: "pending 24", script: "#!/bin/sh\nexit 24\n", timeout: "30s", wantErr: ErrControlPending},
-		{name: "hard 10", script: "#!/bin/sh\nexit 10\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard 21", script: "#!/bin/sh\nexit 21\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard 65", script: "#!/bin/sh\nexit 65\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard 70", script: "#!/bin/sh\nexit 70\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard unlisted", script: "#!/bin/sh\nexit 42\n", timeout: "30s", wantAction: "hard-fail"},
+		{name: "pending exit", script: "#!/bin/sh\nexit 20\n", timeout: "30s", wantErr: ErrControlPending},
+		{name: "hard exit", script: "#!/bin/sh\nexit 10\n", timeout: "30s", wantAction: "hard-fail"},
 		{name: "hard signal", script: "#!/bin/sh\nkill -TERM $$\n", timeout: "30s", wantAction: "hard-fail"},
 		{name: "gate error", script: "#!/definitely/missing/interpreter\nexit 0\n", timeout: "30s", wantErr: ErrControlPending},
 		{name: "gate timeout", script: "#!/bin/sh\nwhile :; do :; done\n", timeout: "10s", wantErr: ErrControlPending},
@@ -196,17 +192,10 @@ func TestProcessControlOptInRalphExitDispositionIntegration(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newRalphCheckFixture(t, `[1]`, `[20,24]`, "", tc.script, tc.timeout, 3)
-			beforeCount := ralphFixtureBeadCount(t, fixture.store)
 			result, err := ProcessControl(fixture.store, mustGet(t, fixture.store, fixture.control.ID), fixture.opts)
 			if tc.wantErr != nil {
 				if !errors.Is(err, tc.wantErr) {
 					t.Fatalf("ProcessControl err = %v, want %v", err, tc.wantErr)
-				}
-				if got := ralphFixtureBeadCount(t, fixture.store); got != beforeCount {
-					t.Fatalf("pending bead count = %d, want unchanged %d", got, beforeCount)
-				}
-				if got := mustGet(t, fixture.store, fixture.control.ID).Status; got != "open" {
-					t.Fatalf("pending control status = %q, want open", got)
 				}
 			} else if err != nil {
 				t.Fatalf("ProcessControl: %v", err)

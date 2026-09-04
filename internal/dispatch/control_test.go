@@ -13,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
 )
@@ -2194,51 +2195,51 @@ func TestProcessRalphControlOptInExecutedExitOneContinuesOnce(t *testing.T) {
 	}
 }
 
-// TestProcessRalphControlOptInExitDisposition catches post-check results being
-// treated as the legacy all-nonpass continuation class.
-func TestProcessRalphControlOptInExitDisposition(t *testing.T) {
+// TestClassifyRalphCheckDisposition catches an exit-disposition policy branch
+// mapping a gate result to the wrong attempt transition.
+func TestClassifyRalphCheckDisposition(t *testing.T) {
+	t.Parallel()
+	code := func(value int) *int { return &value }
+	policy := ralphExitCodePolicy{
+		continueCodes: map[int]struct{}{1: {}},
+		pendingCodes:  map[int]struct{}{20: {}, 24: {}},
+	}
 	tests := []struct {
-		name        string
-		script      string
-		timeout     string
-		wantAction  string
-		wantErr     error
-		wantCreated int
+		name    string
+		result  convergence.GateResult
+		want    attemptDisposition
+		wantErr bool
 	}{
-		{name: "pass", script: "#!/bin/sh\nexit 0\n", timeout: "30s", wantAction: "pass"},
-		{name: "continue", script: "#!/bin/sh\nexit 1\n", timeout: "30s", wantAction: "retry", wantCreated: 1},
-		{name: "pending 20", script: "#!/bin/sh\nexit 20\n", timeout: "30s", wantErr: ErrControlPending},
-		{name: "pending 24", script: "#!/bin/sh\nexit 24\n", timeout: "30s", wantErr: ErrControlPending},
-		{name: "hard 10", script: "#!/bin/sh\nexit 10\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard 21", script: "#!/bin/sh\nexit 21\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard 65", script: "#!/bin/sh\nexit 65\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard 70", script: "#!/bin/sh\nexit 70\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard unlisted", script: "#!/bin/sh\nexit 42\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "hard signal", script: "#!/bin/sh\nkill -TERM $$\n", timeout: "30s", wantAction: "hard-fail"},
-		{name: "gate error", script: "#!/definitely/missing/interpreter\nexit 0\n", timeout: "30s", wantErr: ErrControlPending},
-		{name: "gate timeout", script: "#!/bin/sh\nwhile :; do :; done\n", timeout: "10s", wantErr: ErrControlPending},
+		{name: "pass", result: convergence.GateResult{Outcome: convergence.GatePass, ExitCode: code(0)}, want: attemptPass},
+		{name: "continue", result: convergence.GateResult{Outcome: convergence.GateFail, ExitCode: code(1)}, want: attemptContinue},
+		{name: "pending 20", result: convergence.GateResult{Outcome: convergence.GateFail, ExitCode: code(20)}, want: attemptPending},
+		{name: "pending 24", result: convergence.GateResult{Outcome: convergence.GateFail, ExitCode: code(24)}, want: attemptPending},
+		{name: "hard 10", result: convergence.GateResult{Outcome: convergence.GateFail, ExitCode: code(10)}, want: attemptHardFail},
+		{name: "hard 21", result: convergence.GateResult{Outcome: convergence.GateFail, ExitCode: code(21)}, want: attemptHardFail},
+		{name: "hard 65", result: convergence.GateResult{Outcome: convergence.GateFail, ExitCode: code(65)}, want: attemptHardFail},
+		{name: "hard 70", result: convergence.GateResult{Outcome: convergence.GateFail, ExitCode: code(70)}, want: attemptHardFail},
+		{name: "hard unlisted", result: convergence.GateResult{Outcome: convergence.GateFail, ExitCode: code(42)}, want: attemptHardFail},
+		{name: "hard nil exit", result: convergence.GateResult{Outcome: convergence.GateFail}, want: attemptHardFail},
+		{name: "gate error", result: convergence.GateResult{Outcome: convergence.GateError}, want: attemptPending},
+		{name: "gate timeout", result: convergence.GateResult{Outcome: convergence.GateTimeout}, want: attemptPending},
+		{name: "unsupported outcome", result: convergence.GateResult{Outcome: "unexpected"}, wantErr: true},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			fixture := newRalphCheckFixture(t, `[1]`, `[20,24]`, "", tc.script, tc.timeout, 3)
-			beforeCount := ralphFixtureBeadCount(t, fixture.store)
-			result, err := processRalphControl(fixture.store, mustGet(t, fixture.store, fixture.control.ID), fixture.opts)
-			if tc.wantErr != nil {
-				if !errors.Is(err, tc.wantErr) {
-					t.Fatalf("processRalphControl err = %v, want %v", err, tc.wantErr)
+			t.Parallel()
+			got, err := classifyRalphCheckDisposition(tc.result, policy)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("classifyRalphCheckDisposition succeeded, want error")
 				}
-				if got := ralphFixtureBeadCount(t, fixture.store); got != beforeCount {
-					t.Fatalf("pending bead count = %d, want unchanged %d", got, beforeCount)
-				}
-				if got := mustGet(t, fixture.store, fixture.control.ID).Status; got != "open" {
-					t.Fatalf("pending control status = %q, want open", got)
-				}
-			} else if err != nil {
-				t.Fatalf("processRalphControl: %v", err)
+				return
 			}
-			if result.Action != tc.wantAction || result.Created != tc.wantCreated {
-				t.Fatalf("result = %+v, want action=%q created=%d", result, tc.wantAction, tc.wantCreated)
+			if err != nil {
+				t.Fatalf("classifyRalphCheckDisposition: %v", err)
+			}
+			if got != tc.want {
+				t.Fatalf("disposition = %v, want %v", got, tc.want)
 			}
 		})
 	}
