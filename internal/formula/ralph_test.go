@@ -185,6 +185,9 @@ func TestApplyRalph_NestedWithChildren(t *testing.T) {
 	if review.ID != "review-loop.iteration.1.review" {
 		t.Errorf("review.ID = %q, want review-loop.iteration.1.review", review.ID)
 	}
+	if scopeRef := review.Metadata[beadmeta.ScopeRefMetadataKey]; scopeRef != "review-loop.iteration.1" {
+		t.Errorf("review gc.scope_ref = %q, want review-loop.iteration.1", scopeRef)
+	}
 	if apply.ID != "review-loop.iteration.1.apply" {
 		t.Errorf("apply.ID = %q, want review-loop.iteration.1.apply", apply.ID)
 	}
@@ -819,4 +822,123 @@ func TestApplyRalph_NamespacesNestedControlForAcrossBody(t *testing.T) {
 	if got != wantCF {
 		t.Fatalf("nested attempt gc.control_for = %q, want %q (must equal inner control gc.step_ref)", got, wantCF)
 	}
+}
+
+func TestApplyRalph_NestedBodyKeepsInnerIterationScope(t *testing.T) {
+	expanded, err := ApplyRalph([]*Step{
+		{
+			ID:    "outer",
+			Title: "Outer",
+			Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "outer.sh"}},
+			Children: []*Step{
+				{
+					ID:    "inner",
+					Title: "Inner",
+					Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "inner.sh"}},
+					Children: []*Step{
+						{ID: "work", Title: "Work"},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyRalph: %v", err)
+	}
+
+	work := requireRalphStep(t, expanded, "outer.iteration.1.inner.iteration.1.work")
+	if got, want := work.Metadata[beadmeta.ScopeRefMetadataKey], "outer.iteration.1.inner.iteration.1"; got != want {
+		t.Errorf("inner body gc.scope_ref = %q, want %q", got, want)
+	}
+
+	innerScope := requireRalphStep(t, expanded, "outer.iteration.1.inner.iteration.1")
+	if got, want := innerScope.Metadata[beadmeta.ScopeRefMetadataKey], "outer.iteration.1"; got != want {
+		t.Errorf("inner iteration scope gc.scope_ref = %q, want %q", got, want)
+	}
+}
+
+func TestApplyRalph_NestedRetryAttemptKeepsInnerIterationScope(t *testing.T) {
+	steps := []*Step{
+		{
+			ID:    "outer",
+			Title: "Outer",
+			Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "outer.sh"}},
+			Children: []*Step{
+				{
+					ID:    "inner",
+					Title: "Inner",
+					Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "inner.sh"}},
+					Children: []*Step{
+						{ID: "work", Title: "Work", Retry: &RetrySpec{MaxAttempts: 2}},
+					},
+				},
+			},
+		},
+	}
+	retried, err := ApplyRetries(steps)
+	if err != nil {
+		t.Fatalf("ApplyRetries: %v", err)
+	}
+	expanded, err := ApplyRalph(retried)
+	if err != nil {
+		t.Fatalf("ApplyRalph: %v", err)
+	}
+
+	attempt := requireRalphStep(t, expanded, "outer.iteration.1.inner.iteration.1.work.attempt.1")
+	if got, want := attempt.Metadata[beadmeta.ScopeRefMetadataKey], "outer.iteration.1.inner.iteration.1"; got != want {
+		t.Errorf("nested retry attempt gc.scope_ref = %q, want %q", got, want)
+	}
+	if got, want := attempt.Metadata[beadmeta.ControlForMetadataKey], "outer.iteration.1.inner.iteration.1.work"; got != want {
+		t.Errorf("nested retry attempt gc.control_for = %q, want %q", got, want)
+	}
+}
+
+func TestApplyRalph_ThreeNestedBodiesKeepInnermostIterationScope(t *testing.T) {
+	expanded, err := ApplyRalph([]*Step{
+		{
+			ID:    "outer",
+			Title: "Outer",
+			Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "outer.sh"}},
+			Children: []*Step{
+				{
+					ID:    "middle",
+					Title: "Middle",
+					Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "middle.sh"}},
+					Children: []*Step{
+						{
+							ID:    "inner",
+							Title: "Inner",
+							Ralph: &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "inner.sh"}},
+							Children: []*Step{
+								{ID: "work", Title: "Work"},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyRalph: %v", err)
+	}
+
+	work := requireRalphStep(t, expanded, "outer.iteration.1.middle.iteration.1.inner.iteration.1.work")
+	if got, want := work.Metadata[beadmeta.ScopeRefMetadataKey], "outer.iteration.1.middle.iteration.1.inner.iteration.1"; got != want {
+		t.Errorf("innermost body gc.scope_ref = %q, want %q", got, want)
+	}
+}
+
+func requireRalphStep(t *testing.T, steps []*Step, id string) *Step {
+	t.Helper()
+	for _, step := range steps {
+		if step.ID == id {
+			return step
+		}
+	}
+	ids := make([]string, 0, len(steps))
+	for _, step := range steps {
+		ids = append(ids, step.ID)
+	}
+	t.Fatalf("missing step %q; got %v", id, ids)
+	return nil
 }
