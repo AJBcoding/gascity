@@ -41,12 +41,14 @@ const (
 
 // attemptEvaluation is the strategy-produced classification of a closed
 // attempt/iteration bead: its disposition plus the values recorded in the
-// attempt log and (for hard/exhaust closures) the failure reason.
+// attempt log and (for hard/exhaust closures) the failure reason. A non-nil
+// passOutputJSON overrides the original attempt snapshot on pass.
 type attemptEvaluation struct {
-	disposition attemptDisposition
-	logOutcome  string // value recorded in the attempt log
-	logDetail   string // detail recorded in the attempt log (reason/stderr)
-	reason      string // failure reason stamped on terminal metadata
+	disposition    attemptDisposition
+	logOutcome     string  // value recorded in the attempt log
+	logDetail      string  // detail recorded in the attempt log (reason/stderr)
+	reason         string  // failure reason stamped on terminal metadata
+	passOutputJSON *string // refreshed output; nil preserves legacy/retry behavior
 }
 
 // controlAttemptStrategy is the per-kind seam over the shared attempt loop.
@@ -158,7 +160,11 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 			beadmeta.OutcomeMetadataKey:    beadmeta.OutcomePass,
 		}
 		clearControllerSpawnErrorMetadata(closeMetadata)
-		if outputJSON := attempt.Metadata[beadmeta.OutputJSONMetadataKey]; outputJSON != "" {
+		outputJSON := attempt.Metadata[beadmeta.OutputJSONMetadataKey]
+		if eval.passOutputJSON != nil {
+			outputJSON = *eval.passOutputJSON
+		}
+		if outputJSON != "" {
 			closeMetadata[beadmeta.OutputJSONMetadataKey] = outputJSON
 		}
 		if strategy.onPass != nil {
@@ -374,7 +380,13 @@ func evaluateOptInRalphIteration(store beads.Store, bead, iteration beads.Bead, 
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
 	}
-	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr, reason: checkResult.Stderr}
+	outputJSON := subject.Metadata[beadmeta.OutputJSONMetadataKey]
+	eval := attemptEvaluation{
+		logOutcome:     checkResult.Outcome,
+		logDetail:      checkResult.Stderr,
+		reason:         checkResult.Stderr,
+		passOutputJSON: &outputJSON,
+	}
 	disposition, err := classifyRalphCheckDisposition(checkResult, policy)
 	if err != nil {
 		return attemptEvaluation{}, fmt.Errorf("%s: %w", bead.ID, err)
