@@ -185,9 +185,6 @@ func TestApplyRalph_NestedWithChildren(t *testing.T) {
 	if review.ID != "review-loop.iteration.1.review" {
 		t.Errorf("review.ID = %q, want review-loop.iteration.1.review", review.ID)
 	}
-	if scopeRef := review.Metadata[beadmeta.ScopeRefMetadataKey]; scopeRef != "review-loop.iteration.1" {
-		t.Errorf("review gc.scope_ref = %q, want review-loop.iteration.1", scopeRef)
-	}
 	if apply.ID != "review-loop.iteration.1.apply" {
 		t.Errorf("apply.ID = %q, want review-loop.iteration.1.apply", apply.ID)
 	}
@@ -821,6 +818,25 @@ func TestApplyRalph_NamespacesNestedControlForAcrossBody(t *testing.T) {
 	}
 	if got != wantCF {
 		t.Fatalf("nested attempt gc.control_for = %q, want %q (must equal inner control gc.step_ref)", got, wantCF)
+	}
+}
+
+func TestApplyRalph_PlainBodyStepUsesOuterIterationScope(t *testing.T) {
+	expanded, err := ApplyRalph([]*Step{
+		{
+			ID:       "outer",
+			Title:    "Outer",
+			Ralph:    &RalphSpec{MaxAttempts: 2, Check: &RalphCheckSpec{Mode: "exec", Path: "outer.sh"}},
+			Children: []*Step{{ID: "work", Title: "Work"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("ApplyRalph: %v", err)
+	}
+
+	work := requireRalphStep(t, expanded, "outer.iteration.1.work")
+	if got, want := work.Metadata[beadmeta.ScopeRefMetadataKey], "outer.iteration.1"; got != want {
+		t.Errorf("plain body gc.scope_ref = %q, want %q", got, want)
 	}
 }
 
