@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -471,14 +472,22 @@ func parseCanonicalRalphExitCodes(field, raw string) ([]int, map[int]struct{}, e
 		}
 		seen[code] = struct{}{}
 	}
-	canonical, err := json.Marshal(codes)
-	if err != nil {
-		return nil, nil, fmt.Errorf("%s: encoding canonical JSON array: %w", field, err)
-	}
-	if raw != string(canonical) {
+	if raw != canonicalRalphExitCodesJSON(codes) {
 		return nil, nil, fmt.Errorf("%s: noncanonical JSON array", field)
 	}
 	return codes, seen, nil
+}
+
+func canonicalRalphExitCodesJSON(codes []int) string {
+	canonical := append([]int(nil), codes...)
+	sort.Ints(canonical)
+	encoded, err := json.Marshal(canonical)
+	if err != nil {
+		// json.Marshal cannot fail for []int; keep the impossible failure loud
+		// rather than emitting policy metadata that the runtime cannot parse.
+		panic(fmt.Sprintf("encoding canonical ralph exit codes: %v", err))
+	}
+	return string(encoded)
 }
 
 func malformedRalphExitCodePolicyError(beadID string, err error) error {
@@ -1129,6 +1138,10 @@ func buildAttemptRecipe(step *formula.Step, control beads.Bead, attemptNum int) 
 					childMeta[beadmeta.CheckModeMetadataKey] = child.Ralph.Check.Mode
 					childMeta[beadmeta.CheckPathMetadataKey] = child.Ralph.Check.Path
 					childMeta[beadmeta.CheckTimeoutMetadataKey] = child.Ralph.Check.Timeout
+					if child.Ralph.Check.ContinueExitCodes != nil && child.Ralph.Check.PendingExitCodes != nil {
+						childMeta[beadmeta.ContinueExitCodesMetadataKey] = canonicalRalphExitCodesJSON(child.Ralph.Check.ContinueExitCodes)
+						childMeta[beadmeta.PendingExitCodesMetadataKey] = canonicalRalphExitCodesJSON(child.Ralph.Check.PendingExitCodes)
+					}
 					if child.Timeout != "" {
 						childMeta[beadmeta.StepTimeoutMetadataKey] = child.Timeout
 					}

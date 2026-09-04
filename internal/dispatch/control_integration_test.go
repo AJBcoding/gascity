@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -669,6 +670,14 @@ func TestBuildAttemptRecipeEnrichesNestedRalphChildren(t *testing.T) {
 	if innerStep.Metadata["gc.step_timeout"] != "2m" {
 		t.Errorf("inner gc.step_timeout = %q, want 2m", innerStep.Metadata["gc.step_timeout"])
 	}
+	for _, key := range []string{
+		beadmeta.ContinueExitCodesMetadataKey,
+		beadmeta.PendingExitCodesMetadataKey,
+	} {
+		if value, exists := innerStep.Metadata[key]; exists {
+			t.Errorf("legacy inner %s = %q, want key absent", key, value)
+		}
+	}
 	// Frozen step spec stored as a separate spec bead.
 	var innerSpecStep *formula.RecipeStep
 	for i := range recipe.Steps {
@@ -750,6 +759,189 @@ func TestBuildNestedControlSeedMatchesCompiledInnerScope(t *testing.T) {
 	seededRelative := strings.TrimPrefix(seededScope, "mol.outer.iteration.2.")
 	if compiledRelative != seededRelative {
 		t.Errorf("relative inner scope differs: compile-time %q, runtime seed %q", compiledRelative, seededRelative)
+	}
+}
+
+// TestBuildAttemptRecipeNestedRalphExitPolicyMatchesCompiledControl catches
+// outer-iteration re-seeding dropping or noncanonically encoding the opted-in
+// inner ralph control's exit-disposition policy.
+func TestBuildAttemptRecipeNestedRalphExitPolicyMatchesCompiledControl(t *testing.T) {
+	t.Parallel()
+
+	inner := &formula.Step{
+		ID:    "inner",
+		Title: "Inner",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 3,
+			Check: &formula.RalphCheckSpec{
+				Mode:              "exec",
+				Path:              "inner.sh",
+				ContinueExitCodes: []int{7, 1},
+				PendingExitCodes:  []int{24, 20},
+			},
+		},
+	}
+	outer := &formula.Step{
+		ID:    "mol.outer",
+		Title: "Outer",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 2,
+			Check:       &formula.RalphCheckSpec{Mode: "exec", Path: "outer.sh"},
+		},
+		Children: []*formula.Step{inner},
+	}
+
+	compiled, err := formula.ApplyRalph([]*formula.Step{outer})
+	if err != nil {
+		t.Fatalf("ApplyRalph: %v", err)
+	}
+	var compiledInner *formula.Step
+	for _, step := range compiled {
+		if step.ID == "mol.outer.iteration.1.inner" {
+			compiledInner = step
+			break
+		}
+	}
+	if compiledInner == nil {
+		t.Fatal("compile-time iteration-1 inner control not found")
+	}
+
+	runtimeRecipe := buildAttemptRecipe(outer, beads.Bead{
+		ID: "gc-outer",
+		Metadata: map[string]string{
+			beadmeta.StepIDMetadataKey:  "mol.outer",
+			beadmeta.StepRefMetadataKey: "mol.outer",
+		},
+	}, 2)
+	var runtimeInner *formula.RecipeStep
+	for i := range runtimeRecipe.Steps {
+		if runtimeRecipe.Steps[i].ID == "mol.outer.iteration.2.inner" {
+			runtimeInner = &runtimeRecipe.Steps[i]
+			break
+		}
+	}
+	if runtimeInner == nil {
+		t.Fatal("runtime iteration-2 inner control not found")
+	}
+
+	for _, tc := range []struct {
+		key  string
+		want string
+	}{
+		{key: beadmeta.ContinueExitCodesMetadataKey, want: `[1,7]`},
+		{key: beadmeta.PendingExitCodesMetadataKey, want: `[20,24]`},
+	} {
+		compiledValue := compiledInner.Metadata[tc.key]
+		if compiledValue != tc.want {
+			t.Fatalf("compile-time %s = %q, want %q", tc.key, compiledValue, tc.want)
+		}
+		if runtimeValue := runtimeInner.Metadata[tc.key]; runtimeValue != compiledValue {
+			t.Fatalf("runtime %s = %q, want byte-identical compile-time value %q", tc.key, runtimeValue, compiledValue)
+		}
+	}
+	if got := inner.Ralph.Check.ContinueExitCodes; len(got) != 2 || got[0] != 7 || got[1] != 1 {
+		t.Fatalf("source continue exit codes mutated to %v, want [7 1]", got)
+	}
+	if got := inner.Ralph.Check.PendingExitCodes; len(got) != 2 || got[0] != 24 || got[1] != 20 {
+		t.Fatalf("source pending exit codes mutated to %v, want [24 20]", got)
+	}
+}
+
+// TestProcessControlReseededNestedRalphPendingExitRemainsPending catches a
+// re-seeded opted-in inner control treating its pending exit as legacy
+// continuation and spawning another inner iteration.
+func TestProcessControlReseededNestedRalphPendingExitRemainsPending(t *testing.T) {
+	t.Parallel()
+
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "inner.sh"), []byte("#!/bin/sh\nexit 20\n"), 0o755); err != nil {
+		t.Fatalf("write inner check: %v", err)
+	}
+	inner := &formula.Step{
+		ID:    "inner",
+		Title: "Inner",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 3,
+			Check: &formula.RalphCheckSpec{
+				Mode:              "exec",
+				Path:              "inner.sh",
+				Timeout:           "30s",
+				ContinueExitCodes: []int{1},
+				PendingExitCodes:  []int{20, 24},
+			},
+		},
+	}
+	outer := &formula.Step{
+		ID:    "outer",
+		Title: "Outer",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 3,
+			Check:       &formula.RalphCheckSpec{Mode: "exec", Path: "outer.sh"},
+		},
+		Children: []*formula.Step{inner},
+	}
+	specJSON, err := json.Marshal(outer)
+	if err != nil {
+		t.Fatalf("marshal outer source step: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	root := mustCreate(t, store, beads.Bead{
+		Title:    "workflow",
+		Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow},
+	})
+	outerControl := mustCreate(t, store, beads.Bead{
+		Title: "outer ralph",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:           beadmeta.KindRalph,
+			beadmeta.RootBeadIDMetadataKey:     root.ID,
+			beadmeta.StepIDMetadataKey:         "outer",
+			beadmeta.StepRefMetadataKey:        "mol.outer",
+			beadmeta.MaxAttemptsMetadataKey:    "3",
+			beadmeta.SourceStepSpecMetadataKey: string(specJSON),
+			beadmeta.ControlEpochMetadataKey:   "1",
+		},
+	})
+	opts := testProcessOptionsWithControlDispatcher("")
+	opts.CityPath = cityPath
+	opts.StorePath = cityPath
+	opts.Tracef = t.Logf
+	if err := spawnNextAttempt(context.Background(), store, outerControl, 2, opts); err != nil {
+		t.Fatalf("spawn outer iteration 2: %v", err)
+	}
+
+	innerControl := findAttemptByRef(t, store, root.ID, "mol.outer.iteration.2.inner")
+	if innerControl.ID == "" {
+		t.Fatal("re-seeded iteration-2 inner control not found")
+	}
+	innerIteration := findAttemptByRef(t, store, root.ID, "mol.outer.iteration.2.inner.iteration.1")
+	if innerIteration.ID == "" {
+		t.Fatal("re-seeded inner iteration 1 not found")
+	}
+	if err := store.SetMetadataBatch(innerIteration.ID, map[string]string{
+		beadmeta.OutcomeMetadataKey: beadmeta.OutcomePass,
+	}); err != nil {
+		t.Fatalf("mark inner iteration passed: %v", err)
+	}
+	mustClose(t, store, innerIteration.ID)
+	beforeCount := ralphFixtureBeadCount(t, store)
+
+	result, err := ProcessControl(store, mustGet(t, store, innerControl.ID), opts)
+	if !errors.Is(err, ErrControlPending) {
+		t.Fatalf("ProcessControl err = %v, want %v (result=%+v)", err, ErrControlPending, result)
+	}
+	if result.Processed || result.Action != "" || result.Created != 0 {
+		t.Fatalf("pending result = %+v, want zero result", result)
+	}
+	if got := ralphFixtureBeadCount(t, store); got != beforeCount {
+		t.Fatalf("pending bead count = %d, want unchanged %d", got, beforeCount)
+	}
+	if next := findAttemptByRef(t, store, root.ID, "mol.outer.iteration.2.inner.iteration.2"); next.ID != "" {
+		t.Fatalf("unexpected continued inner iteration: %+v", next)
 	}
 }
 
