@@ -566,6 +566,75 @@ func TestBuildAttemptRecipeEnrichesNestedRalphChildren(t *testing.T) {
 	}
 }
 
+func TestBuildNestedControlSeedMatchesCompiledInnerScope(t *testing.T) {
+	t.Parallel()
+
+	inner := &formula.Step{
+		ID:    "inner",
+		Title: "Inner",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 2,
+			Check:       &formula.RalphCheckSpec{Mode: "exec", Path: "inner.sh"},
+		},
+		Children: []*formula.Step{
+			{ID: "work", Title: "Work", Type: "task"},
+		},
+	}
+	outer := &formula.Step{
+		ID:    "mol.outer",
+		Title: "Outer",
+		Type:  "task",
+		Ralph: &formula.RalphSpec{
+			MaxAttempts: 2,
+			Check:       &formula.RalphCheckSpec{Mode: "exec", Path: "outer.sh"},
+		},
+		Children: []*formula.Step{inner},
+	}
+
+	compiled, err := formula.ApplyRalph([]*formula.Step{outer})
+	if err != nil {
+		t.Fatalf("ApplyRalph: %v", err)
+	}
+	var compiledWork *formula.Step
+	for _, step := range compiled {
+		if step.ID == "mol.outer.iteration.1.inner.iteration.1.work" {
+			compiledWork = step
+			break
+		}
+	}
+	if compiledWork == nil {
+		t.Fatal("compile-time inner body work step not found")
+	}
+
+	seedSteps, _ := buildNestedControlSeed(inner, "mol.outer.iteration.2.inner")
+	var seededWork *formula.RecipeStep
+	for i := range seedSteps {
+		if seedSteps[i].ID == "mol.outer.iteration.2.inner.iteration.1.work" {
+			seededWork = &seedSteps[i]
+			break
+		}
+	}
+	if seededWork == nil {
+		t.Fatal("runtime nested seed inner body work step not found")
+	}
+
+	compiledScope := compiledWork.Metadata[beadmeta.ScopeRefMetadataKey]
+	if want := "mol.outer.iteration.1.inner.iteration.1"; compiledScope != want {
+		t.Errorf("compile-time gc.scope_ref = %q, want %q", compiledScope, want)
+	}
+	seededScope := seededWork.Metadata[beadmeta.ScopeRefMetadataKey]
+	if want := "mol.outer.iteration.2.inner.iteration.1"; seededScope != want {
+		t.Errorf("runtime seed gc.scope_ref = %q, want %q", seededScope, want)
+	}
+
+	compiledRelative := strings.TrimPrefix(compiledScope, "mol.outer.iteration.1.")
+	seededRelative := strings.TrimPrefix(seededScope, "mol.outer.iteration.2.")
+	if compiledRelative != seededRelative {
+		t.Errorf("relative inner scope differs: compile-time %q, runtime seed %q", compiledRelative, seededRelative)
+	}
+}
+
 // TestSpawnNextAttemptPropagatesRoutingMetadata verifies that
 // spawnNextAttempt stamps gc.routed_to metadata from gc.execution_routed_to.
 func TestSpawnNextAttemptPropagatesRoutingMetadata(t *testing.T) {

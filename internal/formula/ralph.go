@@ -200,8 +200,12 @@ func namespaceRalphBodySteps(steps []*Step, iterationID string, owner *Step, att
 			if childStepID == "" {
 				childStepID = node.ID
 			}
+			scopeRef := iterationID
+			if existing := node.Metadata[beadmeta.ScopeRefMetadataKey]; bodyIDs[existing] {
+				scopeRef = iterationID + "." + existing
+			}
 			childMeta := map[string]string{
-				beadmeta.ScopeRefMetadataKey:    iterationID,
+				beadmeta.ScopeRefMetadataKey:    scopeRef,
 				beadmeta.OnFailMetadataKey:      metadataDefault(node.Metadata, beadmeta.OnFailMetadataKey, "abort_scope"),
 				beadmeta.ScopeRoleMetadataKey:   metadataDefault(node.Metadata, beadmeta.ScopeRoleMetadataKey, beadmeta.ScopeRoleMember),
 				beadmeta.StepIDMetadataKey:      childStepID,
