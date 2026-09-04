@@ -712,6 +712,15 @@ type RalphCheckSpec struct {
 
 	// Timeout bounds script execution (for example "2m").
 	Timeout string `json:"timeout,omitempty" toml:"timeout,omitempty"`
+
+	// ContinueExitCodes are completed nonzero check exits that spawn the next
+	// Ralph iteration. It must be paired with PendingExitCodes.
+	ContinueExitCodes []int `json:"continue_exit_codes,omitempty" toml:"continue_exit_codes,omitempty"`
+
+	// PendingExitCodes are completed nonzero check exits that leave the same
+	// iteration pending for another controller pass. It must be paired with
+	// ContinueExitCodes.
+	PendingExitCodes []int `json:"pending_exit_codes,omitempty" toml:"pending_exit_codes,omitempty"`
 }
 
 // RetrySpec defines first-class transient retry semantics for an executable step.
@@ -1506,6 +1515,7 @@ func validateRalph(spec *RalphSpec, errs *[]string, prefix string, step *Step) {
 		if err := validateRalphCheckTimeout(fmt.Sprintf("%s.check.check", prefix), spec.Check.Timeout, nil, true); err != "" {
 			*errs = append(*errs, err)
 		}
+		validateRalphExitCodePolicy(spec.Check, errs, fmt.Sprintf("%s.check.check", prefix))
 	}
 
 	if step.Loop != nil {
@@ -1526,6 +1536,49 @@ func validateRalph(spec *RalphSpec, errs *[]string, prefix string, step *Step) {
 	if step.Retry != nil {
 		*errs = append(*errs, fmt.Sprintf("%s: check cannot be combined with retry", prefix))
 	}
+}
+
+func validateRalphExitCodePolicy(check *RalphCheckSpec, errs *[]string, prefix string) {
+	continuePresent := check.ContinueExitCodes != nil
+	pendingPresent := check.PendingExitCodes != nil
+	if !continuePresent && !pendingPresent {
+		return
+	}
+	if !continuePresent {
+		*errs = append(*errs, fmt.Sprintf("%s.continue_exit_codes: required when pending_exit_codes is set", prefix))
+	}
+	if !pendingPresent {
+		*errs = append(*errs, fmt.Sprintf("%s.pending_exit_codes: required when continue_exit_codes is set", prefix))
+	}
+	if !continuePresent || !pendingPresent {
+		return
+	}
+
+	continueSet := validateRalphExitCodes(check.ContinueExitCodes, errs, prefix+".continue_exit_codes")
+	pendingSet := validateRalphExitCodes(check.PendingExitCodes, errs, prefix+".pending_exit_codes")
+	for code := range pendingSet {
+		if _, overlap := continueSet[code]; overlap {
+			*errs = append(*errs, fmt.Sprintf("%s.pending_exit_codes: exit code %d also appears in continue_exit_codes", prefix, code))
+		}
+	}
+}
+
+func validateRalphExitCodes(codes []int, errs *[]string, field string) map[int]struct{} {
+	seen := make(map[int]struct{}, len(codes))
+	if len(codes) == 0 {
+		*errs = append(*errs, fmt.Sprintf("%s: must be nonempty", field))
+		return seen
+	}
+	for _, code := range codes {
+		if code < 1 || code > 255 {
+			*errs = append(*errs, fmt.Sprintf("%s: exit code %d must be between 1 and 255", field, code))
+		}
+		if _, duplicate := seen[code]; duplicate {
+			*errs = append(*errs, fmt.Sprintf("%s: duplicate exit code %d", field, code))
+		}
+		seen[code] = struct{}{}
+	}
+	return seen
 }
 
 func validateRetry(spec *RetrySpec, errs *[]string, prefix string, step *Step) {

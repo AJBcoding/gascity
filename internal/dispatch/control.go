@@ -29,11 +29,14 @@ const (
 	// attemptPass closes the control as passed.
 	attemptPass attemptDisposition = iota
 	// attemptHardFail closes the control as a terminal hard failure regardless
-	// of attempts remaining (only the retry classifier produces this).
+	// of attempts remaining.
 	attemptHardFail
 	// attemptContinue spawns the next attempt when attempts remain, or disposes
 	// of the exhausted control via the strategy when max_attempts is reached.
 	attemptContinue
+	// attemptPending leaves the closed attempt and open control unchanged so a
+	// later controller pass can evaluate the same check again.
+	attemptPending
 )
 
 // attemptEvaluation is the strategy-produced classification of a closed
@@ -108,8 +111,8 @@ func processRalphControl(store beads.Store, bead beads.Bead, opts ProcessOptions
 // processAttemptControl is the shared retry/ralph control loop: parse
 // max_attempts, find the latest attempt, quarantine a malformed graph, drive a
 // pending attempt to convergence, then classify the closed attempt via the
-// strategy and pass / hard-fail / spawn-next / exhaust accordingly. The three
-// per-kind seams live in controlAttemptStrategy.
+// strategy and pass / hard-fail / pending / spawn-next / exhaust accordingly.
+// The three per-kind seams live in controlAttemptStrategy.
 func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptions, strategy controlAttemptStrategy) (ControlResult, error) {
 	maxAttempts, err := strconv.Atoi(bead.Metadata[beadmeta.MaxAttemptsMetadataKey])
 	if err != nil || maxAttempts < 1 {
@@ -139,6 +142,9 @@ func processAttemptControl(store beads.Store, bead beads.Bead, opts ProcessOptio
 	eval, err := strategy.evaluate(store, bead, attempt, attemptNum, opts)
 	if err != nil {
 		return ControlResult{}, err
+	}
+	if eval.disposition == attemptPending {
+		return ControlResult{}, ErrControlPending
 	}
 	attemptLog, err := appendAttemptLogValue(bead.Metadata[beadmeta.AttemptLogMetadataKey], attemptNum, eval.logOutcome, eval.logDetail, opts.tracef)
 	if err != nil {
@@ -273,11 +279,16 @@ func evaluateRetryAttempt(store beads.Store, bead, attempt beads.Bead, _ int, op
 	return eval, nil
 }
 
-// evaluateRalphIteration propagates the iteration's non-gc metadata onto the
-// ralph control, reloads the control so the check sees the updated values, and
-// runs the check script. A GatePass closes the control; anything else spawns
-// the next iteration or exhausts.
+// evaluateRalphIteration preserves legacy all-nonpass continuation when no
+// exit policy is stamped. Opted-in controls validate the policy and fresh
+// subject before propagation and classify the executed check by exit code.
 func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
+	_, hasContinuePolicy := bead.Metadata[beadmeta.ContinueExitCodesMetadataKey]
+	_, hasPendingPolicy := bead.Metadata[beadmeta.PendingExitCodesMetadataKey]
+	if hasContinuePolicy || hasPendingPolicy {
+		return evaluateOptInRalphIteration(store, bead, iteration, iterationNum, opts)
+	}
+
 	// Propagate non-gc metadata from the iteration to the ralph control BEFORE
 	// running the check. This makes the iteration's output (e.g.,
 	// review.verdict) visible on the ralph bead for check scripts that read
@@ -303,6 +314,157 @@ func evaluateRalphIteration(store beads.Store, bead, iteration beads.Bead, itera
 		eval.disposition = attemptContinue
 	}
 	return eval, nil
+}
+
+type ralphExitCodePolicy struct {
+	continueCodes map[int]struct{}
+	pendingCodes  map[int]struct{}
+	continueJSON  string
+	pendingJSON   string
+}
+
+func evaluateOptInRalphIteration(store beads.Store, bead, iteration beads.Bead, iterationNum int, opts ProcessOptions) (attemptEvaluation, error) {
+	control, err := store.Get(bead.ID)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: reloading exit policy: %w", bead.ID, err)
+	}
+	policy, optedIn, err := parseRalphExitCodePolicy(control.Metadata)
+	if err != nil || !optedIn {
+		if err == nil {
+			err = errors.New("exit policy disappeared before evaluation")
+		}
+		return attemptEvaluation{}, malformedRalphExitCodePolicyError(bead.ID, err)
+	}
+
+	// Re-read by the exact full ID selected by findLatestAttempt. This snapshot
+	// is the sole subject for classification, propagation, and check execution.
+	subject, err := store.Get(iteration.ID)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: reloading iteration %s: %w", bead.ID, iteration.ID, err)
+	}
+	if subject.Metadata[beadmeta.OutcomeMetadataKey] == beadmeta.OutcomeFail {
+		const reason = "ralph_subject_failed_before_check"
+		return attemptEvaluation{
+			disposition: attemptHardFail,
+			logOutcome:  "hard",
+			logDetail:   reason,
+			reason:      reason,
+		}, nil
+	}
+
+	if err := propagateRetrySubjectMetadata(store, bead.ID, subject); err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: propagating iteration metadata: %w", bead.ID, err)
+	}
+	reloaded, err := store.Get(bead.ID)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: reloading after propagation: %w", bead.ID, err)
+	}
+	revalidated, optedIn, err := parseRalphExitCodePolicy(reloaded.Metadata)
+	if err != nil || !optedIn {
+		if err == nil {
+			err = errors.New("exit policy disappeared after propagation")
+		}
+		return attemptEvaluation{}, malformedRalphExitCodePolicyError(bead.ID, err)
+	}
+	if revalidated.continueJSON != policy.continueJSON || revalidated.pendingJSON != policy.pendingJSON {
+		return attemptEvaluation{}, malformedRalphExitCodePolicyError(bead.ID, errors.New("exit policy changed during propagation"))
+	}
+
+	checkResult, err := runRalphCheck(store, reloaded, subject, iterationNum, opts)
+	if err != nil {
+		return attemptEvaluation{}, fmt.Errorf("%s: running check: %w", bead.ID, err)
+	}
+	eval := attemptEvaluation{logOutcome: checkResult.Outcome, logDetail: checkResult.Stderr, reason: checkResult.Stderr}
+	switch checkResult.Outcome {
+	case convergence.GatePass:
+		eval.disposition = attemptPass
+	case convergence.GateError, convergence.GateTimeout:
+		eval.disposition = attemptPending
+	case convergence.GateFail:
+		if checkResult.ExitCode != nil {
+			if _, ok := policy.continueCodes[*checkResult.ExitCode]; ok {
+				eval.disposition = attemptContinue
+				return eval, nil
+			}
+			if _, ok := policy.pendingCodes[*checkResult.ExitCode]; ok {
+				eval.disposition = attemptPending
+				return eval, nil
+			}
+		}
+		eval.disposition = attemptHardFail
+	default:
+		return attemptEvaluation{}, fmt.Errorf("%s: unsupported ralph check outcome %q", bead.ID, checkResult.Outcome)
+	}
+	return eval, nil
+}
+
+func parseRalphExitCodePolicy(metadata map[string]string) (ralphExitCodePolicy, bool, error) {
+	continueJSON, hasContinue := metadata[beadmeta.ContinueExitCodesMetadataKey]
+	pendingJSON, hasPending := metadata[beadmeta.PendingExitCodesMetadataKey]
+	if !hasContinue && !hasPending {
+		return ralphExitCodePolicy{}, false, nil
+	}
+	if !hasContinue {
+		return ralphExitCodePolicy{}, false, fmt.Errorf("%s is required when %s is present", beadmeta.ContinueExitCodesMetadataKey, beadmeta.PendingExitCodesMetadataKey)
+	}
+	if !hasPending {
+		return ralphExitCodePolicy{}, false, fmt.Errorf("%s is required when %s is present", beadmeta.PendingExitCodesMetadataKey, beadmeta.ContinueExitCodesMetadataKey)
+	}
+
+	_, continueSet, err := parseCanonicalRalphExitCodes(beadmeta.ContinueExitCodesMetadataKey, continueJSON)
+	if err != nil {
+		return ralphExitCodePolicy{}, false, err
+	}
+	pendingCodes, pendingSet, err := parseCanonicalRalphExitCodes(beadmeta.PendingExitCodesMetadataKey, pendingJSON)
+	if err != nil {
+		return ralphExitCodePolicy{}, false, err
+	}
+	for _, code := range pendingCodes {
+		if _, overlap := continueSet[code]; overlap {
+			return ralphExitCodePolicy{}, false, fmt.Errorf("%s exit code %d also appears in %s", beadmeta.PendingExitCodesMetadataKey, code, beadmeta.ContinueExitCodesMetadataKey)
+		}
+	}
+	return ralphExitCodePolicy{
+		continueCodes: continueSet,
+		pendingCodes:  pendingSet,
+		continueJSON:  continueJSON,
+		pendingJSON:   pendingJSON,
+	}, true, nil
+}
+
+func parseCanonicalRalphExitCodes(field, raw string) ([]int, map[int]struct{}, error) {
+	var codes []int
+	if err := json.Unmarshal([]byte(raw), &codes); err != nil {
+		return nil, nil, fmt.Errorf("%s: invalid JSON array: %w", field, err)
+	}
+	if len(codes) == 0 {
+		return nil, nil, fmt.Errorf("%s: must be a nonempty JSON array", field)
+	}
+	seen := make(map[int]struct{}, len(codes))
+	for i, code := range codes {
+		if code < 1 || code > 255 {
+			return nil, nil, fmt.Errorf("%s: exit code %d must be between 1 and 255", field, code)
+		}
+		if _, duplicate := seen[code]; duplicate {
+			return nil, nil, fmt.Errorf("%s: duplicate exit code %d", field, code)
+		}
+		if i > 0 && code < codes[i-1] {
+			return nil, nil, fmt.Errorf("%s: exit codes must be sorted", field)
+		}
+		seen[code] = struct{}{}
+	}
+	canonical, err := json.Marshal(codes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("%s: encoding canonical JSON array: %w", field, err)
+	}
+	if raw != string(canonical) {
+		return nil, nil, fmt.Errorf("%s: noncanonical JSON array", field)
+	}
+	return codes, seen, nil
+}
+
+func malformedRalphExitCodePolicyError(beadID string, err error) error {
+	return fmt.Errorf("%w: %s: invalid ralph exit policy: %w", ErrControlGraphMalformed, beadID, err)
 }
 
 func ensureBlockingDependency(store beads.Store, issueID, dependsOnID string) error {

@@ -1,7 +1,9 @@
 package formula
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -77,6 +79,22 @@ func expandRalph(step *Step) ([]*Step, error) {
 		beadmeta.CheckPathMetadataKey:    step.Ralph.Check.Path,
 		beadmeta.CheckTimeoutMetadataKey: step.Ralph.Check.Timeout,
 		beadmeta.ControlEpochMetadataKey: "1",
+	}
+	if step.Ralph.Check.ContinueExitCodes != nil && step.Ralph.Check.PendingExitCodes != nil {
+		continueCodes := append([]int(nil), step.Ralph.Check.ContinueExitCodes...)
+		pendingCodes := append([]int(nil), step.Ralph.Check.PendingExitCodes...)
+		sort.Ints(continueCodes)
+		sort.Ints(pendingCodes)
+		continueJSON, err := json.Marshal(continueCodes)
+		if err != nil {
+			return nil, fmt.Errorf("expanding ralph %q continue_exit_codes: %w", step.ID, err)
+		}
+		pendingJSON, err := json.Marshal(pendingCodes)
+		if err != nil {
+			return nil, fmt.Errorf("expanding ralph %q pending_exit_codes: %w", step.ID, err)
+		}
+		controlMeta[beadmeta.ContinueExitCodesMetadataKey] = string(continueJSON)
+		controlMeta[beadmeta.PendingExitCodesMetadataKey] = string(pendingJSON)
 	}
 	if step.Timeout != "" {
 		controlMeta[beadmeta.StepTimeoutMetadataKey] = step.Timeout

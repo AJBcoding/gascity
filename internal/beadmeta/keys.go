@@ -60,6 +60,7 @@ const (
 	// claimed→started latency-watch transitions (OBS-001).
 	ClaimedAtMetadataKey                 = "gc.claimed_at"
 	ClosedByAttemptMetadataKey           = "gc.closed_by_attempt"
+	ContinueExitCodesMetadataKey         = "gc.continue_exit_codes"
 	ContinuationGroupMetadataKey         = "gc.continuation_group"
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
@@ -172,6 +173,7 @@ const (
 	PackMetadataKey                      = "gc.pack"
 	PackRootMetadataKey                  = "gc.pack_root"
 	PackWorkspaceMetadataKey             = "gc.pack_workspace"
+	PendingExitCodesMetadataKey          = "gc.pending_exit_codes"
 	PerDispatchModelMetadataKey          = "gc.per_dispatch_model"
 	RalphStepIDMetadataKey               = "gc.ralph_step_id"
 	ReasoningMetadataKey                 = "gc.reasoning"
@@ -374,6 +376,7 @@ var KnownMetadataKeys = []string{
 	CityPathMetadataKey,
 	ClaimedAtMetadataKey,
 	ClosedByAttemptMetadataKey,
+	ContinueExitCodesMetadataKey,
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
 	ControlForMetadataKey,
@@ -461,6 +464,7 @@ var KnownMetadataKeys = []string{
 	PackMetadataKey,
 	PackRootMetadataKey,
 	PackWorkspaceMetadataKey,
+	PendingExitCodesMetadataKey,
 	PerDispatchModelMetadataKey,
 	RalphStepIDMetadataKey,
 	ReasoningMetadataKey,

@@ -167,6 +167,135 @@ func TestRetryLifecycleTransientThenPass(t *testing.T) {
 	}
 }
 
+// TestProcessControlOptInRalphExitDispositionIntegration catches the public
+// controller entrypoint losing the opt-in result mapping or spawning for any
+// result class other than an actually executed continue exit.
+func TestProcessControlOptInRalphExitDispositionIntegration(t *testing.T) {
+	tests := []struct {
+		name        string
+		script      string
+		timeout     string
+		wantAction  string
+		wantErr     error
+		wantCreated int
+	}{
+		{name: "pass", script: "#!/bin/sh\nexit 0\n", timeout: "30s", wantAction: "pass"},
+		{name: "continue", script: "#!/bin/sh\nexit 1\n", timeout: "30s", wantAction: "retry", wantCreated: 1},
+		{name: "pending 20", script: "#!/bin/sh\nexit 20\n", timeout: "30s", wantErr: ErrControlPending},
+		{name: "pending 24", script: "#!/bin/sh\nexit 24\n", timeout: "30s", wantErr: ErrControlPending},
+		{name: "hard 10", script: "#!/bin/sh\nexit 10\n", timeout: "30s", wantAction: "hard-fail"},
+		{name: "hard 21", script: "#!/bin/sh\nexit 21\n", timeout: "30s", wantAction: "hard-fail"},
+		{name: "hard 65", script: "#!/bin/sh\nexit 65\n", timeout: "30s", wantAction: "hard-fail"},
+		{name: "hard 70", script: "#!/bin/sh\nexit 70\n", timeout: "30s", wantAction: "hard-fail"},
+		{name: "hard unlisted", script: "#!/bin/sh\nexit 42\n", timeout: "30s", wantAction: "hard-fail"},
+		{name: "hard signal", script: "#!/bin/sh\nkill -TERM $$\n", timeout: "30s", wantAction: "hard-fail"},
+		{name: "gate error", script: "#!/definitely/missing/interpreter\nexit 0\n", timeout: "30s", wantErr: ErrControlPending},
+		{name: "gate timeout", script: "#!/bin/sh\nwhile :; do :; done\n", timeout: "10s", wantErr: ErrControlPending},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newRalphCheckFixture(t, `[1]`, `[20,24]`, "", tc.script, tc.timeout, 3)
+			beforeCount := ralphFixtureBeadCount(t, fixture.store)
+			result, err := ProcessControl(fixture.store, mustGet(t, fixture.store, fixture.control.ID), fixture.opts)
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("ProcessControl err = %v, want %v", err, tc.wantErr)
+				}
+				if got := ralphFixtureBeadCount(t, fixture.store); got != beforeCount {
+					t.Fatalf("pending bead count = %d, want unchanged %d", got, beforeCount)
+				}
+				if got := mustGet(t, fixture.store, fixture.control.ID).Status; got != "open" {
+					t.Fatalf("pending control status = %q, want open", got)
+				}
+			} else if err != nil {
+				t.Fatalf("ProcessControl: %v", err)
+			}
+			if result.Action != tc.wantAction || result.Created != tc.wantCreated {
+				t.Fatalf("result = %+v, want action=%q created=%d", result, tc.wantAction, tc.wantCreated)
+			}
+		})
+	}
+}
+
+// TestProcessControlNestedRalphAbortHardFailsOuterBeforeCheck catches an inner
+// abort_scope failure being reinterpreted as an outer numeric continuation.
+func TestProcessControlNestedRalphAbortHardFailsOuterBeforeCheck(t *testing.T) {
+	t.Parallel()
+	fixture := newRalphCheckFixture(t, `[1]`, `[20,24]`, "", "#!/bin/sh\nexit 1\n", "30s", 3)
+	open := "open"
+	if err := fixture.store.Update(fixture.iteration.ID, beads.UpdateOpts{
+		Status: &open,
+		Metadata: map[string]string{
+			beadmeta.ScopeRoleMetadataKey: beadmeta.ScopeRoleBody,
+		},
+	}); err != nil {
+		t.Fatalf("reopen outer iteration scope: %v", err)
+	}
+
+	innerControl := mustCreate(t, fixture.store, beads.Bead{
+		Title: "inner ralph",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:        beadmeta.KindRalph,
+			beadmeta.RootBeadIDMetadataKey:  fixture.root.ID,
+			beadmeta.StepRefMetadataKey:     "mol-test.review-loop.iteration.1.inner",
+			beadmeta.StepIDMetadataKey:      "inner",
+			beadmeta.ScopeRefMetadataKey:    "mol-test.review-loop.iteration.1",
+			beadmeta.ScopeRoleMetadataKey:   beadmeta.ScopeRoleMember,
+			beadmeta.OnFailMetadataKey:      "abort_scope",
+			beadmeta.MaxAttemptsMetadataKey: "1",
+		},
+	})
+	innerIteration := mustCreate(t, fixture.store, beads.Bead{
+		Title: "inner iteration 1",
+		Metadata: map[string]string{
+			beadmeta.KindMetadataKey:        beadmeta.KindScope,
+			beadmeta.RootBeadIDMetadataKey:  fixture.root.ID,
+			beadmeta.StepRefMetadataKey:     "mol-test.review-loop.iteration.1.inner.iteration.1",
+			beadmeta.StepIDMetadataKey:      "inner",
+			beadmeta.RalphStepIDMetadataKey: "inner",
+			beadmeta.AttemptMetadataKey:     "1",
+			beadmeta.OutcomeMetadataKey:     beadmeta.OutcomeFail,
+		},
+	})
+	mustClose(t, fixture.store, innerIteration.ID)
+	mustDep(t, fixture.store, innerControl.ID, innerIteration.ID, "blocks")
+	mustDep(t, fixture.store, fixture.iteration.ID, innerControl.ID, "blocks")
+
+	innerResult, err := ProcessControl(fixture.store, mustGet(t, fixture.store, innerControl.ID), fixture.opts)
+	if err != nil {
+		t.Fatalf("ProcessControl inner: %v", err)
+	}
+	if innerResult.Action != "fail" {
+		t.Fatalf("inner result = %+v, want exhausted fail", innerResult)
+	}
+	outerSubject := mustGet(t, fixture.store, fixture.iteration.ID)
+	if outerSubject.Status != "closed" || outerSubject.Metadata[beadmeta.OutcomeMetadataKey] != beadmeta.OutcomeFail {
+		t.Fatalf("outer subject = %q/%q, want abort_scope closed/fail", outerSubject.Status, outerSubject.Metadata[beadmeta.OutcomeMetadataKey])
+	}
+	beforeOuterCount := ralphFixtureBeadCount(t, fixture.store)
+
+	outerResult, err := ProcessControl(fixture.store, mustGet(t, fixture.store, fixture.control.ID), fixture.opts)
+	if err != nil {
+		t.Fatalf("ProcessControl outer: %v", err)
+	}
+	if outerResult.Action != "hard-fail" || outerResult.Created != 0 {
+		t.Fatalf("outer result = %+v, want pre-check hard-fail without spawn", outerResult)
+	}
+	if _, err := os.Stat(fixture.marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("outer check invocation marker err = %v, want not-exist", err)
+	}
+	if got := mustGet(t, fixture.store, fixture.control.ID).Metadata[beadmeta.FailureReasonMetadataKey]; got != "ralph_subject_failed_before_check" {
+		t.Fatalf("outer failure reason = %q, want ralph_subject_failed_before_check", got)
+	}
+	if got := ralphFixtureBeadCount(t, fixture.store); got != beforeOuterCount {
+		t.Fatalf("outer bead count = %d, want unchanged %d", got, beforeOuterCount)
+	}
+	if next := findAttemptByRef(t, fixture.store, fixture.root.ID, "mol-test.review-loop.iteration.2"); next.ID != "" {
+		t.Fatalf("unexpected outer iteration 2: %+v", next)
+	}
+}
+
 func TestRetryLifecycleRequiredOutputMissingDoesNotPass(t *testing.T) {
 	t.Parallel()
 	store := beads.NewMemStore()
