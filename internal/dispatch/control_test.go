@@ -2172,6 +2172,32 @@ func TestProcessRalphControlOptInRereadsFailedSubject(t *testing.T) {
 	}
 }
 
+// TestProcessRalphControlOptInPassUsesRefreshedOutput catches the pass closure
+// publishing gc.output_json from findLatestAttempt's stale list snapshot.
+func TestProcessRalphControlOptInPassUsesRefreshedOutput(t *testing.T) {
+	t.Parallel()
+	fixture := newRalphCheckFixture(t, `[1]`, `[20,24]`, "", "#!/bin/sh\nexit 0\n", "30s", 3)
+	if err := fixture.store.SetMetadata(fixture.iteration.ID, beadmeta.OutputJSONMetadataKey, `{"source":"fresh-get"}`); err != nil {
+		t.Fatalf("set fresh iteration output: %v", err)
+	}
+	store := &ralphStaleListOutputStore{
+		Store:           fixture.store,
+		subjectID:       fixture.iteration.ID,
+		staleOutputJSON: `{"source":"stale-list"}`,
+	}
+
+	result, err := processRalphControl(store, mustGet(t, fixture.store, fixture.control.ID), fixture.opts)
+	if err != nil {
+		t.Fatalf("processRalphControl: %v", err)
+	}
+	if result.Action != "pass" {
+		t.Fatalf("result = %+v, want pass", result)
+	}
+	if got := mustGet(t, fixture.store, fixture.control.ID).Metadata[beadmeta.OutputJSONMetadataKey]; got != `{"source":"fresh-get"}` {
+		t.Fatalf("control output_json = %q, want fresh exact-ID snapshot", got)
+	}
+}
+
 // TestProcessRalphControlOptInExecutedExitOneContinuesOnce catches the
 // structural failed-subject rule swallowing a real check's exit code 1.
 func TestProcessRalphControlOptInExecutedExitOneContinuesOnce(t *testing.T) {
@@ -2507,6 +2533,27 @@ func (s *ralphSubjectRefreshStore) Get(id string) (beads.Bead, error) {
 	bead.Metadata = cloneMetadata(bead.Metadata)
 	bead.Metadata[beadmeta.OutcomeMetadataKey] = beadmeta.OutcomeFail
 	return bead, nil
+}
+
+type ralphStaleListOutputStore struct {
+	beads.Store
+	subjectID       string
+	staleOutputJSON string
+}
+
+func (s *ralphStaleListOutputStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	listed, err := s.Store.List(query)
+	if err != nil {
+		return nil, err
+	}
+	for i := range listed {
+		if listed[i].ID != s.subjectID {
+			continue
+		}
+		listed[i].Metadata = cloneMetadata(listed[i].Metadata)
+		listed[i].Metadata[beadmeta.OutputJSONMetadataKey] = s.staleOutputJSON
+	}
+	return listed, nil
 }
 
 type ralphPolicyMutationStore struct {
