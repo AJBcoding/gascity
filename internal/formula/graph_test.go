@@ -161,6 +161,66 @@ func TestApplyGraphControlsRalphOnCompleteOnlyControlsLogicalStep(t *testing.T) 
 	}
 }
 
+// TestApplyGraphControlsRalphExitPolicyStaysOnControl catches the compiled
+// policy leaking onto a nested iteration body child or its scope-check.
+func TestApplyGraphControlsRalphExitPolicyStaysOnControl(t *testing.T) {
+	t.Parallel()
+
+	f := &Formula{Steps: []*Step{{
+		ID:    "outer",
+		Title: "Outer",
+		Type:  "task",
+		Ralph: &RalphSpec{
+			MaxAttempts: 2,
+			Check: &RalphCheckSpec{
+				Mode:              "exec",
+				Path:              "outer.sh",
+				ContinueExitCodes: []int{1},
+				PendingExitCodes:  []int{24, 20},
+			},
+		},
+		Children: []*Step{{ID: "work", Title: "Work", Type: "task"}},
+	}}}
+
+	expanded, err := ApplyRalph(f.Steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	f.Steps = expanded
+	ApplyGraphControls(f)
+	steps := collectGraphSteps(f.Steps)
+
+	control := findGraphStepByID(steps, "outer")
+	if control == nil {
+		t.Fatal("missing outer control")
+	}
+	if got := control.Metadata[beadmeta.ContinueExitCodesMetadataKey]; got != `[1]` {
+		t.Fatalf("control continue policy = %q, want [1]", got)
+	}
+	if got := control.Metadata[beadmeta.PendingExitCodesMetadataKey]; got != `[20,24]` {
+		t.Fatalf("control pending policy = %q, want [20,24]", got)
+	}
+
+	for _, id := range []string{
+		"outer.iteration.1",
+		"outer.iteration.1.work",
+		"outer.iteration.1.work-scope-check",
+	} {
+		step := findGraphStepByID(steps, id)
+		if step == nil {
+			t.Fatalf("missing nested graph step %q", id)
+		}
+		for _, key := range []string{
+			beadmeta.ContinueExitCodesMetadataKey,
+			beadmeta.PendingExitCodesMetadataKey,
+		} {
+			if _, ok := step.Metadata[key]; ok {
+				t.Fatalf("nested step %q unexpectedly contains %s: %#v", id, key, step.Metadata)
+			}
+		}
+	}
+}
+
 func TestApplyGraphControlsFinalizerExcludesRalphIterationScope(t *testing.T) {
 	t.Parallel()
 

@@ -1,10 +1,112 @@
 package formula
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 )
+
+// TestRalphCheckExitCodePolicyValidation catches formula validation accepting
+// a partial, empty, out-of-range, duplicate, or overlapping exit-code policy.
+func TestRalphCheckExitCodePolicyValidation(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name          string
+		continueCodes []int
+		pendingCodes  []int
+		wantField     string
+	}{
+		{name: "continue without pending", continueCodes: []int{1}, wantField: "pending_exit_codes"},
+		{name: "pending without continue", pendingCodes: []int{20}, wantField: "continue_exit_codes"},
+		{name: "empty continue", continueCodes: []int{}, pendingCodes: []int{20}, wantField: "continue_exit_codes"},
+		{name: "empty pending", continueCodes: []int{1}, pendingCodes: []int{}, wantField: "pending_exit_codes"},
+		{name: "zero", continueCodes: []int{0}, pendingCodes: []int{20}, wantField: "continue_exit_codes"},
+		{name: "negative", continueCodes: []int{1}, pendingCodes: []int{-1}, wantField: "pending_exit_codes"},
+		{name: "greater than 255", continueCodes: []int{256}, pendingCodes: []int{20}, wantField: "continue_exit_codes"},
+		{name: "duplicate", continueCodes: []int{1, 1}, pendingCodes: []int{20}, wantField: "continue_exit_codes"},
+		{name: "overlap", continueCodes: []int{1, 20}, pendingCodes: []int{20, 24}, wantField: "pending_exit_codes"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f := validRalphExitPolicyFormula(tc.continueCodes, tc.pendingCodes)
+			err := f.Validate()
+			if err == nil {
+				t.Fatal("Validate succeeded, want exit-code policy error")
+			}
+			if !strings.Contains(err.Error(), tc.wantField) {
+				t.Fatalf("Validate error = %v, want field %q", err, tc.wantField)
+			}
+		})
+	}
+
+	if err := validRalphExitPolicyFormula([]int{1}, []int{20, 24}).Validate(); err != nil {
+		t.Fatalf("Validate(valid exit-code policy): %v", err)
+	}
+}
+
+// TestApplyRalph_StampsCanonicalExitCodePolicy catches compilation omitting
+// the opt-in policy or preserving caller order instead of canonical JSON.
+func TestApplyRalph_StampsCanonicalExitCodePolicy(t *testing.T) {
+	t.Parallel()
+
+	steps := validRalphExitPolicyFormula([]int{1}, []int{24, 20}).Steps
+	got, err := ApplyRalph(steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	control := got[0]
+	if got := control.Metadata[beadmeta.ContinueExitCodesMetadataKey]; got != `[1]` {
+		t.Fatalf("continue exit codes = %q, want [1]", got)
+	}
+	if got := control.Metadata[beadmeta.PendingExitCodesMetadataKey]; got != `[20,24]` {
+		t.Fatalf("pending exit codes = %q, want [20,24]", got)
+	}
+}
+
+// TestApplyRalph_LegacyOmitsExitCodePolicy catches compilation silently
+// opting legacy Ralph formulas into the new disposition contract.
+func TestApplyRalph_LegacyOmitsExitCodePolicy(t *testing.T) {
+	t.Parallel()
+
+	steps := validRalphExitPolicyFormula(nil, nil).Steps
+	got, err := ApplyRalph(steps)
+	if err != nil {
+		t.Fatalf("ApplyRalph failed: %v", err)
+	}
+	control := got[0]
+	for _, key := range []string{
+		beadmeta.ContinueExitCodesMetadataKey,
+		beadmeta.PendingExitCodesMetadataKey,
+	} {
+		if _, ok := control.Metadata[key]; ok {
+			t.Fatalf("legacy control metadata contains %s: %#v", key, control.Metadata)
+		}
+	}
+}
+
+func validRalphExitPolicyFormula(continueCodes, pendingCodes []int) *Formula {
+	return &Formula{
+		Formula: "ralph-exit-policy",
+		Steps: []*Step{{
+			ID:    "review-loop",
+			Title: "Review loop",
+			Type:  "task",
+			Ralph: &RalphSpec{
+				MaxAttempts: 3,
+				Check: &RalphCheckSpec{
+					Mode:              "exec",
+					Path:              "check.sh",
+					ContinueExitCodes: continueCodes,
+					PendingExitCodes:  pendingCodes,
+				},
+			},
+		}},
+	}
+}
 
 func TestApplyRalph_Basic(t *testing.T) {
 	steps := []*Step{
