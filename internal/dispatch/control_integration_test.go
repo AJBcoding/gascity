@@ -855,8 +855,12 @@ func TestBuildAttemptRecipeNestedRalphExitPolicyMatchesCompiledControl(t *testin
 func TestProcessControlReseededNestedRalphPendingExitRemainsPending(t *testing.T) {
 	t.Parallel()
 
+	const pendingExitCode = 20
 	cityPath := t.TempDir()
-	if err := os.WriteFile(filepath.Join(cityPath, "inner.sh"), []byte("#!/bin/sh\nexit 20\n"), 0o755); err != nil {
+	markerPath := filepath.Join(cityPath, "inner-check-exit")
+	pendingExit := strconv.Itoa(pendingExitCode)
+	checkScript := "#!/bin/sh\nprintf '%s' " + pendingExit + " > " + strconv.Quote(markerPath) + "\nexit " + pendingExit + "\n"
+	if err := os.WriteFile(filepath.Join(cityPath, "inner.sh"), []byte(checkScript), 0o755); err != nil {
 		t.Fatalf("write inner check: %v", err)
 	}
 	inner := &formula.Step{
@@ -931,6 +935,13 @@ func TestProcessControlReseededNestedRalphPendingExitRemainsPending(t *testing.T
 	beforeCount := ralphFixtureBeadCount(t, store)
 
 	result, err := ProcessControl(store, mustGet(t, store, innerControl.ID), opts)
+	marker, markerErr := os.ReadFile(markerPath)
+	if markerErr != nil {
+		t.Fatalf("read inner check marker: %v", markerErr)
+	}
+	if got, want := string(marker), strconv.Itoa(pendingExitCode); got != want {
+		t.Fatalf("inner check marker = %q, want pending exit code %q", got, want)
+	}
 	if !errors.Is(err, ErrControlPending) {
 		t.Fatalf("ProcessControl err = %v, want %v (result=%+v)", err, ErrControlPending, result)
 	}
