@@ -159,6 +159,11 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	stream := newReplayableSnapshotCursor(snapshots)
 	observed := false
 	handledDialog := false
+	// needsPolling records that a phase RECOGNIZED a dialog it could not answer
+	// from a snapshot alone. Reporting "not observed" for the whole pass is what
+	// sends the caller to the polling path, which can move the cursor and re-read
+	// before committing — see acceptWorkspaceTrustDialogFromStream.
+	needsPolling := false
 	trackingSendKeys := func(keys ...string) error {
 		handledDialog = true
 		return sendKeys(keys...)
@@ -197,9 +202,12 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	if err := ctx.Err(); err != nil {
 		return observed, err
 	}
-	phaseObserved, err = acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	phaseObserved, err = acceptWorkspaceTrustDialogFromStream(ctx, timeout, stream, trackingSendKeys, &needsPolling)
 	if err != nil {
 		return observed, fmt.Errorf("workspace trust dialog: %w", err)
+	}
+	if needsPolling {
+		return false, nil
 	}
 	observed = observed || phaseObserved
 	if !phaseObserved && !observed {
@@ -581,17 +589,72 @@ func containsPostUpdateStartupDialog(content string) bool {
 		ContainsRateLimitDialog(content)
 }
 
+// trustDialogPaintRefreshLimit bounds how many times a still-painting trust
+// modal may extend the shared startup-dialog budget. Enough for a TUI that
+// draws its options a few frames after its question; not enough for an animated
+// pane to hold the sequence open indefinitely.
+const trustDialogPaintRefreshLimit = 6
+
+// workspaceTrustAcceptPatterns name the option that means "trust this
+// directory and keep running", for each TUI this fork launches, most specific
+// first. The first pattern matching exactly one row on screen wins.
+//
+// Every entry is taken from a captured menu, not invented:
+//
+//	Claude Code   ❯ No, exit / Yes, I trust this folder     (2026-09-04)
+//	Codex         › 1. Yes, continue / 2. No, quit          (2026-09-04)
+//	pi            → Trust / Trust parent folder (…) / Trust (this session
+//	              only) / Do not trust / Do not trust (this session only)
+//	gemini        ● 1. Trust folder (<name>) / 2. Trust parent folder /
+//	              3. Don't trust
+//
+// Note what the list refuses to do. pi and gemini both offer "trust the PARENT
+// folder", which is a wider grant than the session needs, and both offer a
+// session-only trust that would re-prompt on every respawn. Naming the exact
+// row keeps us on the narrow, durable grant; a looser pattern would let the
+// renderer decide which of those we take.
+var workspaceTrustAcceptPatterns = []dialogOptionPattern{
+	{Exact: "Yes, I trust this folder"},       // Claude Code
+	{Exact: "Yes, continue"},                  // Codex
+	{Exact: "Yes, proceed"},                   // Codex, older wording
+	{Exact: "Trust"},                          // pi
+	{Prefix: "Trust folder"},                  // gemini ("Trust folder (city)")
+	{Exact: "Trust this folder"},              //
+	{Exact: "Trust the files in this folder"}, //
+}
+
 // acceptWorkspaceTrustDialog dismisses workspace trust dialogs for supported
 // agents. Claude shows "Quick safety check"; Codex shows
 // "Do you trust the contents of this directory?"; pi (>= 0.79) shows
-// "Trust project folder?". In all cases the safe continue option is
-// pre-selected, so Enter accepts.
+// "Trust project folder?".
+//
+// It selects the trust option BY ITS TEXT and confirms only after observing the
+// cursor on it. It used to send a bare Enter, on the documented premise that
+// "in all cases the safe continue option is pre-selected". That premise was
+// measured false on 2026-09-04: Claude Code renders
+//
+//	❯ No, exit
+//	  Yes, I trust this folder
+//
+// with decline first and pre-selected. Enter then quit the agent in every
+// directory it had not already been trusted for — which is every polecat
+// worktree by construction (gas-193q). Codex, measured in the same run, still
+// puts its accept option first. The two TUIs disagree about order right now,
+// which is the argument against ever encoding an order here.
+//
+// A dialog it recognizes but cannot safely answer is left UP, and the phase
+// keeps watching until the shared budget expires in case the modal is still
+// painting. Parking is the intended failure: a parked agent is a page, a dead
+// one is a mystery.
 func acceptWorkspaceTrustDialog(
 	ctx context.Context,
 	budget *startupDialogBudget,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	trustSeen := false
+	lastTrustScreen := ""
+	paintRefreshes := 0
 	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -603,12 +666,36 @@ func acceptWorkspaceTrustDialog(
 		}
 
 		if containsWorkspaceTrustDialog(content) {
-			budget.observe()
-			if err := sendKeys("Enter"); err != nil {
+			if !trustSeen {
+				budget.observe()
+				trustSeen = true
+				lastTrustScreen = content
+			} else if content != lastTrustScreen && paintRefreshes < trustDialogPaintRefreshLimit {
+				// The modal is recognized but not yet answerable AND the screen
+				// is still changing, so it is still painting. A TUI that draws
+				// its question before its options is the normal case, not a
+				// fault: codex renders an update notice, a banner and a body
+				// ahead of its option rows, and the old position-based code
+				// never noticed because it answered on the question alone.
+				//
+				// Waiting while a recognized modal is still moving is strictly
+				// better than either alternative — answering blind, or parking
+				// a healthy agent — so progress buys more budget. Bounded, so a
+				// pane with a spinner cannot refresh forever.
+				budget.observe()
+				paintRefreshes++
+				lastTrustScreen = content
+			}
+			confirmed, err := confirmDialogOptionByText(ctx, peek, sendKeys, content, workspaceTrustAcceptPatterns)
+			if err != nil {
 				return err
 			}
-			sleep(ctx, startupDialogAcceptDelay)
-			return nil
+			if confirmed {
+				sleep(ctx, startupDialogAcceptDelay)
+				return nil
+			}
+			sleep(ctx, dialogPollInterval)
+			continue
 		}
 
 		if containsPromptIndicator(content) {
@@ -631,15 +718,31 @@ func acceptWorkspaceTrustDialog(
 	return nil
 }
 
+// acceptWorkspaceTrustDialogFromStream is the streaming twin. It can confirm
+// only the case it can verify from a single snapshot — the trust option already
+// selected — because a snapshot stream gives it no way to move the cursor and
+// then re-read before committing. Any other layout is declined via
+// needsPolling, which makes the whole streaming pass report "not observed" so
+// the caller falls back to the polling path above, which can verify.
 func acceptWorkspaceTrustDialogFromStream(
 	ctx context.Context,
 	timeout time.Duration,
 	snapshots *replayableSnapshotCursor,
 	sendKeys func(keys ...string) error,
+	needsPolling *bool,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:       containsWorkspaceTrustDialog,
-		matchKeys:   []string{"Enter"},
+		match: containsWorkspaceTrustDialog,
+		matchKeysFor: func(content string) ([]string, bool) {
+			match, ok := findDialogOption(content, workspaceTrustAcceptPatterns)
+			if ok && match.Steps == 0 {
+				return []string{"Enter"}, true
+			}
+			if needsPolling != nil {
+				*needsPolling = true
+			}
+			return nil, false
+		},
 		matchDelay:  startupDialogAcceptDelay,
 		ready:       containsPromptIndicator,
 		readyOrNext: containsPostTrustStartupDialog,
@@ -1189,6 +1292,12 @@ type streamDialogSpec struct {
 	readyOrNext func(string) bool
 	matchKeys   []string
 	matchDelay  time.Duration
+	// matchKeysFor derives the keystrokes from the matched snapshot instead of
+	// hardcoding them, for dialogs whose answer depends on what is on screen
+	// rather than on a fixed position. Returning ok=false means "recognized,
+	// not safely answerable": no keys are sent and the phase reports the dialog
+	// as unhandled. It takes precedence over matchKeys when set.
+	matchKeysFor func(content string) ([]string, bool)
 }
 
 type replayableSnapshotStream struct {
@@ -1325,8 +1434,19 @@ func acceptDialogFromStream(
 		if len(history) > 0 {
 			for idx, content := range history {
 				if spec.match != nil && spec.match(content) {
+					keys, ok := spec.matchKeys, true
+					if spec.matchKeysFor != nil {
+						keys, ok = spec.matchKeysFor(content)
+					}
+					if !ok {
+						// Recognized but not safely answerable. Leave the
+						// snapshot in place: the modal is still up, and saying
+						// so is the whole point.
+						snapshots.replay(history[idx:])
+						return false, nil
+					}
 					snapshots.replay(history[idx+1:])
-					return true, sendDialogKeys(ctx, sendKeys, spec.matchKeys, spec.matchDelay)
+					return true, sendDialogKeys(ctx, sendKeys, keys, spec.matchDelay)
 				}
 				if spec.readyOrNext != nil && spec.readyOrNext(content) {
 					snapshots.replay(history[idx:])

@@ -455,7 +455,7 @@ case "$op" in
     cat > /dev/null
     ;;
   watch-startup)
-    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?\n\n\u203a 1. Yes, continue\n  2. No, quit"}'
     printf '%s\n' '{"content":"user@host $"}'
     ;;
   peek)
@@ -502,7 +502,7 @@ case "$op" in
     cat > /dev/null
     ;;
   watch-startup)
-    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?\n\n\u203a 1. Yes, continue\n  2. No, quit"}'
     printf '%s\n' '{"content":"user@host $"}'
     ;;
   peek)
@@ -594,7 +594,7 @@ case "$op" in
     cat > /dev/null
     ;;
   watch-startup)
-    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?\n\n\u203a 1. Yes, continue\n  2. No, quit"}'
     ;;
   peek)
     echo "$*" >> "`+peekFile+`"
@@ -703,7 +703,7 @@ case "$op" in
     if [ -f "`+sendKeysFile+`" ]; then
       echo "user@host $"
     else
-      echo "Do you trust the contents of this directory?"
+      printf '%s\n' "Do you trust the contents of this directory?" "" "> 1. Yes, continue" "  2. No, quit"
     fi
     ;;
   send-keys)
@@ -754,7 +754,7 @@ case "$op" in
     if [ -f "`+sendKeysFile+`" ]; then
       echo "user@host $"
     else
-      echo "Do you trust the contents of this directory?"
+      printf '%s\n' "Do you trust the contents of this directory?" "" "> 1. Yes, continue" "  2. No, quit"
     fi
     ;;
   send-keys)
@@ -1010,7 +1010,7 @@ case "$op" in
     cat > /dev/null
     ;;
   watch-startup)
-    printf '%s\n' '{"content":"Do you trust the contents of this directory?"}'
+    printf '%s\n' '{"content":"Do you trust the contents of this directory?\n\n\u203a 1. Yes, continue\n  2. No, quit"}'
     i=0
     while [ "$i" -lt 2000 ]; do
       printf '%s\n' '{"content":"user@host $"}'

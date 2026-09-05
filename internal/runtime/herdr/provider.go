@@ -310,6 +310,32 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		// worse than the prior unconditional send), and the reconciler tolerates a
 		// slow Start (pendingCreateNeverStartedTimeout = 10m).
 		idleOutcome := p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
+		// Second dialog pass, AFTER readiness and BEFORE anything is delivered.
+		//
+		// Some TUIs draw their input prompt and raise their trust modal a beat
+		// later. Codex does exactly that, measured live on 2026-09-04:
+		//
+		//	t+0.0s  › Ask Codex to do anything      (prompt: "ready")
+		//	t+1.5s  › 1. Yes, continue / 2. No, quit (the trust modal)
+		//
+		// The startup sequence reads a visible prompt as "nothing left to
+		// dismiss" and returns, so on that ordering the first pass finishes
+		// before the modal exists and no later phase handles trust. Whether it
+		// happens is a race the runtime does not control, which is why it
+		// presents as an intermittent codex spawn failure.
+		//
+		// tmux has run acceptStartupDialogs twice for this reason since it was
+		// written ("Some CLIs surface trust or permissions dialogs only after
+		// their initial ready screen", adapter.go Step 4→5). herdr ran only the
+		// first pass. Ordering it before delivery matters as much as running
+		// it: an undismissed modal eats the startup turn as its answer, which
+		// is the gas-vs0e defect this provider already fixed on the way up.
+		//
+		// Cheap on a clean pane — every phase early-returns on a visible
+		// prompt — and idempotent, matching the first pass.
+		if info.PaneID != "" && runtime.ShouldAcceptStartupDialogs(cfg) {
+			p.dismissDialogsOnPane(ctx, info.PaneID, runtime.StartupDialogTimeout())
+		}
 		// session_setup runs host-side ("in gc's process via sh -c", per the Config
 		// contract), so herdr can honor it the same way tmux does. Non-fatal, and
 		// ordered before the first turn so the agent's workspace is prepared when

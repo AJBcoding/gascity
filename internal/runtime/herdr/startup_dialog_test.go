@@ -53,7 +53,18 @@ func TestStartDismissesWorkspaceTrustDialogBeforeDelivery(t *testing.T) {
 			}
 
 			calls := fakeCalls(t, state)
-			enter := strings.Index(calls, "pane send-keys %5 Enter")
+			// The verdict is WHICH OPTION the fake recorded as confirmed, not
+			// which keys arrived. Claude's current layout puts "No, exit"
+			// first and pre-selected, so a position-based dismissal confirms
+			// the decline and kills the agent while still sending an Enter
+			// that a key-only assertion would happily accept (gas-193q).
+			if hasState(t, state, "trust_declined") {
+				t.Fatalf("%s: the dismissal confirmed the DECLINE option, which exits the agent:\n%s", tc.name, calls)
+			}
+			if !hasState(t, state, "trust_answered") {
+				t.Fatalf("%s: Start never confirmed the trust option:\n%s", tc.name, calls)
+			}
+			enter := strings.LastIndex(calls, "pane send-keys %5 Enter")
 			if enter < 0 {
 				t.Fatalf("Start never answered the workspace-trust modal:\n%s", calls)
 			}
@@ -105,5 +116,47 @@ func TestDismissKnownDialogsClearsAModalOnALiveSession(t *testing.T) {
 	}
 	if calls := fakeCalls(t, state); !strings.Contains(calls, "pane send-keys %5 Enter") {
 		t.Fatalf("DismissKnownDialogs did not answer the modal:\n%s", calls)
+	}
+}
+
+// TestStartDismissesATrustModalRaisedAFTERTheReadyPrompt pins the second
+// dialog pass.
+//
+// Codex draws its input prompt and raises its trust modal a beat later,
+// measured live 2026-09-04: prompt at t+0.0s, modal at t+1.5s. The startup
+// dialog sequence reads a visible prompt as "nothing left to dismiss" and
+// returns, so on that ordering the first pass finishes before the modal
+// exists. tmux has re-run acceptStartupDialogs after readiness since it was
+// written; herdr ran only the first pass, and the result was an intermittent
+// codex spawn that sat on an unanswered modal forever.
+//
+// The modal must be cleared, and cleared BEFORE the first turn is delivered —
+// otherwise the payload answers it, which is the gas-vs0e defect returning by
+// a different route.
+func TestStartDismissesATrustModalRaisedAFTERTheReadyPrompt(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "trust_dialog_late")
+
+	cfg := runtime.Config{
+		Command:      "codex",
+		Nudge:        "Run gc hook --claim --json now.",
+		ProcessNames: []string{"codex"},
+	}
+	if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	calls := fakeCalls(t, state)
+	if hasState(t, state, "trust_declined") {
+		t.Fatalf("the late modal was answered with the DECLINE option:\n%s", calls)
+	}
+	if !hasState(t, state, "trust_answered") {
+		t.Fatalf("a trust modal raised after the ready prompt was never dismissed:\n%s", calls)
+	}
+	enter := strings.LastIndex(calls, "pane send-keys %5 Enter")
+	prompt := strings.Index(calls, "agent prompt")
+	if prompt >= 0 && enter > prompt {
+		t.Fatalf("the late modal was answered AFTER delivery, so the payload hit the dialog:\n%s", calls)
 	}
 }

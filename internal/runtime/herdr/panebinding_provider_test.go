@@ -74,6 +74,10 @@ agent_start)
     printf '%s' '{"result":{"agent":{"name":"'"$3"'","pane_id":"%5","tab_id":"t1","workspace_id":"w1","agent_status":"idle"}}}'
   fi ;;
 agent_wait)
+  # Records that the readiness wait ran. trust_dialog_late uses it to raise its
+  # modal only AFTER readiness, which is the ordering measured live: the first
+  # dialog pass finishes against a visible prompt, and the modal appears later.
+  : > "$STATE/idle_waited"
   if [ ! -e "$STATE/registered" ]; then
     printf '%s' '{"error":{"code":"agent_not_found","message":"agent target not found"}}'
   elif [ -e "$STATE/wait_times_out" ]; then
@@ -109,9 +113,30 @@ agent_prompt)
     printf '%s' '{"result":{"type":"agent_prompted"}}'
   fi ;;
 pane_send-keys)
-  # The workspace-trust modal is answered by Enter (option 1 pre-selected).
-  if [ -e "$STATE/trust_dialog" ] || [ -e "$STATE/trust_dialog_codex" ]; then
-    case "$*" in *Enter*) : > "$STATE/trust_answered" ;; esac
+  # A real menu, not a keystroke sink: the fake tracks a CURSOR and records
+  # WHICH OPTION was confirmed. Answering by position used to look identical to
+  # answering correctly, because the fixture only ever recorded that some Enter
+  # arrived. That is what let gas-193q through -- a bare Enter on the current
+  # Claude Code layout confirms "No, exit" and kills the agent, and nothing in
+  # a key-only fixture can tell that apart from success.
+  if [ -e "$STATE/trust_dialog" ] || [ -e "$STATE/trust_dialog_codex" ] || [ -e "$STATE/trust_dialog_late" ]; then
+    if [ ! -e "$STATE/cursor" ]; then printf '%s' 0 > "$STATE/cursor"; fi
+    cur=$(cat "$STATE/cursor")
+    for k in $*; do
+      case "$k" in
+        Down) if [ "$cur" -lt 1 ]; then cur=$((cur+1)); fi ;;
+        Up)   if [ "$cur" -gt 0 ]; then cur=$((cur-1)); fi ;;
+        Enter)
+          # Row order per renderer. Claude puts the DECLINE first (measured
+          # 2026-09-04); codex puts accept first.
+          if [ -e "$STATE/trust_dialog" ]; then
+            if [ "$cur" -eq 1 ]; then : > "$STATE/trust_answered"; else : > "$STATE/trust_declined"; fi
+          else
+            if [ "$cur" -eq 0 ]; then : > "$STATE/trust_answered"; else : > "$STATE/trust_declined"; fi
+          fi ;;
+      esac
+    done
+    printf '%s' "$cur" > "$STATE/cursor"
   fi
   printf '%s' '{"result":{"type":"ok"}}' ;;
 pane_read)
@@ -120,14 +145,34 @@ pane_read)
   # idle + interactive_ready, which is exactly why the runtime's own signals
   # cannot be the thing that decides delivery is safe.
   if [ -e "$STATE/trust_dialog" ] && [ ! -e "$STATE/trust_answered" ]; then
-    printf '%s' ' Quick safety check: Is this a project you created or one you trust?
-
- Claude Code'"'"'ll be able to read, edit, and execute files here.
-
- > 1. Yes, I trust this folder
-   2. No, exit
-
- Enter to confirm - Esc to cancel'
+    # Claude Code 2.1.261, captured live 2026-09-04: DECLINE FIRST and
+    # pre-selected, and the ordinals are gone. The cursor is rendered from the
+    # fake's own state so a dismissal can be seen to move it (gas-193q).
+    if [ ! -e "$STATE/cursor" ]; then printf '%s' 0 > "$STATE/cursor"; fi
+    printf '%s\n' " Quick safety check: Is this a project you created or one you trust?" ""
+    printf '%s\n' " Security guide" ""
+    if [ "$(cat "$STATE/cursor")" -eq 0 ]; then
+      printf '%s\n' " > No, exit" "   Yes, I trust this folder"
+    else
+      printf '%s\n' "   No, exit" " > Yes, I trust this folder"
+    fi
+    printf '%s\n' "" " Enter to confirm - Esc to cancel"
+    exit 0
+  fi
+  # A TUI that draws its input prompt FIRST and raises the trust modal a beat
+  # later. Codex does this live: the startup sequence reads a visible prompt as
+  # "nothing left to dismiss" and finishes before the modal exists. Provider
+  # Start must therefore run a second pass after readiness (gas-193q).
+  if [ -e "$STATE/trust_dialog_late" ] && [ ! -e "$STATE/trust_answered" ]; then
+    if [ ! -e "$STATE/idle_waited" ]; then
+      # Before readiness: an ordinary input prompt. Every startup-dialog phase
+      # reads this as "nothing left to dismiss" and returns, so the whole first
+      # pass completes without sending a key.
+      printf '%s' '> Ask Codex to do anything'
+      exit 0
+    fi
+    printf '%s\n' "  Do you trust the contents of this directory?" ""
+    printf '%s\n' " > 1. Yes, continue" "   2. No, quit" "" "   Press enter to continue"
     exit 0
   fi
   # The codex renderer of the same modal, also verbatim from a live boot. Its
@@ -199,6 +244,15 @@ func fakeCalls(t *testing.T, state string) string {
 		t.Fatal(err)
 	}
 	return string(b)
+}
+
+// hasState reports whether the fake herdr recorded flag. Used to read the
+// fake's menu oracle: which OPTION a dismissal confirmed, not which keys it
+// sent.
+func hasState(t *testing.T, state, flag string) bool {
+	t.Helper()
+	_, err := os.Stat(filepath.Join(state, flag))
+	return err == nil
 }
 
 func setState(t *testing.T, state, flag string) {
