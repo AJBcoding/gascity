@@ -159,6 +159,11 @@ func SourceLayout(source string) (name, repository string, ok bool) {
 			return layout.Pack.Name, layout.Repository, true
 		}
 	}
+	if normalizedRepo == PublicRepository {
+		if name, ok := publicSubpathAliasPack(subpath); ok {
+			return name, PublicRepository, true
+		}
+	}
 	return "", "", false
 }
 
@@ -169,6 +174,9 @@ func NameForSource(source string) (string, bool) {
 		if normalizedRepo == layout.Repository && subpath == layout.Subpath {
 			return layout.Pack.Name, true
 		}
+	}
+	if normalizedRepo == PublicRepository {
+		return publicSubpathAliasPack(subpath)
 	}
 	return "", false
 }
@@ -247,6 +255,15 @@ func publicSubpathForPack(name string) (string, bool) {
 	switch name {
 	case "gastown", "gascity":
 		return name, true
+	default:
+		return "", false
+	}
+}
+
+func publicSubpathAliasPack(subpath string) (string, bool) {
+	switch subpath {
+	case "gascity/roles":
+		return "gascity", true
 	default:
 		return "", false
 	}
