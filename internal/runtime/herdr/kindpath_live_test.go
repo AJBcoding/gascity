@@ -23,6 +23,9 @@ func TestProviderLiveClaudeKindPath(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping live herdr+claude test in -short mode")
 	}
+	if reason := liveClaudeKindPathSkipReason(); reason != "" {
+		t.Skip(reason)
+	}
 	if _, err := exec.LookPath("herdr"); err != nil {
 		t.Skip("herdr not installed")
 	}
