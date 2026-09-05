@@ -126,6 +126,24 @@ func TestResolveImportPackRefAcceptsPublicGastownSyntheticCache(t *testing.T) {
 	}
 }
 
+func TestResolveImportPackRefAcceptsPublicGascityRolesSyntheticCacheWithoutLock(t *testing.T) {
+	home, cityDir := setupBundledImportTest(t)
+	source := PublicGascityRolesPackSource
+	commit := strings.TrimPrefix(PublicGascityPackVersion, "sha:")
+
+	got, err := resolveImportPackRef(source, PublicGascityPackVersion, cityDir, cityDir)
+	if err != nil {
+		t.Fatalf("resolveImportPackRef: %v", err)
+	}
+	want := filepath.Join(bundledRepoCacheDir(home, source, commit), "gascity", "roles")
+	if got != want {
+		t.Fatalf("import path = %q, want %q", got, want)
+	}
+	if _, err := os.Stat(filepath.Join(got, "pack.toml")); err != nil {
+		t.Fatalf("roles pack was not materialized at resolved path: %v", err)
+	}
+}
+
 // TestLoadWithIncludes_RigBundledImportSelfHealsOfflineWithoutLock pins the
 // rig-scope analog of the city-scope no-lock bundled fallback: a rig-scoped
 // [rigs.*.imports.*] entry naming a bundled source at its canonical pin must
