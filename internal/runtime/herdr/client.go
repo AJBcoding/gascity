@@ -16,6 +16,8 @@ package herdr
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -106,7 +109,9 @@ func (c *client) run(ctx context.Context, args ...string) (json.RawMessage, erro
 // find. declared comes from whoever built the argv; see redaction.go.
 func (c *client) runWithSecrets(ctx context.Context, declared []string, args ...string) (json.RawMessage, error) {
 	full := append([]string{"--session", c.session}, args...)
-	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	cmd := exec.CommandContext(ctx, c.bin, full...)
+	cmd.Env = c.commandEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		safe, secrets := redactedArgv(args, declared)
 		var ee *exec.ExitError
@@ -250,7 +255,9 @@ func (c *client) paneRead(ctx context.Context, paneID, source string, lines int)
 // [client.runWithSecrets] treatment.
 func (c *client) runRaw(ctx context.Context, args ...string) (string, error) {
 	full := append([]string{"--session", c.session}, args...)
-	out, err := exec.CommandContext(ctx, c.bin, full...).Output()
+	cmd := exec.CommandContext(ctx, c.bin, full...)
+	cmd.Env = c.commandEnv()
+	out, err := cmd.Output()
 	if err != nil {
 		safe, secrets := redactedArgv(args, nil)
 		var ee *exec.ExitError
@@ -721,7 +728,7 @@ func (c *client) socketPath() string {
 	// NOT os.UserConfigDir(): it returns ~/Library/Application Support on
 	// Darwin and ignores XDG_CONFIG_HOME, so gc dials a socket herdr never
 	// binds. See dcaa5ac05 / ga-nqlb8q. Every box in this fleet is Darwin.
-	configDir := herdrConfigDir()
+	configDir := herdrConfigDir(c.session)
 	if c.session == "" || c.session == "default" {
 		return filepath.Join(configDir, "herdr", "herdr.sock")
 	}
@@ -729,7 +736,8 @@ func (c *client) socketPath() string {
 }
 
 // herdrConfigDir resolves XDG config precedence the way herdr itself does, and
-// the way gc already does when it builds an agent's environment
+// bounds that root when Herdr's Unix socket paths would exceed the platform
+// limit. The precedence is the way gc already builds an agent's environment
 // (internal/processenv.Provider uses this exact fallback pair): the value of
 // $XDG_CONFIG_HOME when set, otherwise $HOME/.config.
 //
@@ -746,15 +754,58 @@ func (c *client) socketPath() string {
 // Keeping this in one place matters: panebinding_provider_test.go's
 // listenHerdrSocket must resolve through socketPath() rather than
 // reconstructing the path, because a second copy drifts (ga-nqlb8q: it did).
-func herdrConfigDir() string {
+func herdrConfigDir(session string) string {
 	if v := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); v != "" {
-		return v
+		return boundedHerdrConfigDir(v, session)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
-	return filepath.Join(home, ".config")
+	return boundedHerdrConfigDir(filepath.Join(home, ".config"), session)
+}
+
+func boundedHerdrConfigDir(configDir, session string) string {
+	if herdrSocketPathsFit(configDir, session) {
+		return configDir
+	}
+	sum := sha256.Sum256([]byte(configDir))
+	return filepath.Join("/var/tmp", "gc-herdr", hex.EncodeToString(sum[:8]))
+}
+
+func herdrSocketPathsFit(configDir, session string) bool {
+	limit := len(syscall.RawSockaddrUnix{}.Path) - 1
+	for _, p := range []string{
+		herdrSocketPath(configDir, session, "herdr.sock"),
+		herdrSocketPath(configDir, session, "herdr-client.sock"),
+	} {
+		if len([]byte(p)) > limit {
+			return false
+		}
+	}
+	return true
+}
+
+func herdrSocketPath(configDir, session, name string) string {
+	if session == "" || session == "default" {
+		return filepath.Join(configDir, "herdr", name)
+	}
+	return filepath.Join(configDir, "herdr", "sessions", session, name)
+}
+
+func (c *client) commandEnv() []string {
+	return envWithValue(os.Environ(), "XDG_CONFIG_HOME", herdrConfigDir(c.session))
+}
+
+func envWithValue(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, entry := range env {
+		if strings.HasPrefix(entry, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 // serverAlive reports whether the session-server is actually accepting
@@ -800,7 +851,14 @@ func (c *client) startServer() error {
 	}
 	defer func() { _ = devnull.Close() }()
 	cmd := exec.Command(c.bin, "--session", c.session, "server")
-	cmd.Stdout, cmd.Stderr = devnull, devnull
+	cmd.Env = c.commandEnv()
+	stderr, err := os.CreateTemp("", "gc-herdr-server-stderr-*")
+	if err != nil {
+		return fmt.Errorf("herdr server: create stderr capture: %w", err)
+	}
+	stderrPath := stderr.Name()
+	defer func() { _ = os.Remove(stderrPath) }()
+	cmd.Stdout, cmd.Stderr = devnull, stderr
 	// Launch the shared daemon in the city root, not the inherited cwd (which is
 	// often $HOME when gc is invoked from a login shell). Sessions whose --cwd is
 	// empty/nonexistent fall back to this server cwd, so a $HOME-rooted server
@@ -810,20 +868,51 @@ func (c *client) startServer() error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("herdr server start: %w", err)
 	}
-	_ = cmd.Process.Release() // detach; herdr owns the daemon lifetime
+	_ = stderr.Close()
 	for i := 0; i < 40; i++ {
 		if c.serverAlive() {
+			_ = cmd.Process.Release() // detach; herdr owns the daemon lifetime
 			return nil
+		}
+		if processExited(cmd.Process) {
+			return c.serverReadinessError(stderrPath)
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-	return fmt.Errorf("herdr server for session %q did not become ready", c.session)
+	_ = cmd.Process.Release() // give up waiting; herdr owns any remaining daemon lifetime
+	return c.serverReadinessError(stderrPath)
+}
+
+func processExited(process *os.Process) bool {
+	if process == nil {
+		return false
+	}
+	var status syscall.WaitStatus
+	pid, err := syscall.Wait4(process.Pid, &status, syscall.WNOHANG, nil)
+	if err != nil || pid != process.Pid {
+		return false
+	}
+	return true
+}
+
+func (c *client) serverReadinessError(stderrPath string) error {
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		return fmt.Errorf("herdr server for session %q did not become ready; reading startup stderr: %w", c.session, err)
+	}
+	trimmed := strings.TrimSpace(string(stderr))
+	if trimmed == "" {
+		return fmt.Errorf("herdr server for session %q did not become ready", c.session)
+	}
+	return fmt.Errorf("herdr server for session %q did not become ready: %s", c.session, trimmed)
 }
 
 // stopServer stops this session's server (best-effort; tolerates not-running).
 // `session stop` targets the session by name and must bypass run() (which
 // prepends --session).
 func (c *client) stopServer() error {
-	_ = exec.Command(c.bin, "session", "stop", c.session).Run()
+	cmd := exec.Command(c.bin, "session", "stop", c.session)
+	cmd.Env = c.commandEnv()
+	_ = cmd.Run()
 	return nil
 }
