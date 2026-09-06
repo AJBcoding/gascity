@@ -131,7 +131,7 @@ func TestResolveImportPackRefAcceptsPublicGascityRolesSyntheticCacheWithoutLock(
 	source := PublicGascityRolesPackSource
 	commit := strings.TrimPrefix(PublicGascityPackVersion, "sha:")
 
-	got, err := resolveImportPackRef(source, PublicGascityPackVersion, cityDir, cityDir)
+	got, err := resolveImportPackRef(source, PublicGascityPackVersion, cityDir, cityDir, false)
 	if err != nil {
 		t.Fatalf("resolveImportPackRef: %v", err)
 	}
