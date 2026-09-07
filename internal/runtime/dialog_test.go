@@ -9,6 +9,18 @@ import (
 	"time"
 )
 
+// codexTrustScreen is codex 0.153.2's workspace-trust dialog with its OPTIONS,
+// captured live on 2026-09-04.
+//
+// The fixtures below used to publish the bare question string with no menu
+// under it. That was enough while the dismissal answered by position — it only
+// ever had to recognize the dialog — and it is exactly why a disposition defect
+// could live in this file behind a green suite: nothing in the fixture said
+// which option a keystroke would land on, so nothing could fail when the
+// renderer moved them (gas-193q). A trust prompt with no options is also not a
+// state any measured TUI produces.
+const codexTrustScreen = "Do you trust the contents of this directory?\n\n› 1. Yes, continue\n  2. No, quit\n"
+
 func withZeroDialogTimings(t *testing.T) {
 	t.Helper()
 	oldPollInterval := dialogPollInterval
@@ -88,7 +100,7 @@ func TestAcceptStartupDialogsAcceptsCodexTrustDialog(t *testing.T) {
 		context.Background(),
 		func(_ int) (string, error) {
 			if len(sent) == 0 {
-				return "Do you trust the contents of this directory?", nil
+				return codexTrustScreen, nil
 			}
 			return "user@host $", nil
 		},
@@ -236,7 +248,7 @@ func TestAcceptStartupDialogsPeeksDeepEnoughForLateTrustDialog(t *testing.T) {
 			if lines < 100 {
 				return "› Implement {feature}", nil
 			}
-			return "Do you trust the contents of this directory?\n› Implement {feature}", nil
+			return codexTrustScreen + "› Implement {feature}", nil
 		},
 		func(keys ...string) error {
 			sent = append(sent, keys...)
@@ -300,7 +312,7 @@ func TestAcceptStartupDialogsSkipsUpdateThenHandlesTrustDialog(t *testing.T) {
 				staleUpdateReturned = true
 				return codexUpdateDialogFixture(), nil
 			case len(sent) == 2:
-				return "Do you trust the contents of this directory?", nil
+				return codexTrustScreen, nil
 			default:
 				return "› Implement {feature}", nil
 			}
@@ -395,7 +407,7 @@ func TestAcceptStartupDialogsHandlesTrustThenCodexHookReview(t *testing.T) {
 		func(_ int) (string, error) {
 			switch len(sent) {
 			case 0:
-				return "Do you trust the contents of this directory?", nil
+				return codexTrustScreen, nil
 			case 1:
 				return codexHookReviewDialogFixture(), nil
 			default:
@@ -465,7 +477,7 @@ func TestAcceptStartupDialogsHandlesTrustThenMCPTrust(t *testing.T) {
 		func(_ int) (string, error) {
 			switch len(sent) {
 			case 0:
-				return "Do you trust the contents of this directory?", nil
+				return codexTrustScreen, nil
 			case 1:
 				return mcpTrustDialogFixture(), nil
 			default:
@@ -736,7 +748,7 @@ func TestAcceptStartupDialogsHandlesTrustThenExternalImportsThenMCP(t *testing.T
 		func(_ int) (string, error) {
 			switch len(sent) {
 			case 0:
-				return "Do you trust the contents of this directory?", nil
+				return codexTrustScreen, nil
 			case 1:
 				return externalImportsDialogFixture(), nil
 			case 2:
@@ -819,7 +831,7 @@ func TestAcceptStartupDialogsFromStreamLeavesUntrustedExternalImportsDialog(t *t
 func TestAcceptStartupDialogsFromStreamHandlesTrustThenExternalImportsThenMCP(t *testing.T) {
 	var sent []string
 	snapshots := make(chan string, 4)
-	snapshots <- "Do you trust the contents of this directory?"
+	snapshots <- codexTrustScreen
 	snapshots <- externalImportsDialogFixture()
 	snapshots <- mcpTrustDialogFixture()
 	snapshots <- "› Implement {feature}"
@@ -951,7 +963,7 @@ func TestAcceptStartupDialogsAcceptsCustomAPIKeyDialog(t *testing.T) {
 func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
 	var sent []string
 	snapshots := make(chan string, 2)
-	snapshots <- "Do you trust the contents of this directory?"
+	snapshots <- codexTrustScreen
 	snapshots <- "user@host $"
 	close(snapshots)
 
@@ -974,11 +986,18 @@ func TestAcceptStartupDialogsFromStreamAcceptsTrustDialog(t *testing.T) {
 
 func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testing.T) {
 	stream := &replayableSnapshotStream{update: make(chan struct{})}
-	stream.publish("Do you trust the contents of this directory?")
+	// A real codex trust screen rather than the bare question this used to
+	// publish. The dismissal now reads the OPTIONS to decide what to press, so
+	// a snapshot with no options is no longer a dialog it can answer — and
+	// that is the point of gas-193q, not an incidental fixture detail. The
+	// accept row is already selected here, so Enter remains correct and this
+	// test keeps testing what it is named for: snapshot preservation.
+	stream.publish(capturedCodexTrust)
 	stream.publish("user@host $")
 	stream.finish()
 
 	var sent []string
+	needsPolling := false
 	_, err := acceptWorkspaceTrustDialogFromStream(
 		context.Background(),
 		time.Second,
@@ -987,6 +1006,7 @@ func TestAcceptWorkspaceTrustDialogFromStreamPreservesEarlierSnapshots(t *testin
 			sent = append(sent, keys...)
 			return nil
 		},
+		&needsPolling,
 	)
 	if err != nil {
 		t.Fatalf("acceptWorkspaceTrustDialogFromStream() error = %v", err)
@@ -1171,11 +1191,13 @@ func TestAcceptStartupDialogsFromStreamTimesOutDespiteContinuousIrrelevantSnapsh
 	}()
 
 	start := time.Now()
+	needsPolling := false
 	_, err := acceptWorkspaceTrustDialogFromStream(
 		context.Background(),
 		30*time.Millisecond,
 		newReplayableSnapshotCursorFromStream(stream),
 		func(_ ...string) error { return nil },
+		&needsPolling,
 	)
 	if err != nil {
 		t.Fatalf("acceptWorkspaceTrustDialogFromStream() error = %v, want nil timeout exit", err)
@@ -1602,7 +1624,7 @@ func TestAcceptStartupDialogsWithTimeoutRefreshesBudgetOnProgress(t *testing.T) 
 				if time.Since(start) < renderDelay {
 					return "", nil // agent still booting: nothing on screen yet
 				}
-				return "Quick safety check", nil
+				return codexTrustScreen, nil
 			}
 			if time.Since(trustAccepted) < renderDelay {
 				return "", nil // next dialog has not rendered yet
