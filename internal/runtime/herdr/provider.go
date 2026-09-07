@@ -295,7 +295,21 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 	}
 
 	startupText := startupDeliveryText(cfg)
-	if !adopted && info.PaneID != "" && (startupText != "" || hasSessionSetup(cfg)) {
+	// idleOutcome is recorded by the readiness wait below and read by the
+	// delivery block after it, so it outlives the block that produces it.
+	idleOutcome := idleWaitNoAgent
+	// Readiness and the second dialog pass are NOT conditional on having
+	// something to deliver.
+	//
+	// They were, and that scoped the late-modal fix to seats that carry startup
+	// text or session_setup. A seat with neither still boots into the same
+	// directory and still meets the same modal — codex raises its trust prompt
+	// about 1.5s AFTER drawing its input prompt — and it would simply sit on it
+	// forever. Nothing is eaten, because nothing is delivered, so it is not
+	// dangerous; it is worse than that operationally, because the seat parks
+	// silently and session state reports it creating/idle. That misreporting is
+	// the failure mode gas-193q documents, arrived at from the other direction.
+	if !adopted && info.PaneID != "" {
 		// A freshly-spawned agent boots through a shell→TUI handoff before its
 		// input prompt is listening; a paste or submit delivered in that window is
 		// silently swallowed, leaving the agent idle forever instead of running its
@@ -309,7 +323,7 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		// Bounded and best-effort: on a boot that never idles we deliver anyway (no
 		// worse than the prior unconditional send), and the reconciler tolerates a
 		// slow Start (pendingCreateNeverStartedTimeout = 10m).
-		idleOutcome := p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
+		idleOutcome = p.waitForIdleOutcome(ctx, name, startupNudgeIdleTimeout)
 		// Second dialog pass, AFTER readiness and BEFORE anything is delivered.
 		//
 		// Some TUIs draw their input prompt and raise their trust modal a beat
@@ -333,9 +347,12 @@ func (p *Provider) start(ctx context.Context, name string, cfg runtime.Config) e
 		//
 		// Cheap on a clean pane — every phase early-returns on a visible
 		// prompt — and idempotent, matching the first pass.
-		if info.PaneID != "" && runtime.ShouldAcceptStartupDialogs(cfg) {
+		if runtime.ShouldAcceptStartupDialogs(cfg) {
 			p.dismissDialogsOnPane(ctx, info.PaneID, runtime.StartupDialogTimeout())
 		}
+	}
+
+	if !adopted && info.PaneID != "" && (startupText != "" || hasSessionSetup(cfg)) {
 		// session_setup runs host-side ("in gc's process via sh -c", per the Config
 		// contract), so herdr can honor it the same way tmux does. Non-fatal, and
 		// ordered before the first turn so the agent's workspace is prepared when

@@ -207,6 +207,17 @@ func AcceptStartupDialogsFromStreamWithStatus(
 		return observed, fmt.Errorf("workspace trust dialog: %w", err)
 	}
 	if needsPolling {
+		// Report the whole pass as NOT observed, which is what sends the caller
+		// to the polling path that can move a cursor and re-read before
+		// committing (exec.go dismissStartupDialogs).
+		//
+		// This deliberately discards handledDialog and any earlier phase's
+		// observation, so the bool means "this pass fully disposed of the
+		// screen" rather than "this pass saw something" — a narrower claim than
+		// the name WithStatus suggests. Safe because the polling fallback
+		// re-reads live and every dismissal in this file is idempotent, so the
+		// worst case is repeating work, never repeating a keystroke into a
+		// dialog that is already gone.
 		return false, nil
 	}
 	observed = observed || phaseObserved
@@ -655,6 +666,10 @@ func acceptWorkspaceTrustDialog(
 	trustSeen := false
 	lastTrustScreen := ""
 	paintRefreshes := 0
+	// One selector for the whole phase. The movement budget has to outlive the
+	// individual calls, because this loop is what calls again — a per-call bound
+	// with an outer retry loop around it is not a bound.
+	selector := newDialogSelector()
 	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -686,7 +701,7 @@ func acceptWorkspaceTrustDialog(
 				paintRefreshes++
 				lastTrustScreen = content
 			}
-			confirmed, err := confirmDialogOptionByText(ctx, peek, sendKeys, content, workspaceTrustAcceptPatterns)
+			confirmed, err := selector.confirmOptionByText(ctx, peek, sendKeys, content, workspaceTrustAcceptPatterns)
 			if err != nil {
 				return err
 			}
@@ -734,6 +749,12 @@ func acceptWorkspaceTrustDialogFromStream(
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
 		match: containsWorkspaceTrustDialog,
 		matchKeysFor: func(content string) ([]string, bool) {
+			// Confirms ONLY the case a single historical snapshot can justify:
+			// the accept option already selected, so no cursor has to move and
+			// there is nothing for a stale frame to be stale ABOUT. Anything
+			// requiring movement is declined, because this path has no way to
+			// re-read after sending a key — the freshness proof the polling
+			// path relies on cannot be constructed here.
 			match, ok := findDialogOption(content, workspaceTrustAcceptPatterns)
 			if ok && match.Steps == 0 {
 				return []string{"Enter"}, true

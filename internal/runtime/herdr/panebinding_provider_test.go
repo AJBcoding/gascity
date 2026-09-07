@@ -124,8 +124,13 @@ pane_send-keys)
     cur=$(cat "$STATE/cursor")
     for k in $*; do
       case "$k" in
-        Down) if [ "$cur" -lt 1 ]; then cur=$((cur+1)); fi ;;
-        Up)   if [ "$cur" -gt 0 ]; then cur=$((cur-1)); fi ;;
+        # WRAPS at the ends, because claude's trust menu does: measured live
+        # 2026-09-07, from "No, exit" a Down and a second Down return the cursor
+        # to "No, exit". This fake used to clamp, which is an assumption about
+        # the renderer adopted without a capture -- the same class of mistake as
+        # assuming the accept option is pre-selected.
+        Down) if [ "$cur" -lt 1 ]; then cur=$((cur+1)); else cur=0; fi ;;
+        Up)   if [ "$cur" -gt 0 ]; then cur=$((cur-1)); else cur=1; fi ;;
         Enter)
           # Row order per renderer. Claude puts the DECLINE first (measured
           # 2026-09-04); codex puts accept first.

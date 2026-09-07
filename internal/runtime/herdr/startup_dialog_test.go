@@ -160,3 +160,35 @@ func TestStartDismissesATrustModalRaisedAFTERTheReadyPrompt(t *testing.T) {
 		t.Fatalf("the late modal was answered AFTER delivery, so the payload hit the dialog:\n%s", calls)
 	}
 }
+
+// TestStartDismissesALateModalOnASeatThatDeliversNothing pins that the
+// post-readiness dialog pass is not scoped to seats that carry a first turn.
+//
+// It used to sit inside the "startupText != "" || hasSessionSetup(cfg)" branch,
+// so a seat with neither got only the pre-readiness pass. Such a seat still
+// boots into the same directory and still meets the same late-raised modal, and
+// it would sit on it indefinitely. Nothing is eaten — nothing is delivered — but
+// the seat parks silently while session state reports it creating/idle, which is
+// the misreporting this bead already documents, reached from the other side.
+func TestStartDismissesALateModalOnASeatThatDeliversNothing(t *testing.T) {
+	p, state := newFakeHerdrProvider(t)
+	listenHerdrSocket(t, p)
+	setState(t, state, "trust_dialog_late")
+
+	// No Nudge and no SessionSetup: this seat delivers nothing at all.
+	cfg := runtime.Config{
+		Command:      "codex",
+		ProcessNames: []string{"codex"},
+	}
+	if err := p.Start(context.Background(), "gastown__witness", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	calls := fakeCalls(t, state)
+	if hasState(t, state, "trust_declined") {
+		t.Fatalf("the late modal was answered with the DECLINE option:\n%s", calls)
+	}
+	if !hasState(t, state, "trust_answered") {
+		t.Fatalf("a seat with nothing to deliver was left parked on its trust modal:\n%s", calls)
+	}
+}
