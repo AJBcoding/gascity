@@ -173,33 +173,21 @@ func TestAcceptStartupDialogsSelectsClaudeResumeAsIs(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second
 
-	var sent []string
-	err := AcceptStartupDialogs(
-		context.Background(),
-		func(_ int) (string, error) {
-			if len(sent) == 0 {
-				return strings.Join([]string{
-					"This session is 1h 55m old and 212.7k tokens.",
-					"",
-					"❯ 1. Resume from summary (recommended)",
-					"  2. Resume full session as-is",
-					"  3. Don't ask me again",
-					"",
-					"Enter to confirm · Esc to cancel",
-				}, "\n"), nil
-			}
-			return "❯ ", nil
-		},
-		func(keys ...string) error {
-			sent = append(sent, keys...)
-			return nil
-		},
-	)
-	if err != nil {
+	// A menu that RESPONDS to keys, so the assertion can be on which option was
+	// confirmed rather than on which keystrokes went out. A fixture that
+	// returns the same frame forever cannot distinguish a dismissal that landed
+	// on the right row from one that landed anywhere else (gas-p56m).
+	tui := &fakeTUI{
+		header:   []string{"This session is 1h 55m old and 212.7k tokens."},
+		options:  []string{"Resume from summary (recommended)", "Resume full session as-is", "Don't ask me again"},
+		ordinals: true,
+	}
+	if err := AcceptStartupDialogs(context.Background(), tui.peek, tui.sendKeys); err != nil {
 		t.Fatalf("AcceptStartupDialogs() error = %v", err)
 	}
-	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
-		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	if tui.confirmed != "Resume full session as-is" {
+		t.Fatalf("CONFIRMED %q, want %q (keys=%v) — summarizing loses the in-flight context the resume exists to keep",
+			tui.confirmed, "Resume full session as-is", tui.keys)
 	}
 }
 
@@ -232,8 +220,14 @@ func TestAcceptStartupDialogsFromStreamSelectsClaudeResumeAsIs(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
 	}
-	if !reflect.DeepEqual(sent, []string{"Down", "Enter"}) {
-		t.Fatalf("sent keys = %v, want [Down Enter]", sent)
+	// The streaming path confirms ONLY an option that is already selected. This
+	// dialog needs the cursor moved, and a snapshot stream cannot re-read after
+	// a keystroke to prove the move landed — so it declines and reports the pass
+	// unobserved, which sends the caller to the polling path that can. Sending
+	// Down here on the strength of a historical frame is precisely the
+	// stale-read defect (gas-193q).
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none: a snapshot cannot justify moving a cursor", sent)
 	}
 }
 
@@ -267,29 +261,25 @@ func TestAcceptStartupDialogsSkipsCodexUpdateDialog(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second
 
-	var sent []string
-	err := AcceptStartupDialogs(
-		context.Background(),
-		func(lines int) (string, error) {
-			if lines < 100 {
-				return "loading...", nil
-			}
-			return "✨ Update available! 0.124.0 -> 0.125.0\n" +
-				"› 1. Update now (runs `bun install -g @openai/codex`)\n" +
-				"  2. Skip\n" +
-				"  3. Skip until next version\n" +
-				"Press enter to continue", nil
+	// Option 1 is pre-selected and, captured live 2026-09-04, runs a remote
+	// installer piped to a shell. The verdict has to be WHICH OPTION was
+	// confirmed: a keystroke assertion passes for any implementation that emits
+	// the expected bytes, including one that lands on the installer.
+	tui := &fakeTUI{
+		header: []string{"✨ Update available! 0.153.2 -> 0.153.4"},
+		options: []string{
+			"Update now (runs sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh')",
+			"Skip",
+			"Skip until next version",
 		},
-		func(keys ...string) error {
-			sent = append(sent, keys...)
-			return nil
-		},
-	)
-	if err != nil {
-		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
+		ordinals: true,
+		footer:   "Press enter to continue",
 	}
-	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
-		t.Fatalf("sent keys = %q, want %q", got, want)
+	if err := AcceptStartupDialogs(context.Background(), tui.peek, tui.sendKeys); err != nil {
+		t.Fatalf("AcceptStartupDialogs() error = %v", err)
+	}
+	if tui.confirmed != "Skip" {
+		t.Fatalf("CONFIRMED %q, want %q (keys=%v)", tui.confirmed, "Skip", tui.keys)
 	}
 }
 
@@ -297,8 +287,29 @@ func TestAcceptStartupDialogsSkipsUpdateThenHandlesTrustDialog(t *testing.T) {
 	withZeroDialogTimings(t)
 	dialogPollTimeout = time.Second
 
-	var sent []string
-	staleUpdateReturned := false
+	// Two responsive menus in sequence, with one STALE frame of the already
+	// answered update dialog served in between — the case this test exists for.
+	// Both verdicts are on WHICH OPTION was confirmed; the previous version
+	// keyed its fixture off the exact keystroke sequence, which made it a
+	// restatement of the old implementation rather than a test of behavior.
+	update := &fakeTUI{
+		header: []string{"✨ Update available! 0.153.2 -> 0.153.4"},
+		options: []string{
+			"Update now (runs sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh')",
+			"Skip",
+			"Skip until next version",
+		},
+		ordinals: true,
+		footer:   "Press enter to continue",
+	}
+	trust := &fakeTUI{
+		header:   []string{"Do you trust the contents of this directory?"},
+		options:  []string{"Yes, continue", "No, quit"},
+		ordinals: true,
+		footer:   "Press enter to continue",
+	}
+	staleServed := false
+
 	err := AcceptStartupDialogs(
 		context.Background(),
 		func(lines int) (string, error) {
@@ -306,27 +317,32 @@ func TestAcceptStartupDialogsSkipsUpdateThenHandlesTrustDialog(t *testing.T) {
 				return "loading...", nil
 			}
 			switch {
-			case len(sent) < 2:
-				return codexUpdateDialogFixture(), nil
-			case !staleUpdateReturned:
-				staleUpdateReturned = true
-				return codexUpdateDialogFixture(), nil
-			case len(sent) == 2:
-				return codexTrustScreen, nil
+			case update.confirmed == "":
+				return update.peek(lines)
+			case !staleServed:
+				staleServed = true
+				return update.render(), nil // a stale frame of the answered dialog
+			case trust.confirmed == "":
+				return trust.peek(lines)
 			default:
 				return "› Implement {feature}", nil
 			}
 		},
 		func(keys ...string) error {
-			sent = append(sent, keys...)
-			return nil
+			if update.confirmed == "" {
+				return update.sendKeys(keys...)
+			}
+			return trust.sendKeys(keys...)
 		},
 	)
 	if err != nil {
 		t.Fatalf("AcceptStartupDialogs returned error: %v", err)
 	}
-	if got, want := strings.Join(sent, ","), "Down,Enter,Enter"; got != want {
-		t.Fatalf("sent keys = %q, want %q", got, want)
+	if update.confirmed != "Skip" {
+		t.Fatalf("update dialog CONFIRMED %q, want %q (keys=%v)", update.confirmed, "Skip", update.keys)
+	}
+	if trust.confirmed != "Yes, continue" {
+		t.Fatalf("trust dialog CONFIRMED %q, want %q (keys=%v)", trust.confirmed, "Yes, continue", trust.keys)
 	}
 }
 
@@ -874,8 +890,11 @@ func TestAcceptStartupDialogsFromStreamSkipsCodexUpdateDialog(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
 	}
-	if got, want := strings.Join(sent, ","), "Down,Enter"; got != want {
-		t.Fatalf("sent keys = %q, want %q", got, want)
+	// Same contract as the resume dialog: needs a move, cannot prove a move from
+	// a snapshot, so it declines rather than guessing. Guessing here would aim a
+	// blind Enter at a menu whose first option runs a remote installer.
+	if len(sent) != 0 {
+		t.Fatalf("sent keys = %v, want none: a snapshot cannot justify moving a cursor", sent)
 	}
 }
 
@@ -1514,8 +1533,13 @@ func TestAcceptStartupDialogsFromStreamAcceptsClaudeThemePicker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AcceptStartupDialogsFromStream() error = %v", err)
 	}
-	if !reflect.DeepEqual(sent, []string{"Enter", "Down", "Enter"}) {
-		t.Fatalf("sent keys = %v, want [Enter Down Enter] (accept theme, then advance the resume dialog)", sent)
+	// The theme picker is answerable from a snapshot — its safe option is
+	// pre-selected, so nothing has to move — and is still accepted with a bare
+	// Enter. The resume dialog that follows needs the cursor moved, which a
+	// snapshot stream cannot verify, so this path declines it and defers to the
+	// polling path rather than sending a Down it cannot confirm landed.
+	if !reflect.DeepEqual(sent, []string{"Enter"}) {
+		t.Fatalf("sent keys = %v, want [Enter] (theme accepted; the resume dialog is left to the polling path)", sent)
 	}
 }
 

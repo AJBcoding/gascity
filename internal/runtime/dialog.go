@@ -180,7 +180,7 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	if err := ctx.Err(); err != nil {
 		return observed, err
 	}
-	phaseObserved, err = acceptClaudeResumeDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	phaseObserved, err = acceptClaudeResumeDialogFromStream(ctx, timeout, stream, trackingSendKeys, &needsPolling)
 	if err != nil {
 		return observed, fmt.Errorf("claude resume dialog: %w", err)
 	}
@@ -191,7 +191,7 @@ func AcceptStartupDialogsFromStreamWithStatus(
 	if err := ctx.Err(); err != nil {
 		return observed, err
 	}
-	phaseObserved, err = acceptCodexUpdateDialogFromStream(ctx, timeout, stream, trackingSendKeys)
+	phaseObserved, err = acceptCodexUpdateDialogFromStream(ctx, timeout, stream, trackingSendKeys, &needsPolling)
 	if err != nil {
 		return observed, fmt.Errorf("codex update dialog: %w", err)
 	}
@@ -456,6 +456,8 @@ func acceptClaudeResumeDialog(
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	seen := false
+	selector := newDialogSelector()
 	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -467,12 +469,20 @@ func acceptClaudeResumeDialog(
 		}
 
 		if containsClaudeResumeDialog(content) {
-			budget.observe()
-			if err := sendKeys("Down"); err != nil {
+			if !seen {
+				budget.observe()
+				seen = true
+			}
+			confirmed, err := selector.confirmOptionByText(ctx, peek, sendKeys, content, claudeResumeAsIsPatterns)
+			if err != nil {
 				return err
 			}
-			sleep(ctx, bypassDialogConfirmDelay)
-			return sendKeys("Enter")
+			if confirmed {
+				sleep(ctx, startupDialogAcceptDelay)
+				return nil
+			}
+			sleep(ctx, dialogPollInterval)
+			continue
 		}
 
 		if containsPromptIndicator(content) ||
@@ -504,13 +514,14 @@ func acceptClaudeResumeDialogFromStream(
 	timeout time.Duration,
 	snapshots *replayableSnapshotCursor,
 	sendKeys func(keys ...string) error,
+	needsPolling *bool,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:       containsClaudeResumeDialog,
-		matchKeys:   []string{"Down", "Enter"},
-		matchDelay:  bypassDialogConfirmDelay,
-		ready:       containsPromptIndicator,
-		readyOrNext: containsPostClaudeResumeStartupDialog,
+		match:        containsClaudeResumeDialog,
+		matchKeysFor: alreadySelectedOnly(claudeResumeAsIsPatterns, needsPolling),
+		matchDelay:   bypassDialogConfirmDelay,
+		ready:        containsPromptIndicator,
+		readyOrNext:  containsPostClaudeResumeStartupDialog,
 	})
 }
 
@@ -533,6 +544,8 @@ func acceptCodexUpdateDialog(
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 ) error {
+	seen := false
+	selector := newDialogSelector()
 	for budget.live() {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -544,12 +557,20 @@ func acceptCodexUpdateDialog(
 		}
 
 		if containsCodexUpdateDialog(content) {
-			budget.observe()
-			if err := sendKeys("Down"); err != nil {
+			if !seen {
+				budget.observe()
+				seen = true
+			}
+			confirmed, err := selector.confirmOptionByText(ctx, peek, sendKeys, content, codexUpdateSkipPatterns)
+			if err != nil {
 				return err
 			}
-			sleep(ctx, bypassDialogConfirmDelay)
-			return sendKeys("Enter")
+			if confirmed {
+				sleep(ctx, startupDialogAcceptDelay)
+				return nil
+			}
+			sleep(ctx, dialogPollInterval)
+			continue
 		}
 
 		if containsPromptIndicator(content) ||
@@ -580,13 +601,14 @@ func acceptCodexUpdateDialogFromStream(
 	timeout time.Duration,
 	snapshots *replayableSnapshotCursor,
 	sendKeys func(keys ...string) error,
+	needsPolling *bool,
 ) (bool, error) {
 	return acceptDialogFromStream(ctx, timeout, snapshots, sendKeys, streamDialogSpec{
-		match:       containsCodexUpdateDialog,
-		matchKeys:   []string{"Down", "Enter"},
-		matchDelay:  bypassDialogConfirmDelay,
-		ready:       containsPromptIndicator,
-		readyOrNext: containsPostUpdateStartupDialog,
+		match:        containsCodexUpdateDialog,
+		matchKeysFor: alreadySelectedOnly(codexUpdateSkipPatterns, needsPolling),
+		matchDelay:   bypassDialogConfirmDelay,
+		ready:        containsPromptIndicator,
+		readyOrNext:  containsPostUpdateStartupDialog,
 	})
 }
 
@@ -605,6 +627,50 @@ func containsPostUpdateStartupDialog(content string) bool {
 // draws its options a few frames after its question; not enough for an animated
 // pane to hold the sequence open indefinitely.
 const trustDialogPaintRefreshLimit = 6
+
+// codexUpdateSkipPatterns name the option that declines a codex self-update,
+// most specific first.
+//
+// This one is not a convenience. Captured live 2026-09-04, the pre-selected
+// first option is:
+//
+//  1. Update now (runs sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh |
+//     CODEX_NON_INTERACTIVE=1 sh')
+//  2. Skip
+//  3. Skip until next version
+//
+// So the dismissal that used to send Down then Enter was one renderer change
+// away from running an unattended remote installer inside an agent pane, on
+// every spawn, with nobody watching. Naming the row removes that entirely: a
+// reorder can now only cost us a parked agent.
+//
+// Both listed options are safe — neither installs anything — so the second is a
+// genuine fallback rather than a guess. "Skip" is tried first because it is what
+// the positional version selected, keeping behavior identical today.
+var codexUpdateSkipPatterns = []dialogOptionPattern{
+	{Exact: "Skip"},
+	{Exact: "Skip until next version"},
+}
+
+// claudeResumeAsIsPatterns name the option that resumes the session intact
+// rather than summarizing it.
+//
+// PROVENANCE, because it is weaker than the others and should not be mistaken
+// for a fresh measurement: this layout comes from a repository fixture dating
+// to 2026-07-16, and nobody has re-captured the dialog since. It needs an old,
+// high-token session to raise, which cannot be induced on demand.
+//
+// That staleness is survivable ONLY because the selection is text-addressed and
+// fails closed. A positional selector built on a seven-week-old capture is a
+// bet; this one degrades to a parked agent if the labels have moved, which is
+// exactly the difference this bead exists to buy. Note the codex update dialog
+// proves the drift is real: its option-1 text changed from a bun install to a
+// piped curl between that fixture and the 09-04 capture, and the fixture never
+// followed.
+var claudeResumeAsIsPatterns = []dialogOptionPattern{
+	{Exact: "Resume full session as-is"},
+	{Prefix: "Resume full session"},
+}
 
 // workspaceTrustAcceptPatterns name the option that means "trust this
 // directory and keep running", for each TUI this fork launches, most specific
@@ -731,6 +797,28 @@ func acceptWorkspaceTrustDialog(
 		sleep(ctx, dialogPollInterval)
 	}
 	return nil
+}
+
+// alreadySelectedOnly builds a streamDialogSpec.matchKeysFor that confirms ONLY
+// the disposition a single historical snapshot can justify: the wanted option
+// already selected, so no cursor has to move and there is nothing for a stale
+// frame to be stale ABOUT.
+//
+// Anything requiring movement is declined and flagged for the polling path,
+// which can move a cursor and re-read before committing. A snapshot stream
+// cannot construct that proof — see confirmOptionByText's invariant — and
+// guessing here is what the whole selector exists to prevent.
+func alreadySelectedOnly(patterns []dialogOptionPattern, needsPolling *bool) func(string) ([]string, bool) {
+	return func(content string) ([]string, bool) {
+		match, ok := findDialogOption(content, patterns)
+		if ok && match.Steps == 0 {
+			return []string{"Enter"}, true
+		}
+		if needsPolling != nil {
+			*needsPolling = true
+		}
+		return nil, false
+	}
 }
 
 // acceptWorkspaceTrustDialogFromStream is the streaming twin. It can confirm

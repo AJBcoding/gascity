@@ -196,6 +196,11 @@ type fakeTUI struct {
 	shownInit bool
 	confirmed string
 	keys      []string
+	// footer is the line the renderer prints under the options. Several
+	// matchers key on it ("Press enter to continue" for codex's update dialog
+	// vs "Enter to confirm" for claude's), so a menu model that hardcodes one
+	// cannot stand in for the other.
+	footer string
 }
 
 func (f *fakeTUI) render() string { return f.renderAt(f.cursor) }
@@ -217,7 +222,11 @@ func (f *fakeTUI) renderAt(cursor int) string {
 			b.WriteString(" " + marker + opt + "\n")
 		}
 	}
-	b.WriteString("\n Enter to confirm · Esc to cancel")
+	footer := f.footer
+	if footer == "" {
+		footer = "Enter to confirm · Esc to cancel"
+	}
+	b.WriteString("\n " + footer)
 	return b.String()
 }
 
@@ -594,5 +603,141 @@ func TestDialogSelectorBoundsMovementKeysAcrossTheWholePhase(t *testing.T) {
 	}
 	if moves > dialogSelectionMaxMoves {
 		t.Fatalf("sent %d movement keys (%v), bound is %d per phase", moves, sent, dialogSelectionMaxMoves)
+	}
+}
+
+// codexUpdateMenu is the codex self-update dialog as captured live 2026-09-04.
+// Option 1 is pre-selected and runs a remote installer piped to a shell, which
+// is why this dialog's disposition is not a matter of taste.
+func codexUpdateMenu(lag, wrap bool) *fakeTUI {
+	return &fakeTUI{
+		header: []string{"✨ Update available! 0.153.2 -> 0.153.4"},
+		options: []string{
+			"Update now (runs sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh')",
+			"Skip",
+			"Skip until next version",
+		},
+		ordinals: true,
+		footer:   "Press enter to continue",
+		lag:      lag,
+		wrap:     wrap,
+	}
+}
+
+// TestAcceptCodexUpdateDialogNeverConfirmsTheInstaller is the guard that makes
+// this dialog's safety independent of where its options sit.
+//
+// It was dismissed with a bare Down then Enter, which lands on "Skip" only
+// because "Skip" is currently second. A reorder, or a repaint lag on a wrapping
+// menu, and the same two keystrokes confirm "Update now" — an unattended remote
+// install inside an agent pane, on every spawn, with nobody watching. That is a
+// worse outcome than the agent-exit that gas-193q was filed for, reached by the
+// identical mechanism.
+func TestAcceptCodexUpdateDialogNeverConfirmsTheInstaller(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	const installer = "Update now (runs sh -c 'curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh')"
+
+	for _, tc := range []struct {
+		name      string
+		options   []string
+		lag, wrap bool
+	}{
+		// Today's layout. Down+Enter is CORRECT here, which is exactly why
+		// these cases cannot tell a text-addressed selector from a positional
+		// one — they are the coincidence, not the test.
+		{"today's layout", []string{installer, "Skip", "Skip until next version"}, false, false},
+		{"today's layout, repaint lag on a wrapping menu", []string{installer, "Skip", "Skip until next version"}, true, true},
+
+		// The cases that decide it. "The safe option is second" is a property
+		// of codex's renderer, not one we own, and it can change in a release
+		// we do not control. Down+Enter confirms whatever is second — and in
+		// the first two that is the installer.
+		{"REORDERED so the installer is second", []string{"Skip", installer, "Skip until next version"}, false, false},
+		{"REORDERED so the installer is second, with lag", []string{"Skip", installer, "Skip until next version"}, true, true},
+		{"REORDERED so Skip is last", []string{installer, "Skip until next version", "Skip"}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tui := codexUpdateMenu(tc.lag, tc.wrap)
+			tui.options = tc.options
+			budget := newStartupDialogBudget(5 * time.Second)
+			if err := acceptCodexUpdateDialog(context.Background(), budget, tui.peek, tui.sendKeys); err != nil {
+				t.Fatalf("acceptCodexUpdateDialog: %v", err)
+			}
+			if strings.HasPrefix(tui.confirmed, "Update now") {
+				t.Fatalf("CONFIRMED THE INSTALLER: %q (keys=%v)", tui.confirmed, tui.keys)
+			}
+			if tui.confirmed != "Skip" {
+				t.Fatalf("CONFIRMED %q, want %q (keys=%v)", tui.confirmed, "Skip", tui.keys)
+			}
+		})
+	}
+}
+
+// TestAcceptCodexUpdateDialogParksWhenNoSafeOptionIsNamed covers the renderer
+// that drops both options we know how to ask for. Parking costs a stalled
+// spawn, which is loud and recoverable; guessing costs an unattended install.
+func TestAcceptCodexUpdateDialogParksWhenNoSafeOptionIsNamed(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	tui := &fakeTUI{
+		header:   []string{"✨ Update available! 0.153.2 -> 0.153.4"},
+		options:  []string{"Update now (runs an installer)", "Remind me later", "Skip until next version"},
+		ordinals: true,
+		footer:   "Press enter to continue",
+	}
+	// "Skip until next version" is still present, so this menu IS answerable —
+	// swap it out to make nothing match.
+	tui.options[2] = "Not now"
+	budget := newStartupDialogBudget(400 * time.Millisecond)
+	if err := acceptCodexUpdateDialog(context.Background(), budget, tui.peek, tui.sendKeys); err != nil {
+		t.Fatalf("acceptCodexUpdateDialog: %v", err)
+	}
+	if tui.confirmed != "" {
+		t.Fatalf("CONFIRMED %q on a menu naming no option we know to be safe", tui.confirmed)
+	}
+}
+
+// TestAcceptClaudeResumeDialogKeepsTheSessionIntact pins the resume selector.
+//
+// Lower stakes than the installer — the wrong option summarizes a session
+// instead of resuming it, losing in-flight context rather than running code —
+// but the identical mechanism, and its captured layout is the OLDEST of the
+// three (a repository fixture from 2026-07-16, never re-captured). Being
+// text-addressed is what makes that staleness survivable: if the labels have
+// moved, this parks instead of confirming whatever now sits second.
+func TestAcceptClaudeResumeDialogKeepsTheSessionIntact(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	const asIs = "Resume full session as-is"
+
+	for _, tc := range []struct {
+		name      string
+		options   []string
+		lag, wrap bool
+	}{
+		{"today's layout", []string{"Resume from summary (recommended)", asIs, "Don't ask me again"}, false, false},
+		{"today's layout, repaint lag on a wrapping menu", []string{"Resume from summary (recommended)", asIs, "Don't ask me again"}, true, true},
+		// The discriminating case. This fixture is seven weeks old and has
+		// never been re-captured, so a reorder here is less hypothetical than
+		// unobserved.
+		{"REORDERED so as-is is no longer second", []string{"Resume from summary (recommended)", "Don't ask me again", asIs}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tui := &fakeTUI{
+				header:   []string{"This session is 1h 55m old and 212.7k tokens."},
+				options:  tc.options,
+				ordinals: true,
+				lag:      tc.lag,
+				wrap:     tc.wrap,
+			}
+			budget := newStartupDialogBudget(5 * time.Second)
+			if err := acceptClaudeResumeDialog(context.Background(), budget, tui.peek, tui.sendKeys); err != nil {
+				t.Fatalf("acceptClaudeResumeDialog: %v", err)
+			}
+			if tui.confirmed != "Resume full session as-is" {
+				t.Fatalf("CONFIRMED %q, want %q (keys=%v)", tui.confirmed, "Resume full session as-is", tui.keys)
+			}
+		})
 	}
 }
