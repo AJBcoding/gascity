@@ -285,6 +285,20 @@ const (
 // across the calls that phase makes.
 type dialogSelector struct {
 	movesLeft int
+	// pendingUnobserved records that a keystroke was sent and never seen to
+	// land. It poisons the selector for the REST OF THE PHASE, which is what
+	// makes the one-key-in-flight invariant true rather than merely intended.
+	//
+	// Without it the invariant held per CALL only. awaitSelectionMoved gives one
+	// key a bounded number of polls; if the repaint never arrives the call
+	// returns false and says nothing about the key it already sent. The phase
+	// loop then re-peeks — still the stale frame — and calls again, derives the
+	// same Steps, and sends a SECOND key. The first key's repaint then lands,
+	// the selected label changes, and that change is credited to the second key.
+	// On a wrapping menu the real cursor is now back on the decline row while
+	// the frame says otherwise, and Enter confirms it: keys=[Down Down Enter],
+	// confirmed "No, exit" (gas-4sdq, found in re-review).
+	pendingUnobserved bool
 }
 
 func newDialogSelector() *dialogSelector {
@@ -326,9 +340,15 @@ func newDialogSelector() *dialogSelector {
 //
 // THE PROTOCOL. Send exactly ONE step, then wait until the cursor is OBSERVED
 // on a different row before sending anything else. At most one keystroke is
-// ever in flight, so a frame showing the selection changed is proof that key
-// landed. If it is never observed to land, no further key is sent and the modal
-// is left up.
+// ever in flight — across the WHOLE phase, not merely within one call — so a
+// frame showing the selection changed is proof that key landed. A key that is
+// never observed to land poisons the selector permanently (pendingUnobserved):
+// no further key is sent, no Enter is authorized, and the modal is left up.
+//
+// The per-phase scope is load-bearing rather than tidy. The phase loop calls
+// this function repeatedly, so a per-call invariant lets an unobserved key
+// survive into the next call, where a late repaint is mistaken for the effect
+// of a newer key (gas-4sdq).
 //
 // Returns true only when Enter was sent. Returns false, nil when the option
 // could not be found, was ambiguous, or could not be observed as selected. The
@@ -353,6 +373,13 @@ func (s *dialogSelector) confirmOptionByText(
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
+		if s.pendingUnobserved {
+			// A key we sent was never seen to land, so nothing on screen can be
+			// trusted to describe where the cursor actually is — including a
+			// frame that happens to show the wanted option selected. Send
+			// nothing and authorize nothing for the rest of the phase.
+			return false, nil
+		}
 		match, ok := findDialogOption(content, patterns)
 		if !ok {
 			return false, nil
@@ -375,6 +402,10 @@ func (s *dialogSelector) confirmOptionByText(
 		if match.Steps < 0 {
 			key = "Up"
 		}
+		// Poisoned BEFORE the key goes out, so a transport error or a context
+		// cancellation between here and the observation cannot leave the
+		// selector believing nothing is outstanding.
+		s.pendingUnobserved = true
 		if err := sendKeys(key); err != nil {
 			return false, err
 		}
@@ -387,9 +418,11 @@ func (s *dialogSelector) confirmOptionByText(
 		if !moved {
 			// The keystroke was never observed to take. Sending another would
 			// be guessing about a cursor we cannot see, which is precisely how
-			// the stale-read defect selects the wrong row.
+			// the stale-read defect selects the wrong row. The selector stays
+			// poisoned, so the phase loop calling again changes nothing.
 			return false, nil
 		}
+		s.pendingUnobserved = false
 		content = next
 	}
 }

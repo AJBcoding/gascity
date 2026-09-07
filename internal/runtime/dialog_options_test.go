@@ -188,12 +188,17 @@ type fakeTUI struct {
 	// stale-read defect pass this suite.
 	wrap bool
 	// lag models read-your-writes latency: the TUI advances its cursor when it
-	// RECEIVES a key, while the screen repaints a poll later. With lag set, the
-	// first peek after a keystroke returns the PRE-keystroke frame. Every real
+	// RECEIVES a key, while the screen repaints some polls later. Every real
 	// terminal does this; neither oracle used to.
+	//
+	// lag means "trails by one poll". lagPolls sets the depth explicitly and
+	// wins when non-zero. The depth matters: a lag of one catches the original
+	// stale-read defect, but the per-call invariant bug (gas-4sdq) only appears
+	// when the repaint trails by MORE than the selector's observe bound, so an
+	// oracle that can only express one poll cannot reach it.
 	lag       bool
-	shown     int
-	shownInit bool
+	lagPolls  int
+	frames    []int
 	confirmed string
 	keys      []string
 	// footer is the line the renderer prints under the options. Several
@@ -233,16 +238,19 @@ func (f *fakeTUI) renderAt(cursor int) string {
 // peek renders the cursor position a viewer would SEE, which under lag trails
 // the position the TUI has actually moved to.
 func (f *fakeTUI) peek(int) (string, error) {
-	if !f.lag {
+	depth := f.lagPolls
+	if depth == 0 && f.lag {
+		depth = 1
+	}
+	if depth <= 0 {
 		return f.renderAt(f.cursor), nil
 	}
-	if !f.shownInit {
-		f.shown = f.cursor
-		f.shownInit = true
+	f.frames = append(f.frames, f.cursor)
+	i := len(f.frames) - 1 - depth
+	if i < 0 {
+		i = 0
 	}
-	out := f.renderAt(f.shown)
-	f.shown = f.cursor // the repaint catches up one poll later
-	return out, nil
+	return f.renderAt(f.frames[i]), nil
 }
 
 func (f *fakeTUI) sendKeys(keys ...string) error {
@@ -739,5 +747,50 @@ func TestAcceptClaudeResumeDialogKeepsTheSessionIntact(t *testing.T) {
 				t.Fatalf("CONFIRMED %q, want %q (keys=%v)", tui.confirmed, "Resume full session as-is", tui.keys)
 			}
 		})
+	}
+}
+
+// TestDialogSelectorPoisonsItselfWhenAKeystrokeIsNeverObserved pins the
+// per-PHASE scope of the one-key-in-flight invariant.
+//
+// The invariant used to hold per CALL. awaitSelectionMoved gives one key a
+// bounded number of polls; if the repaint never arrives within them the call
+// returned false and said nothing about the key it had already sent. The phase
+// loop then re-peeked — still the stale frame — called again, derived the same
+// Steps, and sent a SECOND key. The first key's repaint then landed, the
+// selected label changed, and that change was credited to the second key. On a
+// wrapping menu the real cursor was by then back on the decline row, and Enter
+// confirmed it: keys=[Down Down Enter], confirmed "No, exit" (gas-4sdq).
+//
+// The lag here is deeper than dialogSelectionObserveAttempts on purpose. That
+// depth is the whole precondition, and it is why the one-poll lag model that
+// catches the original defect cannot express this one.
+func TestDialogSelectorPoisonsItselfWhenAKeystrokeIsNeverObserved(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	tui := &fakeTUI{
+		header:   []string{"Quick safety check: Is this a project you created or one you trust?"},
+		options:  []string{"No, exit", "Yes, I trust this folder"},
+		wrap:     true,
+		lagPolls: dialogSelectionObserveAttempts + 4,
+	}
+	budget := newStartupDialogBudget(2 * time.Second)
+	if err := acceptWorkspaceTrustDialog(context.Background(), budget, tui.peek, tui.sendKeys); err != nil {
+		t.Fatalf("acceptWorkspaceTrustDialog: %v", err)
+	}
+	if tui.confirmed == "No, exit" {
+		t.Fatalf("CONFIRMED THE DECLINE (keys=%v) — a late repaint was credited to a newer keystroke", tui.keys)
+	}
+	if tui.confirmed != "" {
+		t.Fatalf("CONFIRMED %q from a screen with a keystroke outstanding (keys=%v)", tui.confirmed, tui.keys)
+	}
+	downs := 0
+	for _, k := range tui.keys {
+		if k == "Down" || k == "Up" {
+			downs++
+		}
+	}
+	if downs > 1 {
+		t.Fatalf("sent %d movement keys (%v); an unobserved key must stop the phase, not license another", downs, tui.keys)
 	}
 }
