@@ -178,15 +178,29 @@ func TestParseDialogOptionBlocksFoldsWrappedOptions(t *testing.T) {
 // and is right by luck on one layout. An assertion on the confirmed option
 // fails for every implementation that lands on the wrong row, whatever it sent.
 type fakeTUI struct {
-	header    []string
-	options   []string
-	ordinals  bool
-	cursor    int
+	header   []string
+	options  []string
+	ordinals bool
+	cursor   int
+	// wrap models a menu whose ends join. Claude Code's trust menu does this —
+	// measured live 2026-09-07: from "No, exit", Down then Down returns the
+	// cursor to "No, exit". Modeling only a clamping menu is what let a
+	// stale-read defect pass this suite.
+	wrap bool
+	// lag models read-your-writes latency: the TUI advances its cursor when it
+	// RECEIVES a key, while the screen repaints a poll later. With lag set, the
+	// first peek after a keystroke returns the PRE-keystroke frame. Every real
+	// terminal does this; neither oracle used to.
+	lag       bool
+	shown     int
+	shownInit bool
 	confirmed string
 	keys      []string
 }
 
-func (f *fakeTUI) render() string {
+func (f *fakeTUI) render() string { return f.renderAt(f.cursor) }
+
+func (f *fakeTUI) renderAt(cursor int) string {
 	var b strings.Builder
 	for _, h := range f.header {
 		b.WriteString(" " + h + "\n")
@@ -194,7 +208,7 @@ func (f *fakeTUI) render() string {
 	b.WriteString("\n")
 	for i, opt := range f.options {
 		marker := "  "
-		if i == f.cursor {
+		if i == cursor {
 			marker = "❯ "
 		}
 		if f.ordinals {
@@ -207,19 +221,38 @@ func (f *fakeTUI) render() string {
 	return b.String()
 }
 
-func (f *fakeTUI) peek(int) (string, error) { return f.render(), nil }
+// peek renders the cursor position a viewer would SEE, which under lag trails
+// the position the TUI has actually moved to.
+func (f *fakeTUI) peek(int) (string, error) {
+	if !f.lag {
+		return f.renderAt(f.cursor), nil
+	}
+	if !f.shownInit {
+		f.shown = f.cursor
+		f.shownInit = true
+	}
+	out := f.renderAt(f.shown)
+	f.shown = f.cursor // the repaint catches up one poll later
+	return out, nil
+}
 
 func (f *fakeTUI) sendKeys(keys ...string) error {
 	f.keys = append(f.keys, keys...)
 	for _, k := range keys {
 		switch k {
 		case "Down":
-			if f.cursor < len(f.options)-1 {
+			switch {
+			case f.cursor < len(f.options)-1:
 				f.cursor++
+			case f.wrap:
+				f.cursor = 0
 			}
 		case "Up":
-			if f.cursor > 0 {
+			switch {
+			case f.cursor > 0:
 				f.cursor--
+			case f.wrap:
+				f.cursor = len(f.options) - 1
 			}
 		case "Enter":
 			if f.confirmed == "" {
@@ -278,10 +311,10 @@ func TestConfirmDialogOptionByTextConfirmsTheNamedOption(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, err := confirmDialogOptionByText(context.Background(), tc.tui.peek, tc.tui.sendKeys,
+			ok, err := newDialogSelector().confirmOptionByText(context.Background(), tc.tui.peek, tc.tui.sendKeys,
 				tc.tui.render(), workspaceTrustAcceptPatterns)
 			if err != nil {
-				t.Fatalf("confirmDialogOptionByText: %v", err)
+				t.Fatalf("confirmOptionByText: %v", err)
 			}
 			if !ok {
 				t.Fatalf("declined to answer a dialog it should have answered (keys=%v)", tc.tui.keys)
@@ -323,10 +356,10 @@ func TestConfirmDialogOptionByTextParksRatherThanGuessing(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			ok, err := confirmDialogOptionByText(context.Background(), tc.tui.peek, tc.tui.sendKeys,
+			ok, err := newDialogSelector().confirmOptionByText(context.Background(), tc.tui.peek, tc.tui.sendKeys,
 				tc.tui.render(), workspaceTrustAcceptPatterns)
 			if err != nil {
-				t.Fatalf("confirmDialogOptionByText: %v", err)
+				t.Fatalf("confirmOptionByText: %v", err)
 			}
 			if ok {
 				t.Fatalf("reported a confirmation it could not have made safely")
@@ -350,12 +383,12 @@ func TestConfirmDialogOptionByTextRefusesToConfirmWhatItCannotSee(t *testing.T) 
 
  Enter to confirm`
 	var sent []string
-	ok, err := confirmDialogOptionByText(context.Background(),
+	ok, err := newDialogSelector().confirmOptionByText(context.Background(),
 		func(int) (string, error) { return noCursor, nil },
 		func(keys ...string) error { sent = append(sent, keys...); return nil },
 		noCursor, workspaceTrustAcceptPatterns)
 	if err != nil {
-		t.Fatalf("confirmDialogOptionByText: %v", err)
+		t.Fatalf("confirmOptionByText: %v", err)
 	}
 	if ok {
 		t.Fatal("confirmed a selection on a screen with no visible cursor")
@@ -376,12 +409,12 @@ func TestConfirmDialogOptionByTextWillNotConfirmAnUnverifiedMove(t *testing.T) {
 		options: []string{"No, exit", "Yes, I trust this folder"},
 	}).render()
 	var sent []string
-	ok, err := confirmDialogOptionByText(context.Background(),
+	ok, err := newDialogSelector().confirmOptionByText(context.Background(),
 		func(int) (string, error) { return frozen, nil },
 		func(keys ...string) error { sent = append(sent, keys...); return nil },
 		frozen, workspaceTrustAcceptPatterns)
 	if err != nil {
-		t.Fatalf("confirmDialogOptionByText: %v", err)
+		t.Fatalf("confirmOptionByText: %v", err)
 	}
 	if ok {
 		t.Fatal("reported confirmation against a pane that never showed the cursor move")
@@ -464,5 +497,102 @@ func TestAcceptWorkspaceTrustDialogWaitsForOptionsToPaint(t *testing.T) {
 	if tui.confirmed != "Yes, continue" {
 		t.Fatalf("CONFIRMED %q, want %q — a modal still painting was treated as unanswerable (keys=%v)",
 			tui.confirmed, "Yes, continue", tui.keys)
+	}
+}
+
+// TestAcceptWorkspaceTrustDialogSurvivesRepaintLag is the guard for the defect
+// the first version of this selector shipped with.
+//
+// A TUI advances its cursor when it RECEIVES a key while its screen repaints a
+// poll later, so a read taken after sending a key can still describe the state
+// before it. The old loop sent every step at once, slept a fixed 200ms, re-read
+// and re-decided — and on a stale frame it moved AGAIN. Where that extra step
+// lands is decided by menu layout, which is not a property we control:
+//
+//   - WRAPPING menu (claude's, measured live 2026-09-07): the duplicate step
+//     returns the real cursor to "No, exit" while a stale frame shows the
+//     accept row selected. Enter then confirms the DECLINE and exits the agent.
+//   - CLAMPING menu: the overshoot is absorbed only while the accept option
+//     sits at a menu end. Move it off the boundary and clamping stops saving
+//     us.
+//
+// So the matrix crosses lag with both layouts AND puts the accept option
+// somewhere other than the last row. "The accept option is at the end" is a
+// positional assumption of exactly the kind this file exists to delete; a suite
+// that only ever places it last cannot tell a correct implementation from one
+// that is right by coincidence.
+func TestAcceptWorkspaceTrustDialogSurvivesRepaintLag(t *testing.T) {
+	withZeroDialogTimings(t)
+
+	const accept = "Yes, I trust this folder"
+	for _, tc := range []struct {
+		name    string
+		options []string
+		lag     bool
+		wrap    bool
+	}{
+		{"lag + wrapping menu, accept last (claude today)", []string{"No, exit", accept}, true, true},
+		{"lag + clamping menu, accept last", []string{"No, exit", accept}, true, false},
+		{"lag + clamping menu, accept NOT last", []string{"No, exit", accept, "No, and don't ask again"}, true, false},
+		{"lag + wrapping menu, accept NOT last", []string{"No, exit", accept, "No, and don't ask again"}, true, true},
+		{"no lag, wrapping menu", []string{"No, exit", accept}, false, true},
+		{"no lag, clamping menu", []string{"No, exit", accept}, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tui := &fakeTUI{
+				header:  []string{"Quick safety check: Is this a project you created or one you trust?"},
+				options: tc.options,
+				lag:     tc.lag,
+				wrap:    tc.wrap,
+			}
+			budget := newStartupDialogBudget(5 * time.Second)
+			if err := acceptWorkspaceTrustDialog(context.Background(), budget, tui.peek, tui.sendKeys); err != nil {
+				t.Fatalf("acceptWorkspaceTrustDialog: %v", err)
+			}
+			if tui.confirmed != accept {
+				t.Fatalf("CONFIRMED %q, want %q (keys=%v) — a frame was acted on that predates the keystrokes already sent",
+					tui.confirmed, accept, tui.keys)
+			}
+		})
+	}
+}
+
+// TestDialogSelectorBoundsMovementKeysAcrossTheWholePhase pins the bound that
+// the phase's own retry loop used to defeat.
+//
+// dialogSelectionMaxMoves is per PHASE, not per call. It used to be per call,
+// with the outer poll loop calling again for as long as the budget lived — a
+// pane that ignored Down was measured taking nine movement keys against a
+// documented bound of three. Keystrokes into a pane whose state we have already
+// concluded we cannot verify are exactly what must not be unbounded.
+func TestDialogSelectorBoundsMovementKeysAcrossTheWholePhase(t *testing.T) {
+	withZeroDialogTimings(t)
+	dialogPollInterval = 2 * time.Millisecond
+
+	// A pane that renders the modal and never responds to a keystroke.
+	frozen := (&fakeTUI{
+		header:  []string{"Quick safety check"},
+		options: []string{"No, exit", "Yes, I trust this folder"},
+	}).render()
+	var sent []string
+	peek := func(int) (string, error) { return frozen, nil }
+	sendKeys := func(keys ...string) error { sent = append(sent, keys...); return nil }
+
+	budget := newStartupDialogBudget(300 * time.Millisecond)
+	if err := acceptWorkspaceTrustDialog(context.Background(), budget, peek, sendKeys); err != nil {
+		t.Fatalf("acceptWorkspaceTrustDialog: %v", err)
+	}
+
+	moves := 0
+	for _, k := range sent {
+		switch k {
+		case "Down", "Up":
+			moves++
+		case "Enter":
+			t.Fatalf("confirmed against a pane whose cursor was never observed to move: %v", sent)
+		}
+	}
+	if moves > dialogSelectionMaxMoves {
+		t.Fatalf("sent %d movement keys (%v), bound is %d per phase", moves, sent, dialogSelectionMaxMoves)
 	}
 }

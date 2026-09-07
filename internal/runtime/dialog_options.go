@@ -185,6 +185,13 @@ type dialogOptionMatch struct {
 	// zero means the wanted option is already selected.
 	Steps int
 	Label string
+	// SelectedLabel is the row the cursor sits on, in the SAME menu block as
+	// Label. It is the freshness witness. A TUI advances its internal cursor
+	// when it RECEIVES a key while the rendered screen lags, so a frame read
+	// after sending a key may still describe the state BEFORE it. Comparing
+	// this label across frames is how a read is shown to post-date a keystroke;
+	// wall-clock ordering does not show it.
+	SelectedLabel string
 }
 
 // dialogOptionPattern names one option precisely enough to tell it apart from
@@ -242,7 +249,11 @@ func findDialogOption(content string, patterns []dialogOptionPattern) (dialogOpt
 					continue
 				}
 				matches++
-				found = dialogOptionMatch{Steps: i - sel, Label: opt.Label}
+				found = dialogOptionMatch{
+					Steps:         i - sel,
+					Label:         opt.Label,
+					SelectedLabel: block[sel].Label,
+				}
 			}
 		}
 		if matches == 1 {
@@ -252,28 +263,93 @@ func findDialogOption(content string, patterns []dialogOptionPattern) (dialogOpt
 	return dialogOptionMatch{}, false
 }
 
-// dialogSelectionAttempts bounds the move/observe loop. Each pass sends at most
-// one batch of movement keys and then re-reads, so a renderer that repaints
-// slowly gets a few chances without the loop becoming a retry storm.
-const dialogSelectionAttempts = 3
+// Movement bounds. Both exist because of the same hazard: keystrokes are cheap
+// to send and expensive to be wrong about.
+const (
+	// dialogSelectionMaxMoves caps the movement keys ONE dialog phase may send,
+	// across every call it makes. The previous bound was per call, and the
+	// phase's outer poll loop simply called again — a pane that ignored Down
+	// was measured taking NINE movement keys against a documented bound of
+	// three. The cap lives on the selector so the phase, not the call, is what
+	// is bounded.
+	//
+	// Six is the longest real menu (pi's five options, so at most four steps)
+	// plus slack for one re-derivation after a repaint.
+	dialogSelectionMaxMoves = 6
+	// dialogSelectionObserveAttempts bounds how long one keystroke is given to
+	// appear on screen before the selector gives up and parks.
+	dialogSelectionObserveAttempts = 8
+)
 
-// confirmDialogOptionByText moves the cursor onto the option whose label
-// matches want and presses Enter — but only once the cursor has been OBSERVED
-// there on a fresh read of the screen.
+// dialogSelector answers ONE dialog phase's menus, carrying the movement budget
+// across the calls that phase makes.
+type dialogSelector struct {
+	movesLeft int
+}
+
+func newDialogSelector() *dialogSelector {
+	return &dialogSelector{movesLeft: dialogSelectionMaxMoves}
+}
+
+// confirmOptionByText moves the cursor onto the option identified by patterns
+// and presses Enter.
 //
-// Returns true when Enter was sent. Returns false, nil when the option could
-// not be found, was ambiguous, or could not be observed as selected: in that
-// case NOTHING is confirmed and the modal is deliberately left up for a human.
-// The contract is one-directional on purpose — this function may decline to
-// answer, but it may never answer wrongly.
-func confirmDialogOptionByText(
+// THE INVARIANT, and everything below is a consequence of it:
+//
+//	THE OBSERVATION THAT AUTHORIZES ENTER MUST PROVABLY POST-DATE THE LAST
+//	KEYSTROKE.
+//
+// Wall-clock ordering does not establish that. A sleep does not establish it.
+// Only seeing the screen change in the way the keystroke would cause does.
+//
+// WHY THAT PROOF IS THE WHOLE FUNCTION. The first version of this code sent all
+// the movement keys at once, slept, re-read, and re-decided. Nothing tied the
+// frame it read to the keys it had already sent. A TUI advances its internal
+// cursor on RECEIPT while its screen lags, so the re-read could describe the
+// state before the move; the loop then read Steps from that stale frame and
+// moved AGAIN. Where the extra step lands decides whether that is harmless:
+//
+//   - claude's trust menu WRAPS (measured live 2026-09-07: Down, Down returns
+//     the cursor to "No, exit"), so the duplicated step puts the real cursor
+//     back on the DECLINE row while a stale frame shows the accept row
+//     selected. The following Enter confirms "No, exit" and exits the agent —
+//     the exact symptom gas-193q exists to remove, reintroduced inside its own
+//     verification step.
+//   - a clamping menu absorbs the overshoot ONLY while the accept option sits
+//     at a menu end. Move it off the boundary and clamping stops helping.
+//
+// That second point is why this is fixed by protocol rather than by handling
+// wrapping: "the accept option is at the end of the list" is a positional
+// property of the renderer, exactly the class of assumption this file was
+// written to delete. Depending on it here would have re-created the original
+// bug one layer down.
+//
+// THE PROTOCOL. Send exactly ONE step, then wait until the cursor is OBSERVED
+// on a different row before sending anything else. At most one keystroke is
+// ever in flight, so a frame showing the selection changed is proof that key
+// landed. If it is never observed to land, no further key is sent and the modal
+// is left up.
+//
+// Returns true only when Enter was sent. Returns false, nil when the option
+// could not be found, was ambiguous, or could not be observed as selected. The
+// contract stays one-directional: it may decline to answer, it may never answer
+// wrongly.
+//
+// ON PARKING WITH THE CURSOR MOVED. A park can leave the selection somewhere
+// other than where it was found, and a later Enter from any source confirms
+// whatever is there. It is deliberately not restored, for two reasons: undoing
+// requires more keystrokes into a pane whose state we have just concluded we
+// cannot verify, and every step taken was toward the ACCEPT row — on both
+// measured menus "as found" is the decline row, so restoring would make a stray
+// Enter more dangerous, not less.
+func (s *dialogSelector) confirmOptionByText(
 	ctx context.Context,
 	peek func(lines int) (string, error),
 	sendKeys func(keys ...string) error,
 	content string,
 	patterns []dialogOptionPattern,
 ) (bool, error) {
-	for attempt := 0; attempt < dialogSelectionAttempts; attempt++ {
+	for {
 		if err := ctx.Err(); err != nil {
 			return false, err
 		}
@@ -288,28 +364,60 @@ func confirmDialogOptionByText(
 			sleep(ctx, startupDialogAcceptDelay)
 			return true, nil
 		}
+		if s.movesLeft <= 0 {
+			// Out of movement budget. Keep the option of confirming a menu that
+			// repaints into the right selection on its own — that costs no
+			// keystroke — but send no more movement keys.
+			return false, nil
+		}
+
 		key := "Down"
-		steps := match.Steps
-		if steps < 0 {
+		if match.Steps < 0 {
 			key = "Up"
-			steps = -steps
 		}
-		keys := make([]string, 0, steps)
-		for i := 0; i < steps; i++ {
-			keys = append(keys, key)
-		}
-		if err := sendKeys(keys...); err != nil {
+		if err := sendKeys(key); err != nil {
 			return false, err
+		}
+		s.movesLeft--
+
+		next, moved, err := awaitSelectionMoved(ctx, peek, patterns, match.SelectedLabel)
+		if err != nil {
+			return false, err
+		}
+		if !moved {
+			// The keystroke was never observed to take. Sending another would
+			// be guessing about a cursor we cannot see, which is precisely how
+			// the stale-read defect selects the wrong row.
+			return false, nil
+		}
+		content = next
+	}
+}
+
+// awaitSelectionMoved polls until the menu's selected row differs from `from`,
+// which is what makes the returned frame provably later than the keystroke that
+// caused it. A frame still showing `from` is not evidence of anything: it is
+// equally consistent with a key that has not rendered yet and a key that was
+// dropped, and those want the same conservative answer.
+func awaitSelectionMoved(
+	ctx context.Context,
+	peek func(lines int) (string, error),
+	patterns []dialogOptionPattern,
+	from string,
+) (string, bool, error) {
+	for i := 0; i < dialogSelectionObserveAttempts; i++ {
+		if err := ctx.Err(); err != nil {
+			return "", false, err
 		}
 		sleep(ctx, bypassDialogConfirmDelay)
 		next, err := peek(startupDialogPeekLines)
 		if err != nil {
-			return false, err
+			return "", false, err
 		}
-		content = next
+		if m, ok := findDialogOption(next, patterns); ok &&
+			m.SelectedLabel != "" && m.SelectedLabel != from {
+			return next, true, nil
+		}
 	}
-	// The cursor never came to rest on the wanted option. Confirming now would
-	// be confirming whatever it landed on instead, which is the defect this
-	// whole file exists to remove.
-	return false, nil
+	return "", false, nil
 }
