@@ -302,6 +302,31 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				return 1
 			}
 		}
+		// A [[named_session]] declares a PERSISTENT seat. One with no
+		// prompt_template silently inherits a generic run-once prompt written
+		// for work that ends, which is the misconfiguration that kept killing
+		// crew seats before anyone noticed the template was missing (gas-tlm8).
+		// That is a debugging mistake in exactly the sense --strict exists to
+		// catch, so report it here rather than emitting a plausible-looking
+		// prompt. Pool agents are excluded: a worker prompt is correct for them.
+		for _, a := range resolvedAgents {
+			if isAgentEffectivelySuspended(cfg, &a) {
+				continue
+			}
+			if a.PromptTemplate != "" {
+				continue
+			}
+			if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
+				continue
+			}
+			if identity := primeConfiguredNamedIdentity(cfg, agentName, &a); identity != "" {
+				fmt.Fprintf(stderr, //nolint:errcheck
+					"gc prime: named session %q has no prompt_template, so it would be primed with the generic run-once prompt "+
+						"instead of a crew prompt. Add agents/%s/prompt.template.md (or set prompt_template on the agent).\n",
+					identity, a.Name)
+				return 1
+			}
+		}
 		// Strict preconditions passed; now it's safe to update provider resume metadata.
 		runHookSideEffects()
 	}
@@ -353,16 +378,30 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 		}
 		// Agents without a prompt_template: read a builtin prompt shipped by
 		// the core bootstrap pack, resolved from the composed pack dirs.
-		// When formula_v2 is enabled, all agents use graph-worker.md.
-		// Otherwise pool agents use pool-worker.md.
+		// Pool agents get graph-worker.md under formula_v2, else pool-worker.md.
 		// Pool instances have Pool=nil after resolution, so also check the
 		// template agent via findAgentByName.
+		//
+		// The pool guard is load-bearing, not a filter for tidiness (gas-tlm8).
+		// Both worker prompts open with `gc hook --claim --drain-ack --json`,
+		// and gc hook answers {action: drain, reason: no_work} whenever a hook
+		// is merely EMPTY. For an ephemeral pool worker, acking that is the
+		// whole contract: no work, go home. For a PERSISTENT seat it is fatal —
+		// the ack means "I agree to exit", so the controller stamps drain_at and
+		// tears the runtime down seconds after it started, and a mode="always"
+		// seat then respawns into the same suicide. A non-pool agent must fall
+		// through to defaultPrimePrompt, which claims work with a plain
+		// `gc hook --claim --json` and never acks.
+		//
+		// The non-v2 branch always carried this guard; the formula_v2 branch
+		// was added without it and so handed graph-worker.md to every
+		// template-less agent, persistent crew seats included.
 		if a.PromptTemplate == "" {
 			promptFile := ""
-			if coreDir := cfg.PackDirByName("core"); coreDir != "" {
+			if coreDir := cfg.PackDirByName("core"); coreDir != "" && (a.SupportsInstanceExpansion() || isPoolInstance(cfg, a)) {
 				if cfg.Daemon.FormulaV2Enabled() {
 					promptFile = filepath.Join(coreDir, "assets", "prompts", "graph-worker.md")
-				} else if a.SupportsInstanceExpansion() || isPoolInstance(cfg, a) {
+				} else {
 					promptFile = filepath.Join(coreDir, "assets", "prompts", "pool-worker.md")
 				}
 			}
@@ -383,6 +422,36 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	injection := primeHookContextSuffix(cityPath, hookMode, hookContext, stderr, consumeHandoff)
 	writePrimePromptWithFormat(stdout, cityName, agentName, defaultPrimePrompt, hookMode, hookFormat, suppressHookPrompt, injection.text, injection.afterDelivery)
 	return 0
+}
+
+// primeConfiguredNamedIdentity reports the [[named_session]] identity that
+// claims this prime invocation, or "" when none does. Both the requested name
+// and the resolved agent's qualified name are checked: a rig-scoped named
+// session is declared as "<rig>/<template>", while the [[agent]] template
+// backing it is frequently unbound (no dir), so neither spelling alone matches
+// reliably.
+func primeConfiguredNamedIdentity(cfg *config.City, agentName string, a *config.Agent) string {
+	if cfg == nil {
+		return ""
+	}
+	wanted := make(map[string]bool, 2)
+	if name := strings.TrimSpace(agentName); name != "" {
+		wanted[name] = true
+	}
+	if a != nil {
+		if qualified := strings.TrimSpace(a.QualifiedName()); qualified != "" {
+			wanted[qualified] = true
+		}
+	}
+	if len(wanted) == 0 {
+		return ""
+	}
+	for i := range cfg.NamedSessions {
+		if identity := strings.TrimSpace(cfg.NamedSessions[i].QualifiedName()); identity != "" && wanted[identity] {
+			return identity
+		}
+	}
+	return ""
 }
 
 func primeAgentCandidates(agentName string, hookMode bool, cityPath string) []string {
