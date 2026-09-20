@@ -1,0 +1,17 @@
+# Proposed role-class assignments, not installed city configuration.
+# Membership is static and separate. Concrete-provider exceptions stay concrete.
+[providers.lane_coordination]
+base = "provider:claude"
+option_defaults = { model = "claude-opus-5", effort = "low" }
+
+[providers.lane_worker]
+base = "provider:claude"
+option_defaults = { model = "claude-sonnet-5", effort = "low" }
+
+[providers.lane_recon]
+base = "provider:claude"
+option_defaults = { model = "claude-haiku-4-5-20251001", effort = "low" }
+
+[providers.lane_escalation]
+base = "provider:claude"
+option_defaults = { model = "claude-fable-5", effort = "high" }

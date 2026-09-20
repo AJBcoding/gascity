@@ -1,0 +1,21 @@
+# Proposed counterparts awaiting operator confirmation; not installed.
+# codex_mac must supply CODEX_HOME with the selected effort-only profile files.
+[providers.lane_coordination]
+base = "provider:codex_mac"
+option_defaults = { model = "gpt-5.6-sol", effort = "" }
+args_append = ["--profile", "gc-high"]
+
+[providers.lane_worker]
+base = "provider:codex_mac"
+option_defaults = { model = "gpt-5.6-luna", effort = "" }
+args_append = ["--profile", "gc-medium"]
+
+[providers.lane_recon]
+base = "provider:codex_mac"
+option_defaults = { model = "gpt-5.6-luna", effort = "" }
+args_append = ["--profile", "gc-low"]
+
+[providers.lane_escalation]
+base = "provider:codex_mac"
+option_defaults = { model = "gpt-6-astra", effort = "" }
+args_append = ["--profile", "gc-high"]
