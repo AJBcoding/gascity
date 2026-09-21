@@ -1,4 +1,4 @@
-# Proposed role-class assignments, not installed city configuration.
+# Operator-approved role-class assignments (2026-09-20); not installed.
 # Membership is static and separate. Concrete-provider exceptions stay concrete.
 [providers.lane_coordination]
 base = "provider:claude"

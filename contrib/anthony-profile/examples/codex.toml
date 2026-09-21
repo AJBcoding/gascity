@@ -1,4 +1,4 @@
-# Proposed counterparts awaiting operator confirmation; not installed.
+# Operator-approved counterparts (2026-09-20); not installed.
 # codex_mac must supply CODEX_HOME with the selected effort-only profile files.
 [providers.lane_coordination]
 base = "provider:codex_mac"

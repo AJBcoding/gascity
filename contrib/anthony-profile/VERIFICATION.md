@@ -100,11 +100,13 @@ status reported uncertainty rather than assuming they stopped or migrated.
 | Watcher remains quiet on ignored-file rename | Deployed source inspected; isolated running-city check not run |
 | Actual lane membership migration and preserved pins | Not installed; requires reviewed city diff and safe maintenance window |
 
-The operator approved the role-based model policy. The explicit cross-provider
-pairings in `examples/` remain proposals, not a claim of equivalence or an approved
-live fleet mapping. Native profiles must pass fresh/resume acceptance before those
-examples are used as an operational Codex variant. New researcher/recon pools and
-mandate prompts are not created by this utility.
+The operator approved the explicit cross-provider pairings on 2026-09-20:
+Opus/low ↔ Sol/high; Sonnet/low ↔ Luna/medium; Haiku/low ↔ Luna/low;
+Fable/high ↔ Astra/high. The files in `examples/` now record this approved policy,
+with existing concrete-provider exceptions preserved. This closes the model-mapping
+decision, not the launch/resume or migration gates. Native profiles must pass
+fresh/resume acceptance before use as an operational Codex variant. New
+researcher/recon pools and mandate prompts are not created by this utility.
 
 ## Independent review
 

@@ -86,24 +86,29 @@ No silent home-default fallback is implemented. If the fresh/resume canary fails
 report that failure and decide whether compound account/effort homes are acceptable.
 The helper does not invent a Claude-to-Codex capability equivalence.
 
-The [Claude](examples/claude.toml) and [Codex](examples/codex.toml) files are
-reviewable proposals reflecting the requested role-class arrangement. They are
-not installed defaults. The proposed counterparts are Opus/low ↔ Sol/high,
-Sonnet/low ↔ Luna/medium, Haiku/low ↔ Luna/low, and Fable/high ↔ Astra/high;
-operator confirmation of those specific pairings remains separate from approval
-of the role-based policy. Coordination, research, and maintenance may share the
-coordination lane; they do not need separate lanes when their assignment is identical.
+The operator approved these exact pairings on 2026-09-20. The
+[Claude](examples/claude.toml) and [Codex](examples/codex.toml) files contain the
+approved assignments; they are not yet installed in the live city.
+
+| Lane | Claude | Codex |
+| --- | --- | --- |
+| Coordination, research, maintenance | Opus / low | Sol / high |
+| Workers | Sonnet / low | Luna / medium |
+| Recon | Haiku / low | Luna / low |
+| Escalation | Fable / high | Astra / high |
+
+These are operator-chosen counterparts, not claims of equivalent capabilities.
+Existing concrete-provider exceptions remain untouched. Coordination, research,
+and maintenance can share a lane because their assignment is identical.
 
 ## One-time migration, separate from switching
 
 The helper deliberately does not migrate or install a live city's configuration.
 It refuses apply until the fixed include and an initial active lane file exist.
 
-1. Approve both variants and the static membership. The operator requested
-   Opus/low for coordination, research and maintenance; Sonnet and Luna worker
-   allocations; Luna recon; and Fable escalation. That does not itself identify
-   cross-provider counterparts or create new researcher/recon pools. Preserve
-   explicit concrete-provider exceptions, including Python419's Codex polecats.
+1. Use the approved variants above and review the static template membership.
+   Model approval does not create new researcher/recon pools. Preserve explicit
+   concrete-provider exceptions, including Python419's Codex polecats.
 2. Prepare the migration in a separate city configuration checkout. Add this
    top-level line before `[workspace]`, retaining any existing includes:
 

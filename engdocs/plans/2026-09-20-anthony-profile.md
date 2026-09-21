@@ -27,7 +27,8 @@ accepted fingerprints as evidence of adoption.
 - Never use stacked `-f` as candidate validation. Never use JSON reload output
   on this deployment because it drops the acceptance warnings.
 - Model policy is operator data, not a mapping algorithm in the program.
-- Live installation awaits concrete assignments and isolated launch acceptance.
+- Model/effort counterparts are approved in `contrib/anthony-profile/examples/`.
+- Live installation awaits reviewed static membership and isolated launch acceptance.
 
 ## Files and interfaces
 
