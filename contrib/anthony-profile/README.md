@@ -75,7 +75,11 @@ model_reasoning_effort = "high"
 ```
 
 The helper reads but never creates or edits account homes or profile files. It
-rejects missing profiles and profiles containing other settings. The native
+rejects missing profiles and profiles containing other policy settings. Codex
+0.155.1 writes its own UI counters and hook-trust hashes into selected profiles;
+only `tui.model_availability_nux` integer counters and `hooks.state` entries
+containing a `trusted_hash` are allowed alongside effort. Executable hooks,
+model/account overrides, and unknown fields still reject validation. The native
 profile-file mechanism is described in
 [OpenAI's configuration documentation](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles).
 Existence and syntax are not evidence that a running session loaded the profile.
@@ -186,6 +190,16 @@ existing lifecycle runbook, and inspect both again afterward. Do not use reset a
 a convenient migration primitive: it clears in-flight work assignment. Lifecycle
 command output alone is not evidence of completion. The helper never decides that
 a busy seat is safe to interrupt.
+
+Suspension is asynchronous: an acknowledgement or a bead marked `suspended`
+can precede actual process exit. Wait for herdr/process evidence before waking
+the seat; otherwise the same process may simply remain alive. For Codex resume,
+also require a persisted provider conversation key on the session bead. The
+normal `gc prime --hook --hook-format codex` SessionStart hook records that key;
+herdr's separate identity-reporting hook alone does not. Keep both integrations
+when provisioning an account home. The isolated acceptance run verified fresh
+and resumed Sol/high and Opus/low, then mixed-state apply and undo; see the
+[verification record](VERIFICATION.md).
 
 Undo restores saved desired bytes through the same validator and soft-reload path.
 It is an idempotent restore, not a toggle: it retains its recovery target, so a

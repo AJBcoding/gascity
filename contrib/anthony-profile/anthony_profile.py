@@ -47,6 +47,33 @@ def read_toml(data):
         raise Error(f"invalid TOML: {exc}") from exc
 
 
+def effort_profile(policy, name):
+    """Allow effort policy plus only observed Codex-owned bookkeeping tables."""
+    invalid = Error(f"{name}: profile must be effort-only with an explicit supported effort; "
+                    "only Codex model-availability counters and hook trusted_hash state may accompany it")
+    if set(policy) - {"model_reasoning_effort", "tui", "hooks"}:
+        raise invalid
+    effort = policy.get("model_reasoning_effort")
+    if effort not in ("minimal", "low", "medium", "high", "xhigh"):
+        raise invalid
+    tui = policy.get("tui", {})
+    hooks = policy.get("hooks", {})
+    if (not isinstance(tui, dict) or set(tui) - {"model_availability_nux"}
+            or not isinstance(hooks, dict) or set(hooks) - {"state"}):
+        raise invalid
+    counters = tui.get("model_availability_nux", {})
+    state = hooks.get("state", {})
+    if (not isinstance(counters, dict) or any(type(v) is not int or v < 0 for v in counters.values())
+            or not isinstance(state, dict)):
+        raise invalid
+    for entry in state.values():
+        if (not isinstance(entry, dict) or set(entry) != {"trusted_hash"}
+                or not isinstance(entry["trusted_hash"], str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", entry["trusted_hash"])):
+            raise invalid
+    return effort
+
+
 def parse_variant(data):
     """Limit a variant to fully specified lane providers, never agent patches."""
     doc = read_toml(data)
@@ -299,10 +326,7 @@ class Switcher:
                 policy = read_toml(profile.read_bytes())
             except OSError as exc:
                 raise Error(f"{name}: cannot read effort profile {profile}: {exc}") from exc
-            if set(policy) != {"model_reasoning_effort"} or policy["model_reasoning_effort"] not in (
-                    "minimal", "low", "medium", "high", "xhigh"):
-                raise Error(f"{name}: profile must be effort-only with an explicit supported effort")
-            settings.update(home=home, profile=args[1], effort=policy["model_reasoning_effort"])
+            settings.update(home=home, profile=args[1], effort=effort_profile(policy, name))
         elif ancestor == "claude":
             if not defaults["effort"] or defaults["model"].startswith("gpt-") or args:
                 raise Error(f"{name}: Claude needs explicit model/effort and no Codex profile")

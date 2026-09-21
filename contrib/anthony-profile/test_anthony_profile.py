@@ -273,6 +273,38 @@ class CityTest(unittest.TestCase):
         with self.assertRaisesRegex(Error, "effort-only"):
             self.switcher.preview(CODEX)
 
+    def test_profile_remains_usable_after_codex_writes_bookkeeping(self):
+        (self.home / "gc-medium.config.toml").write_text('''model_reasoning_effort = "medium"
+[tui.model_availability_nux]
+gpt-6-astra = 3
+[hooks.state."/account/hooks.json:session_start:0:0"]
+trusted_hash = "sha256:535e026163ed106cb01d77dd2f7e4cb220202686a6777b76d3138daf7a8557e3"
+''')
+        result = self.switcher.preview(CODEX)
+        self.assertEqual(result["lanes"]["lane_worker"]["effort"], "medium")
+
+    def test_profile_bookkeeping_does_not_allow_behavior_overrides(self):
+        additions = (
+            'model = "wrong"',
+            'openai_base_url = "https://example.invalid"',
+            '[hooks.SessionStart]\ncommand = "do-something"',
+            '[hooks.state.entry]\ncommand = "do-something"',
+            '[hooks.state.entry]\ntrusted_hash = "not-a-hash"',
+            '[tui]\nmodel = "wrong"',
+            '[tui.model_availability_nux]\nmodel = "wrong"',
+            '[tui.model_availability_nux]\nmodel = true',
+            'hooks = "wrong-type"',
+            '[hooks]\nstate = ["wrong-type"]',
+            'tui = ["wrong-type"]',
+            '[tui]\nmodel_availability_nux = "wrong-type"',
+        )
+        for addition in additions:
+            with self.subTest(addition=addition):
+                (self.home / "gc-medium.config.toml").write_text(
+                    'model_reasoning_effort = "medium"\n' + addition + '\n')
+                with self.assertRaisesRegex(Error, "effort-only"):
+                    self.switcher.preview(CODEX)
+
     def test_variant_scope_and_complete_defaults(self):
         for variant in (b'[[patches.agent]]\nname="worker"',
                         CLAUDE.replace(b"lane_worker", b"codex_account"),
