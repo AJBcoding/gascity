@@ -318,8 +318,16 @@ trusted_hash = "sha256:535e026163ed106cb01d77dd2f7e4cb220202686a6777b76d3138daf7
         claude = parse_variant((example_dir / "claude.toml").read_bytes())
         codex = parse_variant((example_dir / "codex.toml").read_bytes())
         self.assertEqual(set(claude), set(codex))
-        self.assertEqual(len(claude), 4)
+        self.assertEqual(set(claude), {"lane_coordination", "lane_worker", "lane_recon"})
         self.assertTrue(all(p["option_defaults"]["effort"] == "" for p in codex.values()))
+
+    def test_haiku_choice_matches_canonical_launch_but_not_another_model(self):
+        candidate = CLAUDE.replace(b"claude-sonnet-5", b"haiku")
+        lane = self.switcher.preview(candidate)["lanes"]["lane_worker"]
+        observed = {"provider": "claude", "model": "claude-haiku-4-5-20251001", "effort": "low"}
+        self.assertEqual(compare_launch(lane, observed), "launch-matches; effective settings unverified")
+        self.assertEqual(compare_launch(lane, {**observed, "model": "claude-sonnet-5"}), "pending-cutover")
+        self.assertEqual(compare_launch(lane, {**observed, "model": None}), "unverified")
 
 
 class ObservationTest(unittest.TestCase):
@@ -444,6 +452,38 @@ env = {{ CODEX_HOME = {json.dumps(str(self.city / "account"))} }}
         self.assertEqual(after["lanes"]["lane_worker"]["model"], "gpt-5.6-luna")
         self.assertEqual(after["lanes"]["lane_worker"]["effort"], "medium")
         self.assertEqual((self.city / ACTIVE).read_bytes(), CLAUDE)
+
+    def test_shipped_variants_resolve_all_approved_lanes(self):
+        root = self.city / "city.toml"
+        root.write_text(root.read_text() + '\n[providers.codex_mac]\nbase = "provider:codex_account"\n')
+        for effort in ("low", "high"):
+            (self.city / f"account/gc-{effort}.config.toml").write_text(f'model_reasoning_effort = "{effort}"\n')
+        examples = Path(__file__).parent / "examples"
+        expected = {
+            "claude": {
+                "lane_coordination": ("claude-opus-5", "low"),
+                "lane_worker": ("claude-sonnet-5", "low"),
+                "lane_recon": ("claude-haiku-4-5-20251001", "low"),
+            },
+            "codex": {
+                "lane_coordination": ("gpt-5.6-sol", "high"),
+                "lane_worker": ("gpt-5.6-luna", "medium"),
+                "lane_recon": ("gpt-5.6-luna", "low"),
+            },
+        }
+        for family, lanes in expected.items():
+            with self.subTest(family=family):
+                result = self.switcher.preview((examples / f"{family}.toml").read_bytes())
+                self.assertEqual(set(result["lanes"]), set(lanes))
+                for name, (model, effort) in lanes.items():
+                    desired = result["lanes"][name]
+                    self.assertEqual((desired["provider"], desired["model"], desired["effort"]),
+                                     (family, model, effort))
+                    if family == "codex":
+                        self.assertEqual(desired["profile"], f"gc-{effort}")
+                        self.assertEqual(desired["home"], str(self.city / "account"))
+        self.assertEqual((self.city / ACTIVE).read_bytes(), CLAUDE)
+        self.assertFalse((self.city / PREVIOUS).exists())
 
     def test_unsafe_agent_pin_rejected_before_activation(self):
         pack = self.city / "pack/pack.toml"

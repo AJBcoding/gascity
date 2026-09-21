@@ -92,32 +92,44 @@ The helper does not invent a Claude-to-Codex capability equivalence.
 
 The operator approved these exact pairings on 2026-09-20. The
 [Claude](examples/claude.toml) and [Codex](examples/codex.toml) files contain the
-approved assignments; they are not yet installed in the live city.
+approved initial assignments; they are not yet installed in the live city.
 
 The [membership review](../../engdocs/design/2026-09-21-anthony-lane-membership-review.md)
-found that these four-lane examples are not installable unchanged with the
-deployed binary: the Haiku full ID and Astra provider default fail its model
-enum. It proposes three initial lanes, Haiku's existing alias with alias-aware
-status verification, and escalation deferred. Production effort profiles are
-also absent. These remain installation gates, not changes made by preview.
+was approved on 2026-09-21: 32 coordination templates, 14 workers, and boot in
+recon, with all concrete-provider exceptions preserved. The examples declare
+only these three lanes. Escalation remains an approved future mapping, not an
+unused provider definition: the deployed binary rejects Astra even when no
+agent references it. Production effort profiles and live installation remain
+separate prerequisites.
 
 | Lane | Claude | Codex |
 | --- | --- | --- |
 | Coordination, research, maintenance | Opus / low | Sol / high |
 | Workers | Sonnet / low | Luna / medium |
 | Recon | Haiku / low | Luna / low |
-| Escalation | Fable / high | Astra / high |
+| Escalation, deferred | Fable / high | Astra / high |
 
 These are operator-chosen counterparts, not claims of equivalent capabilities.
 Existing concrete-provider exceptions remain untouched. Coordination, research,
 and maintenance can share a lane because their assignment is identical.
+
+The deployed `gc` accepts the choice `haiku` but emits the full model ID
+`claude-haiku-4-5-20251001`. Its explain JSON does not expose the model-choice
+schema. The operator approved one narrow compatibility rule: on Claude lanes,
+status/preview report that full launch-model ID for `haiku`. The TOML retains
+`model = "haiku"`; other model strings are not rewritten. This is spelling
+compatibility, not a tier mapping. Recheck the rule against native launch argv
+after changing `gc` or the inherited model schema. A matching launch still does
+not prove effective settings after interactive or project-level overrides.
 
 ## One-time migration, separate from switching
 
 The helper deliberately does not migrate or install a live city's configuration.
 It refuses apply until the fixed include and an initial active lane file exist.
 
-1. Use the approved variants above and review the static template membership.
+1. Use the approved variants and
+   [static membership](../../engdocs/design/2026-09-21-anthony-lane-membership-review.md).
+   Revalidate the diff against current on-disk configuration before installing.
    Model approval does not create new researcher/recon pools. Preserve explicit
    concrete-provider exceptions, including Python419's Codex polecats.
 2. Prepare the migration in a separate city configuration checkout. Add this

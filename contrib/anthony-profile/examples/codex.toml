@@ -1,5 +1,6 @@
 # Operator-approved counterparts (2026-09-20); not installed.
 # codex_mac must supply CODEX_HOME with the selected effort-only profile files.
+# Escalation (Fable/high <-> Astra/high) is reserved, not declared yet.
 [providers.lane_coordination]
 base = "provider:codex_mac"
 option_defaults = { model = "gpt-5.6-sol", effort = "" }
@@ -14,8 +15,3 @@ args_append = ["--profile", "gc-medium"]
 base = "provider:codex_mac"
 option_defaults = { model = "gpt-5.6-luna", effort = "" }
 args_append = ["--profile", "gc-low"]
-
-[providers.lane_escalation]
-base = "provider:codex_mac"
-option_defaults = { model = "gpt-6-astra", effort = "" }
-args_append = ["--profile", "gc-high"]

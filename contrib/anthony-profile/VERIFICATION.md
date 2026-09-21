@@ -15,10 +15,12 @@ production session was changed by this implementation.
 
 ## Measured checks
 
-The full helper test invocation passed 46 tests: 37 hermetic tests, eight tests
+The full helper test invocation passed 48 tests: 38 hermetic tests, nine tests
 using the installed `gc` against owned temporary cities, and one using a private
 scratch snapshot of Anthony's full configuration. The ordinary invocation skips
-the nine opt-in installed-binary checks.
+the ten opt-in installed-binary checks. The latest full run took 8.783 seconds;
+the hermetic invocation took 0.087 seconds. These are single-run observations,
+not performance baselines.
 
 Coverage includes candidate replacement, relative pack imports, ignored `.gc`
 include loading, two-hop provider resolution, explicit profile validation,
@@ -38,8 +40,9 @@ waivers owned by `ga-80po0c.3` that expired on 2026-08-26. All six CLI shards an
 the other baseline jobs passed; the unit-core job contains that failure. No Go
 source or dependency file differs from the deploy-lineage base. This utility
 does not extend unrelated policy waivers or claim the full repository is green.
-The full output is in the local run's `unit-core.log` under
-`/var/folders/nz/lvjgdpvx1g9420rrwszk_t840000gn/T/gc-local-tests.rervxN/`.
+The September 21 rerun after the Haiku correction reproduced those same eight
+expired waivers. Its full output is in `unit-core.log` under
+`/var/folders/nz/lvjgdpvx1g9420rrwszk_t840000gn/T/gc-local-tests.j25peZ/`.
 
 Read-only process inspection found the current Python419 Furiosa process via
 herdr (`w2E:p3M`, PID 3334 at observation time):
@@ -88,12 +91,12 @@ status reported uncertainty rather than assuming they stopped or migrated.
 
 ## Membership-review correction — 2026-09-21
 
-The [review-only membership diff](../../engdocs/design/2026-09-21-anthony-lane-membership-review.md)
+The [membership diff](../../engdocs/design/2026-09-21-anthony-lane-membership-review.md)
 compares all existing templates and exposes gaps not exercised by the earlier
-worker-only snapshot test. The shipped four-lane examples do not validate
+worker-only snapshot test. The original four-lane examples did not validate
 unchanged: the deployed enum rejects the full Haiku ID in provider defaults
 and rejects Astra. The native Haiku alias emits the intended full model ID,
-but the helper's literal model comparison incorrectly reports that pair as
+but the helper's literal model comparison incorrectly reported that pair as
 pending cutover. Production effort profiles are also absent.
 
 A three-lane diagnostic candidate (Haiku alias, escalation omitted) passed
@@ -101,9 +104,24 @@ Claude preview and preserved all 75 existing concrete-provider entries.
 Exactly 47 existing templates joined lanes; 94 stayed unchanged. The corresponding
 Codex candidate passed native configuration resolution but correctly failed helper
 preview on a missing effort profile. No examples, helper code, live configuration,
-account homes, or sessions were changed by that review. Membership approval,
-alias-aware verification, actual-variant tests, and installation prerequisites
-remain open; representative canaries below do not close these gaps.
+account homes, or sessions were changed by that review.
+
+The operator subsequently approved that membership and a narrow Haiku spelling
+compatibility rule. The helper now translates only Claude's `haiku` choice to
+`claude-haiku-4-5-20251001` in desired launch evidence. Native explain JSON omits
+the schema, so this is an explicit deployment-specific rule, not runtime schema
+discovery. Revalidate it against launch argv after a binary or schema change.
+
+Test-first evidence: the Haiku comparison failed with false `pending-cutover`;
+the actual-example integration test failed on both the Haiku full ID and Astra.
+The corrected three-lane examples now both pass native validation and helper
+preview in private test cities, using effort-only profiles in a temporary account
+home. The tests assert all six model/effort assignments, selected Codex profiles
+and home, unchanged active bytes, and no undo-file creation. No provider process
+was launched for these tests. Production profiles and live installation remain
+pending; this closes the example-validation and spelling gaps, not deployment.
+The corrected Claude example also passed preview against the approved private
+47-template migration snapshot, reporting boot's intended full Haiku model ID.
 
 ## Remaining live-installation gates
 
@@ -117,14 +135,16 @@ remain open; representative canaries below do not close these gaps.
 | Same lane's resume preserves model and effort | Passed for Opus/low and Sol/high, with new PIDs and unchanged conversation IDs |
 | Codex native effort profiles through herdr, including effective effort | Passed: UI and turn-context records confirm high effort over a low-effort home default; no `=` effort argument |
 | Watcher remains quiet on ignored-file rename | Passed in isolated running city; watched-root edit served as a positive control |
-| Actual lane membership migration and preserved pins | Not installed; requires reviewed city diff and safe maintenance window |
+| Actual lane membership migration and preserved pins | 47-template diff approved; snapshot preserves all pins; not installed |
+| Actual shipped lane variants | Both three-lane examples validate and preview in isolated test cities; escalation deferred |
+| Production effort profiles and controlled installation | Not provisioned or installed; requires deliberate maintenance window |
 
 The operator approved the explicit cross-provider pairings on 2026-09-20:
 Opus/low ↔ Sol/high; Sonnet/low ↔ Luna/medium; Haiku/low ↔ Luna/low;
 Fable/high ↔ Astra/high. The files in `examples/` now record this approved policy,
 with existing concrete-provider exceptions preserved. This closes the model-mapping
 decision; representative launch/resume acceptance is now complete, while live
-membership and installation remain pending. This is not an availability test of
+installation remains pending. Membership is approved. This is not an availability test of
 every approved model or every production account/rig configuration. New
 researcher/recon pools and mandate prompts are not created by this utility.
 
@@ -196,6 +216,9 @@ helper separately from the uncompleted live-installation gates. The final review
 found no remaining important issues in the corrected paths and assessed the helper
 as ready to ship within its documented scope, not ready for live deployment.
 The September 21 profile-bookkeeping fix received a separate read-only review:
-no important findings, with the strict policy boundary retained. Runtime canaries
-now pass as recorded above; live membership review and controlled installation
+no important findings, with the strict policy boundary retained. A separate
+read-only review of the Haiku rule, actual-variant tests, three-lane examples,
+and approval record found no critical or important issues; the reviewer reran
+both focused hermetic tests successfully. Runtime canaries pass as recorded
+above and membership is approved; provisioning and controlled installation
 remain separate work.

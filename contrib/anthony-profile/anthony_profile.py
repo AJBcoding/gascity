@@ -330,6 +330,10 @@ class Switcher:
         elif ancestor == "claude":
             if not defaults["effort"] or defaults["model"].startswith("gpt-") or args:
                 raise Error(f"{name}: Claude needs explicit model/effort and no Codex profile")
+            # Deployed gc accepts only this choice spelling but emits the full
+            # model ID. Its explain JSON omits that schema; recheck on upgrades.
+            if defaults["model"] == "haiku":
+                settings["model"] = "claude-haiku-4-5-20251001"
         else:
             raise Error(f"{name}: unsupported lane ancestor {ancestor}; expected claude or codex")
         return settings

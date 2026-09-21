@@ -1,13 +1,15 @@
 # Anthony lane membership: proposed diff
 
-Status: **review only — not approved or installed**. Prepared 2026-09-21 from
+Status: **membership approved 2026-09-21; not installed**. Prepared 2026-09-21 from
 the current on-disk city at `/Users/anthonybyrnes/code/cities/anthony`, including
 uncommitted configuration and convention-loaded agent files, not from Git HEAD.
 
 This is the membership review requested after the
 [manual-switcher design](2026-09-20-anthony-manual-switcher-review.md).
-The model pairings are approved; these assignments are not. No live config,
-account home, session, named-seat mode, pool limit, or running process was changed.
+The operator approved the 47-template membership, preserved exceptions, and
+deferred escalation below. This approval does not authorize live installation.
+No live config, account home, session, named-seat mode, pool limit, or running
+process was changed.
 
 ## Proposed membership
 
@@ -126,21 +128,22 @@ No reload, lifecycle operation, or live root edit was performed.
   fresh/always lifecycle, refinery idle settings, and singleton demand behavior.
   No missing/skipped composition warning was accepted.
 
-Three follow-ups precede installation:
+Follow-up disposition after approval:
 
 1. **Haiku spelling and status.** The deployed model-choice enum accepts
    `haiku`, whose flag mapping is exactly
    `--model claude-haiku-4-5-20251001`; it rejects the full ID as a provider
    default. The existing agent-level full ID passed config loading because
    that validation path differs. The scratch candidate below uses `haiku`,
-   preserving the intended model. The helper currently compares the choice
-   string with observed argv literally: a direct probe incorrectly returned
-   `pending-cutover` for this alias/full-ID pair. Before installation, make
-   status compare against the schema's emitted model, and test the actual
-   shipped variants. No helper or example file was changed in this review.
+   preserving the intended model. A direct probe originally returned false
+   `pending-cutover` for this alias/full-ID pair. The operator then approved
+   one explicit compatibility rule, now implemented and regression-tested:
+   translate Claude's `haiku` choice to this full ID in desired launch evidence.
+   Native explain JSON omits the model-choice schema, so this is not dynamic
+   schema discovery. Recheck the rule after binary or schema changes.
 2. **Escalation deferred, not substituted.** The deployed Codex enum rejects
    `gpt-6-astra`. Even an unused provider definition blocks whole-city
-   validation. Recommend omitting escalation from both installed variants
+   validation. Escalation is now omitted from both example variants
    until it has a member and a validated launch path. Keep Fable/high ↔
    Astra/high as the approved future assignment; do not silently use Sol instead.
 3. **Production effort profiles absent.** None of
@@ -150,14 +153,17 @@ Three follow-ups precede installation:
    action; no home files or credentials were changed here.
 
 The earlier worker-only snapshot test and representative Opus/Sol/Luna canaries
-did not validate every model in the example files. This review narrows those
-earlier results; it does not claim the current examples are installable.
+did not validate every model in the original example files. A subsequent
+test-first correction validates the actual three-lane examples in private cities
+with temporary effort profiles. Live deployment is still gated on provisioning
+and controlled installation; see the
+[verification record](../../contrib/anthony-profile/VERIFICATION.md).
 
 ## Source diff for review, not application
 
 This is the exact scratch delta for the three-lane Claude candidate. It is not
-a ready-to-apply production patch: alias-aware verification, reviewed named
-variants, effort profiles, and a watcher-controlled installation window still
+a ready-to-apply production patch: production effort profiles, fresh validation
+against current inputs, and a watcher-controlled installation window still
 come first. Old historical root comments are retained in this narrow diff;
 comments that describe superseded crew/model defaults need correction during
 the approved migration.
@@ -293,9 +299,9 @@ Kit's concrete project-lead pin is never targeted.
 
 ## Review boundary and reproduction baseline
 
-Recommendation: approve or revise the 47-template membership above, keep all
-listed exclusions, and defer the escalation provider definition. Approval of
-membership is not permission to deploy immediately; the installation gates above
+Decision: the operator approved the 47-template membership above, all listed
+exclusions, and deferred escalation. Approval of membership is not permission
+to deploy immediately; the installation gates above
 and a deliberate staged-cutover window remain necessary.
 
 The candidate lives only in the private inspection directory
