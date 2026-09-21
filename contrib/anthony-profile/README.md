@@ -94,6 +94,13 @@ The operator approved these exact pairings on 2026-09-20. The
 [Claude](examples/claude.toml) and [Codex](examples/codex.toml) files contain the
 approved assignments; they are not yet installed in the live city.
 
+The [membership review](../../engdocs/design/2026-09-21-anthony-lane-membership-review.md)
+found that these four-lane examples are not installable unchanged with the
+deployed binary: the Haiku full ID and Astra provider default fail its model
+enum. It proposes three initial lanes, Haiku's existing alias with alias-aware
+status verification, and escalation deferred. Production effort profiles are
+also absent. These remain installation gates, not changes made by preview.
+
 | Lane | Claude | Codex |
 | --- | --- | --- |
 | Coordination, research, maintenance | Opus / low | Sol / high |

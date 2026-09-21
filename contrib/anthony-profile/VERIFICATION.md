@@ -86,6 +86,25 @@ status reported uncertainty rather than assuming they stopped or migrated.
    templates in Anthony's snapshot: one city template and one in each of 15 rigs.
    This is visible in preview and does not itself launch seats.
 
+## Membership-review correction — 2026-09-21
+
+The [review-only membership diff](../../engdocs/design/2026-09-21-anthony-lane-membership-review.md)
+compares all existing templates and exposes gaps not exercised by the earlier
+worker-only snapshot test. The shipped four-lane examples do not validate
+unchanged: the deployed enum rejects the full Haiku ID in provider defaults
+and rejects Astra. The native Haiku alias emits the intended full model ID,
+but the helper's literal model comparison incorrectly reports that pair as
+pending cutover. Production effort profiles are also absent.
+
+A three-lane diagnostic candidate (Haiku alias, escalation omitted) passed
+Claude preview and preserved all 75 existing concrete-provider entries.
+Exactly 47 existing templates joined lanes; 94 stayed unchanged. The corresponding
+Codex candidate passed native configuration resolution but correctly failed helper
+preview on a missing effort profile. No examples, helper code, live configuration,
+account homes, or sessions were changed by that review. Membership approval,
+alias-aware verification, actual-variant tests, and installation prerequisites
+remain open; representative canaries below do not close these gaps.
+
 ## Remaining live-installation gates
 
 | Addendum A acceptance item | Evidence/status |
