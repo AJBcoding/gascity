@@ -7,6 +7,9 @@ or journal. It never resets, drains, wakes, suspends, or moves a session.
 Implementation target: Anthony's deployment, not an upstream provider API.
 The approved mechanism is Addendum A of the
 [design review](../../engdocs/design/2026-09-20-anthony-manual-switcher-review.md).
+For continuation, see the
+[September 23 handoff](../../engdocs/design/2026-09-23-anthony-manual-switcher-handoff.md),
+including approval boundaries and remaining installation work.
 
 ## Commands
 
